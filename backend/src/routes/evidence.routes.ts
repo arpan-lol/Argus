@@ -1,8 +1,13 @@
 import { Router } from 'express';
 import { evidenceController } from '../controllers/evidence.controller.js';
 import { asyncHandler } from '../utils/asyncHandler.util.js';
+import { mapController } from '../controllers/map.controller.js';
 
 const router = Router();
+router.get('/map/overview', mapController.overview);
+router.get('/map/view', asyncHandler(mapController.view));
+router.get('/map/locate/:id', mapController.locate);
+router.get('/map/node/:id', asyncHandler(mapController.node));
 router.get('/health', evidenceController.health);
 router.get('/corpus', evidenceController.corpus);
 router.get('/documents', evidenceController.documents);

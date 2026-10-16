@@ -1,3 +1,3 @@
-import { EvidenceWorkspace } from '@/components/workspace/EvidenceWorkspace';
+import { SourceWorkspace } from '@/components/workspace/SourceWorkspace';
 
-export default function Dashboard() { return <EvidenceWorkspace />; }
+export default function Dashboard() { return <SourceWorkspace />; }
