@@ -1,0 +1,132 @@
+{
+  "documents": [
+    {
+      "id": "demo-science-a",
+      "title": "Synthetic materials observation A",
+      "uri": "fixture://demo-science-a",
+      "revision": "1",
+      "text": "Material M retained 82 percent capacity after 500 cycles at 25 C.",
+      "metadata": {
+        "synthetic": true,
+        "domain": "materials"
+      }
+    },
+    {
+      "id": "demo-science-b",
+      "title": "Synthetic materials observation B",
+      "uri": "fixture://demo-science-b",
+      "revision": "1",
+      "text": "Material M retained 61 percent capacity after 500 cycles at 60 C.",
+      "metadata": {
+        "synthetic": true,
+        "domain": "materials"
+      }
+    },
+    {
+      "id": "demo-standard-a",
+      "title": "Synthetic protocol requirement",
+      "uri": "fixture://demo-standard-a",
+      "revision": "1",
+      "text": "Protocol P requires a verified certificate before connection establishment.",
+      "metadata": {
+        "synthetic": true,
+        "domain": "standards"
+      }
+    },
+    {
+      "id": "demo-standard-b",
+      "title": "Synthetic protocol exception",
+      "uri": "fixture://demo-standard-b",
+      "revision": "1",
+      "text": "Protocol P permits a cached certificate only when its validity has been checked.",
+      "metadata": {
+        "synthetic": true,
+        "domain": "standards"
+      }
+    }
+  ],
+  "evidence": [
+    {
+      "id": "demo-science-a-e1",
+      "document_id": "demo-science-a",
+      "start": 0,
+      "end": 65,
+      "quote": "Material M retained 82 percent capacity after 500 cycles at 25 C."
+    },
+    {
+      "id": "demo-science-b-e1",
+      "document_id": "demo-science-b",
+      "start": 0,
+      "end": 65,
+      "quote": "Material M retained 61 percent capacity after 500 cycles at 60 C."
+    },
+    {
+      "id": "demo-standard-a-e1",
+      "document_id": "demo-standard-a",
+      "start": 0,
+      "end": 75,
+      "quote": "Protocol P requires a verified certificate before connection establishment."
+    },
+    {
+      "id": "demo-standard-b-e1",
+      "document_id": "demo-standard-b",
+      "start": 0,
+      "end": 80,
+      "quote": "Protocol P permits a cached certificate only when its validity has been checked."
+    }
+  ],
+  "claims": [
+    {
+      "id": "demo-science-a-c1",
+      "subject": "material:M",
+      "predicate": "reported_observation",
+      "object": "demo-science-a-finding",
+      "evidence_ids": [
+        "demo-science-a-e1"
+      ],
+      "status": "fixture",
+      "qualifiers": {
+        "synthetic": true
+      }
+    },
+    {
+      "id": "demo-science-b-c1",
+      "subject": "material:M",
+      "predicate": "reported_observation",
+      "object": "demo-science-b-finding",
+      "evidence_ids": [
+        "demo-science-b-e1"
+      ],
+      "status": "fixture",
+      "qualifiers": {
+        "synthetic": true
+      }
+    },
+    {
+      "id": "demo-standard-a-c1",
+      "subject": "protocol:P",
+      "predicate": "states_requirement",
+      "object": "demo-standard-a-finding",
+      "evidence_ids": [
+        "demo-standard-a-e1"
+      ],
+      "status": "fixture",
+      "qualifiers": {
+        "synthetic": true
+      }
+    },
+    {
+      "id": "demo-standard-b-c1",
+      "subject": "protocol:P",
+      "predicate": "states_requirement",
+      "object": "demo-standard-b-finding",
+      "evidence_ids": [
+        "demo-standard-b-e1"
+      ],
+      "status": "fixture",
+      "qualifiers": {
+        "synthetic": true
+      }
+    }
+  ]
+}
