@@ -1,0 +1,55 @@
+# Cosmic Evidence Workspace
+
+A visual materials evidence workspace extended from [Cosmic Engine](https://github.com/arpan-lol/cosmic-engine). Browse real open-access articles, inspect colored evidence chunks and document structure, retrieve source passages, and follow citations into a bounded relationship graph.
+
+## Run locally
+
+Requirements: Node.js 22.13+, npm, Python 3.11+, and Docker for FalkorDB.
+
+```powershell
+docker compose up -d
+npm run setup
+npm run ingest -- --limit 150 --batch-size 25
+npm run dev
+```
+
+- Evidence workspace: http://localhost:3001
+- Express API: http://localhost:4000/api
+- FalkorDB browser: http://localhost:3000
+
+The first ingestion command discovers the available scientific collections, downloads a bounded batch of actual PMC full text, parses it, and writes a searchable local catalog. To continue acquisition toward a larger collection, rerun with a higher total target:
+
+```powershell
+npm run ingest -- --limit 6000 --batch-size 100
+```
+
+Acquisition is resumable. A discovery count is not a downloaded or indexed count. Network availability and source response times determine acquisition duration. Downloaded article text and local databases stay in ignored data/; reproduce them with the ingestion command after cloning.
+
+npm run build builds both application packages. Backend configuration is described in [backend/.env.example](backend/.env.example). Keep the unauthenticated workspace bound to localhost.
+
+## Source and graph semantics
+
+Use Case A is materials evidence review, initially adsorption and water remediation, with a broader catalysis discovery collection. Source articles are acquired through official PMC services and retain their source links and license metadata.
+
+JATS/XML article sections are logical navigation locations, not physical PDF pages. Chunks preserve exact source spans into normalized article text. The graph connects documents, sections, chunks, and explicitly labeled dictionary term mentions. A co-mention is not a validated experimental claim, a causal relationship, or a scientific endorsement.
+
+The first slice supports source-backed lexical retrieval and graph exploration without a model API key. Dense embeddings, model synthesis, and other unavailable strategies must remain visibly unavailable rather than return simulated results. Search scores are ranking values, not probabilities. Corpus search coverage and graph synchronization coverage are displayed separately.
+
+## Organization
+
+```text
+frontend/       Next.js dashboard, source viewer, graph and run inspector
+backend/        Express routes, controllers, services, errors and logging
+ingestion/      Resumable PMC discovery, acquisition, parsing and indexing
+scripts/        Local workspace launcher
+compose.yaml    Pinned FalkorDB service
+research/       Reproducible discovery audit
+engine/         Earlier independent Python integration spike
+fixtures/       Explicitly synthetic fixtures for the Python spike only
+```
+
+The application reuses Cosmic Engine's UI primitives, theme, strategy-control pattern, and Express utility conventions. It does not require Cosmic's authentication, Milvus, or PostgreSQL services. The original project remains unmodified.
+
+## Development agreement
+
+Read [agents.md](agents.md). Future architectural decisions require discussing the options with Arpan. Commit messages are lowercase. Local progress, goals, and detailed implementation notes live under the gitignored root docs/ directory.

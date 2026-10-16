@@ -1,0 +1,16 @@
+import { Router } from 'express';
+import { evidenceController } from '../controllers/evidence.controller.js';
+import { asyncHandler } from '../utils/asyncHandler.util.js';
+
+const router = Router();
+router.get('/health', evidenceController.health);
+router.get('/corpus', evidenceController.corpus);
+router.get('/documents', evidenceController.documents);
+router.get('/documents/:id', evidenceController.document);
+router.get('/graph', asyncHandler(evidenceController.graph));
+router.get('/graph/diagnostics', asyncHandler(evidenceController.diagnostics));
+router.post('/graph/sync', evidenceController.backfill);
+router.post('/search', asyncHandler(evidenceController.search));
+router.get('/runs', evidenceController.runs);
+router.get('/runs/:id', evidenceController.run);
+export default router;

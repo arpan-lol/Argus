@@ -17,7 +17,10 @@ let stopping = false;
 function stop(code = 0) {
   if (stopping) return;
   stopping = true;
-  for (const child of children) child.kill();
+  for (const child of children) {
+    if (process.platform === 'win32' && child.pid) spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore', windowsHide: true });
+    else child.kill();
+  }
   process.exitCode = code;
 }
 
