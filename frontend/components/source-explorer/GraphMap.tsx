@@ -39,6 +39,8 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
   const dimensions = useRef({ width: 800, height: 700 });
   const world = useRef<Bounds | null>(null);
   const groups = useRef<MapNode[]>([]);
+  const groupEdges = useRef<MapEdge[]>([]);
+  const fitted = useRef(false);
   const current = useRef<MapView>(empty);
   const screenNodes = useRef<{ node: MapNode; x: number; y: number; radius: number }[]>([]);
   const selected = useRef<string | null>(null);
@@ -78,13 +80,13 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
     const nodes = desired === 'groups' ? groups.current : view.nodes;
     const projected = new Map(nodes.map(node => [node.id, { node, x: (node.x - c.x) * c.zoom + width / 2, y: (node.y - c.y) * c.zoom + height / 2 }]));
     context.lineCap = 'round';
-    for (const edge of view.edges) {
+    for (const edge of desired === 'groups' ? groupEdges.current : view.edges) {
       const a = projected.get(edge.source), b = projected.get(edge.target);
       if (!a || !b) continue;
       if ((a.x < -30 && b.x < -30) || (a.x > width + 30 && b.x > width + 30) || (a.y < -30 && b.y < -30) || (a.y > height + 30 && b.y > height + 30)) continue;
       const active = [selected.current, hovered.current].some(id => id && (edge.source === id || edge.target === id));
-      context.strokeStyle = active ? (dark ? '#cfb46b' : '#9c833e') : (dark ? '#39443e' : '#d2ddd4');
-      context.lineWidth = active ? 1.8 : .7;
+      context.strokeStyle = active ? (dark ? '#cfb46b' : '#9c833e') : desired === 'groups' ? (dark ? '#66776b' : '#a3b4a7') : (dark ? '#39443e' : '#d2ddd4');
+      context.lineWidth = active ? 1.8 : desired === 'groups' ? 1 : .7;
       context.setLineDash(edge.derived || edge.type === 'SHARES_TERM' || edge.type === 'SHARED_MENTION' ? [3, 4] : []);
       context.beginPath(); context.moveTo(a.x, a.y); context.lineTo(b.x, b.y); context.stroke();
     }
@@ -94,13 +96,13 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
       const { node, x, y } = point;
       if (x < -100 || y < -70 || x > width + 100 || y > height + 70) continue;
       const active = node.id === selected.current || node.id === hovered.current;
-      const radius = node.type === 'group' ? Math.max(13, Math.min(23, 11 + Math.log2((node.count || 1) + 1))) : node.type === 'document' ? 7 : node.type === 'entity' ? 6 : 4.5;
-      screenNodes.current.push({ node, x, y, radius: radius + 7 });
+      const radius = node.type === 'group' ? Math.max(7, Math.min(17, c.zoom * 4096 * .33)) : node.type === 'document' ? 7 : node.type === 'entity' ? 6 : 4.5;
+      screenNodes.current.push({ node, x, y, radius: radius + (node.type === 'group' ? 3 : 7) });
       context.beginPath(); context.arc(x, y, radius + (active ? 4 : 0), 0, Math.PI * 2);
       context.fillStyle = active ? (dark ? '#655a39' : '#f0e8c9') : (dark ? '#202723' : '#fff'); context.fill();
       context.strokeStyle = colors[node.type]; context.lineWidth = active ? 2 : 1.2; context.stroke();
       if (node.type === 'group') {
-        context.font = '600 11px var(--font-geist-sans), sans-serif'; context.textAlign = 'center'; context.textBaseline = 'middle';
+        context.font = `600 ${radius < 12 ? 9 : 11}px sans-serif`; context.textAlign = 'center'; context.textBaseline = 'middle';
         context.fillStyle = dark ? '#e8d49e' : '#725d26'; context.fillText(String(node.count || ''), x, y);
       } else {
         context.beginPath(); context.arc(x, y, Math.max(2, radius - 3), 0, Math.PI * 2); context.fillStyle = colors[node.type]; context.fill();
@@ -119,6 +121,7 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
   }, []);
 
   const move = useCallback((next: Camera) => {
+    fitted.current = false;
     camera.current = { ...next, zoom: scale(next.zoom) };
     setZoomLabel(next.zoom < .08 ? 'Overview' : next.zoom < .45 ? 'Files' : 'Inside sources');
     draw();
@@ -129,6 +132,7 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
     cancelAnimationFrame(animation.current);
     const b = world.current, { width, height } = dimensions.current;
     move({ x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2, zoom: Math.min(width / Math.max(1, b.maxX - b.minX), height / Math.max(1, b.maxY - b.minY)) * .82 });
+    fitted.current = true;
   }, [move]);
 
   const fly = useCallback(async (nodeId: string) => {
@@ -163,6 +167,8 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
     let active = true;
     const element = host.current;
     if (!element) return;
+    const initialBounds = element.getBoundingClientRect();
+    dimensions.current = { width: initialBounds.width, height: initialBounds.height };
     const resize = new ResizeObserver(entries => {
       const { width, height } = entries[0].contentRect;
       dimensions.current = { width, height };
@@ -171,13 +177,13 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
         canvas.current.width = width * ratio; canvas.current.height = height * ratio;
         canvas.current.getContext('2d')?.setTransform(ratio, 0, 0, ratio, 0, 0);
       }
-      draw();
+      if (fitted.current) fit(); else draw();
     });
     resize.observe(element);
     const theme = new MutationObserver(draw); theme.observe(window.document.documentElement, { attributes: true, attributeFilter: ['class'] });
-    request<{ bounds: Bounds; groups?: MapNode[] }>('/overview').then(result => {
+    request<{ bounds: Bounds; groups?: MapNode[]; edges?: MapEdge[] }>('/overview').then(result => {
       if (!active) return;
-      world.current = result.bounds; groups.current = result.groups || [];
+      world.current = result.bounds; groups.current = result.groups || []; groupEdges.current = result.edges || [];
       fit(); setLoading(false);
     }).catch(failure => { if (active) { setError(failure.message); setLoading(false); } });
     return () => { active = false; disposed.current = true; resize.disconnect(); theme.disconnect(); cancelAnimationFrame(animation.current); };
