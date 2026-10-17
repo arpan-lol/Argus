@@ -1,12 +1,14 @@
 export interface ChatSource {
   id: string;
   jobId: string;
-  chunkId: string;
+  chunkId?: string;
+  sourceKind?: 'metadata';
+  metadataField?: 'authors' | 'indexedAt';
   documentId: string;
   documentTitle: string;
   sectionTitle: string;
-  startOffset: number;
-  endOffset: number;
+  startOffset?: number;
+  endOffset?: number;
   revisionId: string;
   processingVersion: string;
   text: string;
