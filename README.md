@@ -63,11 +63,11 @@ The existing catalog contains 6,000 documents, 133,562 sections, and 252,654 chu
 npm run migrate:legacy
 ```
 
-The dashboard labels the earlier dictionary-based map and catalog **Legacy graph** and **Legacy corpus**. Newly processed sources appear separately in Files with their real stage status and readers. Parsing is not semantic readiness, and imported dictionary links are not newly extracted assertions. Current dashboard chat retrieval still searches the legacy Postgres BM25 index. Slice 4 exposes published-source retrieval separately; the investigation agent and new semantic-map integration remain later work.
+The dashboard labels the earlier dictionary-based map and catalog **Legacy graph** and **Legacy corpus**. Newly processed sources appear separately in Files with their real stage status and readers. Parsing is not semantic readiness, and imported dictionary links are not newly extracted assertions. Dashboard chat uses a bounded LangGraph investigation over published semantic sources. The legacy catalog stays separate; new semantic-map integration remains later work.
 
 ## Published retrieval tools
 
-`GET /api/retrieval/tools` lists six typed tools: `search_sources`, `find_entities`, `read_chunks`, `inspect_assertions`, `expand_connections`, and `find_paths`. Invoke one with `POST /api/retrieval/tools/{name}` and body `{"arguments": {...}}`. The agent receives these contracts rather than schema access or arbitrary Cypher. `app.retrieval.bindings.get_tools()` returns LangChain StructuredTools for a later LangGraph ToolNode; no agent loop or MCP transport is enabled yet.
+`GET /api/retrieval/tools` lists six typed tools: `search_sources`, `find_entities`, `read_chunks`, `inspect_assertions`, `expand_connections`, and `find_paths`. Invoke one with `POST /api/retrieval/tools/{name}` and body `{"arguments": {...}}`. The agent receives these contracts rather than schema access or arbitrary Cypher. `app.retrieval.bindings.get_tools()` returns LangChain StructuredTools for typed retrieval integrations. The dashboard investigation uses these same bounded contracts; no MCP transport is enabled.
 
 `POST /api/retrieval/search` accepts `{"query":"your question","mode":"hybrid","limit":10}`. Modes are lexical, vector and hybrid. Search combines published Postgres BM25 with native FalkorDB chunk ANN using reciprocal-rank fusion, constant 60. Query embeddings use explicit retrieval-query semantics, matching the publication's provider/model/dimensions, with a persistent profile-keyed cache. Hybrid channel failure is explicitly reported as partial, never silently disguised as hybrid success.
 
@@ -82,3 +82,15 @@ Slice 4 was exercised on the one currently published semantic source, not the co
 The source map retains both Network and Trees layouts, stable positions, progressive viewport loading, citation navigation, and expanded modal viewing. The native FalkorDB Browser can inspect the new semantic graph immediately.
 
 Downloaded corpus files, provider credentials, databases, model artifacts, and detailed local progress remain outside Git. The root docs/ folder is intentionally ignored. Read agents.md for working agreements.
+
+## Conversational research
+
+`POST /api/chat` returns NDJSON events for acceptance, model activity, real tool calls, usage, and the final cited report. Greetings receive a conversational answer without keyword searches. Research answers use the six published-source tools, validate citation revisions and quotations, and open the cited processing job in Files. The legacy map retains its own identifiers and scope.
+
+Configure `ARGUS_CHAT_MODEL=gpt-5`, `ARGUS_CHAT_PROVIDER=azure_openai`, `ARGUS_CHAT_API=responses`, and `ARGUS_CHAT_BASE_URL=https://YOUR-RESOURCE.services.ai.azure.com/openai/v1` with `AZURE_OPENAI_API_KEY`. Leave `ARGUS_CHAT_API_VERSION` empty for this Responses endpoint. Chat has independent provider settings; changing it does not republish sources or change ingestion models. Responses requests use `store=false`.
+
+Postgres stores run events, tool receipts, budgets, and LangGraph checkpoints. `GET /api/chat/{runId}` reconnects to saved results; `POST /api/chat/{runId}/resume` retries an unfinished step. The browser retains at most 12 run IDs in session storage for reload recovery, and sends only two preceding turns as conversational context. New chat clears those browser references. There is no cross-conversation semantic memory.
+
+Each run admits at most eight model calls and eight retrieval calls, with 10,000 estimated context tokens, 2,048 maximum output tokens per call, and 64,000 reserved tokens overall. Two concurrent workers are allowed. A 180-second admission deadline and individual model request timeouts bound execution; in-flight work can exceed the admission deadline. Token reservations are estimates; reported usage is displayed separately. The optional $0.25 reservation limit applies only when both `ARGUS_CHAT_INPUT_USD_PER_MILLION` and `ARGUS_CHAT_OUTPUT_USD_PER_MILLION` are configured with deployment prices. No dollar cost is invented when prices are absent. Budget environment overrides in `.env.example` may lower these limits.
+
+Run recovery preserves previous budget reservations. Completed tool results replay from their receipts; a crash after a paid model call but before its checkpoint can cause that call to repeat on resume. Citation validation checks source identity and quotation offsets; it does not prove every generated interpretation. Available publication counts are shown in the chat and engine configuration.
