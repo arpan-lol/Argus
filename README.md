@@ -13,7 +13,7 @@ Copy-Item backend/python/.env.example backend/python/.env
 npm run dev
 ```
 
-Configure a Google or OpenAI credential in the ignored Python environment file before model processing. `npm run setup` creates the local Python virtual environment when missing. The first local GLiNER run downloads model weights. All services bind to localhost; authentication remains outside this implementation pass.
+Configure Azure LLM2 and the separate embedding deployment in ignored backend/.env or backend/python/.env before model processing. LLM2 is GPT-4.1 mini for all ingestion LLM work; LLM1/GPT-5 is reserved for the separately developed agent and is never selected by ingestion. `npm run setup` creates the local Python virtual environment when missing. The first local GLiNER run downloads model weights. All services bind to localhost; authentication remains outside this implementation pass.
 
 - Dashboard: http://localhost:3001/dashboard
 - Python API and OpenAPI: http://localhost:4000/docs
@@ -37,23 +37,39 @@ Stages: register → parse → normalize → chunk → embed → extract → res
 
 Each file has immutable originals, a content revision, a processing configuration fingerprint, stage attempts, per-item artifacts, timings, model receipts, and Postgres LangGraph checkpoints. A bounded worker queue processes explicitly scheduled uploads and retries. Registered inventory does not automatically trigger model calls. `--through chunk` stops before provider calls; `--register-only` only records the original and job.
 
-The parser supports JATS/XML and gzip, text/Markdown, HTML, text-bearing PDF, DOCX, CSV/TSV, XLSX, and JSON. It retains source blocks and logical/page/cell locations. Scanned PDFs require OCR, which is not enabled. Legacy Office binaries and presentations are not parsed. Binary formats outside the supported parsers fail explicitly.
+The parser supports JATS/XML and gzip, text/Markdown, HTML, text-bearing PDF, DOCX, CSV/TSV, XLSX, and JSON. It retains source blocks, roles and logical/page/cell locations. JATS preformatted body text and unknown text-bearing elements are retained. Ordered source/retained body text is accounted for exactly after excluding whitespace; actual body loss stops before model calls. Abstract-only files are allowed with explicit coverage labels. Scanned PDFs require OCR, which is not enabled. Legacy Office binaries and presentations are not parsed. Binary formats outside the supported parsers fail explicitly.
 
 Chunking adapts the published FalkorDB SDK v1.4.0 sentence/token algorithm: 512 tokens with two-sentence overlap. Source whitespace and offsets are retained. Oversized individual sentences remain whole and are labeled. The upstream Apache-2.0 license and modification notice are included under backend/python/licenses/.
 
-GLiNER supplies windowed candidate mentions. The configured LLM verifies entities and relationships against exact source quotes. An explicitly configured type vocabulary is optional; otherwise a recorded LLM step infers types from the document. Entity resolution uses FalkorDB vector candidates, exact-name candidates, two order-reversed batched judgments, and constraints against contradictory merges. Similarity alone never merges entities. Invalid model output retries with recorded validation feedback; there is no entity-only fallback.
+### Prompt-driven corpus settings
 
-Assertions preserve their source quotes, offsets, polarity, and conditions. Chunk, entity, and assertion vectors are indexed in FalkorDB. Semantic graphs use an embedding-space namespace such as `argus_sources_v2_<hash>`; model spaces are not mixed. Source replacements retire older graph records logically. Postgres and FalkorDB are separate transaction domains; interrupted publication requires an idempotent retry.
-
-## Legacy corpus and current boundaries
-
-The existing catalog contains 6,000 documents, 133,562 sections, and 252,654 chunks imported into Postgres. Existing SQLite databases are read only by the one-time migration utility:
+Supply one task prompt for a corpus:
 
 ```powershell
-npm run migrate:legacy
+npm run ingest -- --glob "data/raw/*.xml.gz" --prompt "Find materials, preparation methods and explicitly reported properties." --register-only
 ```
 
-The dashboard labels the earlier dictionary-based map and catalog **Legacy graph** and **Legacy corpus**. Newly processed sources appear separately in Files with their real stage status and readers. Parsing is not semantic readiness, and imported dictionary links are not newly extracted assertions. Current dashboard chat retrieval still searches the legacy Postgres BM25 index. Slice 4 exposes published-source retrieval separately; the investigation agent and new semantic-map integration remain later work.
+This example registers files and a pending shared profile without provider calls. Only an explicitly started run generates settings. Remove `--register-only` only when ingestion is intended. A saved profile can be reused with `--profile-id`.
+
+LLM2 chooses entity types, connection types and extraction instructions from the user task and a bounded corpus sample, then applies them automatically. It cannot change readers, chunking, model assignments, retries, budgets or concurrency. Sampling defaults to eight content-hash-selected documents with beginning/middle/end excerpts and a 32,000-character source-text budget. The inspected count, exclusions and rationale are recorded; this does not claim that the LLM read the whole corpus. The profile remains consistent across the run, and changed prompts/reader/model settings receive new identities.
+
+Uploads accept optional multipart `prompt` or `profile_id`. `POST /api/ingestion/profiles` accepts a prompt plus registered `source_ids`, returning a pending reusable profile. `GET /api/ingestion/profiles/{id}` exposes its settings and sample receipt. No approval step is involved. Without a shared profile, a file receives automatic settings based on that document; use a shared profile for corpus consistency.
+
+### Extraction, fallback and duplicate checks
+
+Local GLiNER proposes mentions; LLM2 checks them and extracts connections against exact source text. Chunk extraction gets two LLM attempts total. If both fail, saved GLiNER mentions survive without connections, with explicit unverified/fallback metadata. Missing credentials, deployment/access errors and configured spending limits remain actionable failures rather than being hidden as fallback. Corpus-settings generation must succeed before GLiNER can use its chosen types.
+
+Normal extracted mentions retain custom Falkor vector/name candidate lookup plus two order-reversed batched LLM duplicate judgments. Fallback mentions remain separate and are excluded from automatic duplicate comparisons. Their decisions are labeled deferred; automatic later backfill is not enabled.
+
+Source text, polarity, conditions and all exact quotation occurrences are retained. Multiple matching occurrences remain marked ambiguous, with a first location retained for navigation compatibility. Source grounding and LLM processing do not establish independent scientific correctness. Processing warnings appear with job stages and in published source metadata.
+
+Chunk, entity and connection vectors are indexed in FalkorDB. Azure text-embedding-3-large uses native 3072 dimensions with separate credentials from LLM2. Resource/deployment identities isolate vector spaces. Postgres and FalkorDB remain separate transaction domains; interrupted writes require retry. Activity updates are scoped to the changed source and affected entities.
+
+## Current corpus state
+
+On 2026-10-18 the user authorized backing up and clearing all derived corpus data. The active parsed corpus, graphs, vectors, jobs and search history are empty. Raw downloaded files and preserved originals remain outside Git, along with an ignored archival backup. Do not ingest from data/backups/ or restore old parsed artifacts into the new pipeline by default.
+
+Dashboard chat still uses the earlier BM25 endpoint and currently has no indexed data. The agent is being developed separately; ingestion preparation does not run the corpus. Source Explorer retains the existing layouts/readers and shows processing stages when files are explicitly submitted.
 
 ## Published retrieval tools
 
@@ -67,8 +83,8 @@ Traversal uses bounded BFS over source-supported assertion adjacency: up to thre
 
 For the pinned FalkorDB runtime, native cosine vector scores are distances (lower is nearer), confirmed by an identical-vector read returning approximately zero. Current upstream examples conflict with this runtime behavior; the API labels the signal `cosine_distance` explicitly. Neither BM25, distance nor fusion scores are confidence probabilities.
 
-Slice 4 was exercised on the one currently published semantic source, not the complete registered corpus. Its operation does not establish cross-document quality or corpus-scale performance. Tool runs are persisted in the existing runs API, independently of ingestion jobs.
+Slice 4 was previously exercised on one semantic source before the reset. That source had incomplete body coverage under the old parser and is no longer published. Those observations do not establish cross-document quality or corpus-scale performance; the revised Azure pipeline has not been run on the corpus. Tool runs are persisted in the existing runs API, independently of ingestion jobs.
 
-The source map retains both Network and Trees layouts, stable positions, progressive viewport loading, citation navigation, and expanded modal viewing. The native FalkorDB Browser can inspect the new semantic graph immediately.
+The source map retains both Network and Trees layouts, stable positions, progressive viewport loading, citation navigation, and expanded modal viewing. The native FalkorDB Browser can inspect semantic graphs once fresh ingestion creates them.
 
 Downloaded corpus files, provider credentials, databases, model artifacts, and detailed local progress remain outside Git. The root docs/ folder is intentionally ignored. Read agents.md for working agreements.

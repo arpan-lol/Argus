@@ -351,6 +351,7 @@ class IngestionPipeline:
         return resolve(self, job)
 
     def stage_validate(self, job):
+        from .publication import supported_spans
         document = self.artifact(job["id"], "normalize")
         chunks = self.artifact(job["id"], "chunk")["chunks"]
         assertions = 0
@@ -362,6 +363,8 @@ class IngestionPipeline:
                 raise ValueError("Chunk embedding missing, nonfinite or wrong dimensionality")
             extraction = self.item(job["id"], "extract", chunk["id"])
             self.validate_extraction(chunk, extraction)
+            for record in extraction["entities"] + extraction["relationships"]:
+                supported_spans(chunk, record)
             facts = extraction["relationships"]
             vectors = self.item(job["id"], "assertion_embed", chunk["id"])
             if vectors is None or len(vectors["vectors"]) != len(facts) or any(len(vector) != job["configuration"]["embeddingDimensions"] or not any(vector) or any(not math.isfinite(value) for value in vector) for vector in vectors["vectors"]):
