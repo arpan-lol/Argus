@@ -4,6 +4,7 @@ import os
 import threading
 import time
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, create_model
 
@@ -86,7 +87,7 @@ class Providers:
         self.config = config
         self.record_call = record_call or (lambda data: None)
 
-    def wait_for_capacity(self, model):
+    def wait_for_capacity(self, model, provider=None, endpoint=None):
         from app.database import connection
         maximum = float(os.getenv("ARGUS_LLM_REQUESTS_PER_MINUTE", "0"))
         if not math.isfinite(maximum) or maximum < 0:
@@ -94,22 +95,47 @@ class Providers:
         if maximum == 0:
             return 0
         interval = 60 / maximum
+        rate_key = ":".join(value for value in (provider or self.config["provider"], endpoint, model) if value)
         with connection() as conn:
-            row = conn.execute("INSERT INTO ingestion_provider_limits(rate_key,next_at) VALUES(%s,clock_timestamp()+(%s * interval '1 second')) ON CONFLICT(rate_key) DO UPDATE SET next_at=greatest(ingestion_provider_limits.next_at,clock_timestamp())+(%s * interval '1 second') RETURNING greatest(0,extract(epoch FROM next_at-clock_timestamp())-%s) AS wait", (self.config["provider"] + ":" + model, interval, interval, interval)).fetchone()
+            row = conn.execute("INSERT INTO ingestion_provider_limits(rate_key,next_at) VALUES(%s,clock_timestamp()+(%s * interval '1 second')) ON CONFLICT(rate_key) DO UPDATE SET next_at=greatest(ingestion_provider_limits.next_at,clock_timestamp())+(%s * interval '1 second') RETURNING greatest(0,extract(epoch FROM next_at-clock_timestamp())-%s) AS wait", (rate_key, interval, interval, interval)).fetchone()
         wait = float(row["wait"])
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline:
             time.sleep(min(30, max(0, deadline - time.monotonic())))
         return wait
 
-    def credentials(self):
-        if self.config["provider"] == "google":
+    def credentials(self, provider=None):
+        provider = provider or self.config["provider"]
+        if provider == "google":
             key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-        else:
+        elif provider == "openai":
             key = os.getenv("OPENAI_API_KEY")
+        elif provider == "azure_openai":
+            key = os.getenv("AZURE_OPENAI_API_KEY")
+        elif provider == "azure_inference":
+            key = os.getenv("AZURE_INFERENCE_API_KEY")
+        else:
+            raise ConfigurationRequired(f"Unsupported model provider '{provider}'")
         if not key:
-            raise ConfigurationRequired(f"Configure credentials for provider '{self.config['provider']}' to continue. Completed stages are retained.")
+            raise ConfigurationRequired(f"Configure credentials for provider '{provider}' to continue. Completed stages are retained.")
         return key
+
+    def llm_profile(self, judge=False):
+        provider = self.config.get("resolutionProvider" if judge else "llmProvider", self.config["provider"])
+        endpoint = self.config.get("resolutionBaseUrl" if judge else "llmBaseUrl")
+        version = self.config.get("resolutionApiVersion" if judge else "llmApiVersion")
+        if provider in ("azure_openai", "azure_inference"):
+            if not endpoint:
+                raise ConfigurationRequired(f"Configure the {provider} base URL for this processing profile")
+            parsed = urlsplit(endpoint)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+                raise ConfigurationRequired("Azure base URLs must be HTTPS URLs without credentials, query strings or fragments")
+            endpoint = endpoint.rstrip("/")
+            if provider == "azure_inference" and not version:
+                raise ConfigurationRequired("Configure the Azure inference API version")
+        elif provider not in ("google", "openai"):
+            raise ConfigurationRequired(f"Unsupported LLM provider '{provider}'")
+        return provider, endpoint, version
 
     def embed(self, texts):
         key = self.credentials()
@@ -167,28 +193,53 @@ class Providers:
         return vector
 
     def structured(self, schema, prompt, payload, judge=False):
-        key = self.credentials()
+        provider, endpoint, version = self.llm_profile(judge)
+        key = self.credentials(provider)
         model = self.config["resolutionModel"] if judge else self.config["extractionModel"]
-        parameters = {"maxOutputTokens": self.config["maxOutputTokens"], "timeoutSeconds": self.config["modelTimeoutSeconds"], "thinkingBudget": self.config["resolutionThinkingBudget"] if judge else self.config["extractionThinkingBudget"], "temperature": 0}
-        parameters["rateWaitSeconds"] = self.wait_for_capacity(model)
-        if self.config["provider"] == "google":
+        parameters = {"maxOutputTokens": self.config["maxOutputTokens"], "timeoutSeconds": self.config["modelTimeoutSeconds"], "temperature": None if provider == "azure_openai" else 0}
+        if provider == "google":
+            parameters["thinkingBudget"] = self.config["resolutionThinkingBudget"] if judge else self.config["extractionThinkingBudget"]
+        if endpoint:
+            parameters.update(baseUrl=endpoint, apiVersion=version)
+        parameters["rateWaitSeconds"] = self.wait_for_capacity(model, provider, endpoint)
+        if provider == "google":
             from langchain_google_genai import ChatGoogleGenerativeAI
             client = ChatGoogleGenerativeAI(model=model, google_api_key=key, temperature=0, max_retries=0, timeout=parameters["timeoutSeconds"], max_output_tokens=parameters["maxOutputTokens"], thinking_budget=parameters["thinkingBudget"])
-        else:
+        elif provider == "openai":
             from langchain_openai import ChatOpenAI
             client = ChatOpenAI(model=model, api_key=key, temperature=0, max_retries=0, timeout=parameters["timeoutSeconds"], max_tokens=parameters["maxOutputTokens"])
         started = time.monotonic()
+        receipt = {"kind": "llm", "provider": provider, "model": model, "cost": None, "parameters": parameters, "promptVersion": self.config["promptVersion"]}
         try:
-            result = client.with_structured_output(schema, include_raw=True, method="json_schema").invoke([("system", prompt), ("human", json.dumps(payload, ensure_ascii=False))])
+            if provider in ("azure_openai", "azure_inference"):
+                from openai import OpenAI
+                token_parameter = "max_completion_tokens" if provider == "azure_openai" else "max_tokens"
+                options = {token_parameter: parameters["maxOutputTokens"]}
+                if parameters["temperature"] is not None:
+                    options["temperature"] = parameters["temperature"]
+                parameters["tokenParameter"] = token_parameter
+                with OpenAI(api_key=key, base_url=endpoint + "/", default_headers={"api-key": key}, default_query={"api-version": version} if version else {}, timeout=parameters["timeoutSeconds"], max_retries=0) as azure:
+                    response = azure.chat.completions.parse(model=model, messages=[{"role": "system", "content": prompt}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], response_format=schema, **options)
+                if len(response.choices) != 1:
+                    raise ValueError("Structured LLM response must contain one choice")
+                message = response.choices[0].message
+                parsed = message.parsed
+                parsing_error = "Model refused the structured request" if message.refusal else None
+                usage = response.usage.model_dump(mode="json") if response.usage else None
+                receipt["responseModel"] = response.model
+            else:
+                result = client.with_structured_output(schema, include_raw=True, method="json_schema").invoke([("system", prompt), ("human", json.dumps(payload, ensure_ascii=False))])
+                parsed, parsing_error = result.get("parsed"), result.get("parsing_error")
+                usage = result["raw"].usage_metadata
         except Exception as error:
-            self.record_call({"kind": "llm", "status": "failed", "model": model, "durationMs": (time.monotonic() - started) * 1000, "usage": None, "cost": None, "error": str(error), "parameters": parameters, "promptVersion": self.config["promptVersion"]})
+            self.record_call({**receipt, "status": "failed", "durationMs": (time.monotonic() - started) * 1000, "usage": None, "error": str(error)})
             if "GenerateRequestsPerDay" in str(error):
                 raise ConfigurationRequired(f"Daily generation quota exhausted for {model}. Completed outputs are retained; resume when this model's quota is available.") from error
             raise
-        self.record_call({"kind": "llm", "status": "complete", "model": model, "durationMs": (time.monotonic() - started) * 1000, "usage": result["raw"].usage_metadata, "cost": None, "validStructuredOutput": result.get("parsed") is not None and not result.get("parsing_error"), "parameters": parameters, "promptVersion": self.config["promptVersion"]})
-        if result.get("parsing_error") or result.get("parsed") is None:
-            raise ValueError(f"Structured LLM output invalid: {result.get('parsing_error')}")
-        return result["parsed"].model_dump()
+        self.record_call({**receipt, "status": "complete", "durationMs": (time.monotonic() - started) * 1000, "usage": usage, "validStructuredOutput": parsed is not None and not parsing_error})
+        if parsing_error or parsed is None:
+            raise ValueError(f"Structured LLM output invalid: {parsing_error}")
+        return parsed.model_dump()
 
     def gliner(self, chunk, types):
         with _model_lock:

@@ -10,7 +10,7 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 def processing_config():
     provider = os.getenv("ARGUS_MODEL_PROVIDER", "google" if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") else "openai")
-    return {
+    config = {
         "contract": "argus-ingestion-2",
         "semanticGraph": os.getenv("ARGUS_SEMANTIC_GRAPH", "argus_sources_v2"),
         "parser": "source-blocks-2",
@@ -50,6 +50,20 @@ def processing_config():
         "maxExtractedTextCharacters": int(os.getenv("ARGUS_MAX_EXTRACTED_TEXT_CHARACTERS", "20971520")),
         "maxArchiveMembers": int(os.getenv("ARGUS_MAX_ARCHIVE_MEMBERS", "10000")),
     }
+    llm_provider = os.getenv("ARGUS_LLM_PROVIDER")
+    if llm_provider:
+        resolution_provider = os.getenv("ARGUS_RESOLUTION_PROVIDER") or llm_provider
+        endpoints = {"azure_openai": os.getenv("AZURE_OPENAI_BASE_URL"), "azure_inference": os.getenv("AZURE_INFERENCE_ENDPOINT")}
+        versions = {"azure_inference": os.getenv("AZURE_INFERENCE_API_VERSION", "2024-05-01-preview")}
+        config.update({
+            "llmProvider": llm_provider,
+            "resolutionProvider": resolution_provider,
+            "llmBaseUrl": os.getenv("ARGUS_LLM_BASE_URL") or endpoints.get(llm_provider),
+            "resolutionBaseUrl": os.getenv("ARGUS_RESOLUTION_BASE_URL") or endpoints.get(resolution_provider),
+            "llmApiVersion": os.getenv("ARGUS_LLM_API_VERSION") or versions.get(llm_provider),
+            "resolutionApiVersion": os.getenv("ARGUS_RESOLUTION_API_VERSION") or versions.get(resolution_provider),
+        })
+    return config
 
 
 def fingerprint(value):
