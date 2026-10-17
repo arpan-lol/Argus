@@ -35,9 +35,11 @@ class Session:
         self.cache = {}
         self.manifest = {}
         self.jobs = []
-        self.limits = {"databaseCalls": 64, "elapsedMs": 30000, "graphQueryMs": 1500, "sqlQueryMs": 1500, "annCandidates": 240, "fanout": 20, "frontier": 40, "outputCharacters": 64000, "chunkCharacters": 12000}
-        rows = self.sql("SELECT p.job_id,p.source_id,p.published_at,j.revision,j.processing_version FROM ingestion_publications p JOIN ingestion_jobs j ON j.id=p.job_id JOIN published_documents d ON d.id=p.source_id WHERE p.active AND p.counts->>'graph'=%s AND d.metadata->>'revisionId'=j.revision AND d.metadata->>'processingVersion'=j.processing_version ORDER BY p.source_id", (self.graph_name,), "publication snapshot")
-        self.manifest = {row["job_id"]: row for row in rows}
+        self.limits = {"databaseCalls": 64, "elapsedMs": 30000, "elapsedPolicy": "soft admission budget; in-flight operations and final consistency/persistence may finish later", "graphQueryMs": 1500, "sqlQueryMs": 1500, "publicationSnapshot": 10000, "annCandidates": 240, "fanout": 20, "frontier": 40, "outputCharacters": 64000, "chunkCharacters": 12000}
+        rows = self.sql("SELECT p.job_id,p.source_id,p.published_at,j.revision,j.processing_version FROM ingestion_publications p JOIN ingestion_jobs j ON j.id=p.job_id JOIN published_documents d ON d.id=p.source_id WHERE p.active AND p.counts->>'graph'=%s AND d.metadata->>'revisionId'=j.revision AND d.metadata->>'processingVersion'=j.processing_version ORDER BY p.source_id LIMIT 10001", (self.graph_name,), "publication snapshot")
+        if len(rows) > self.limits["publicationSnapshot"]:
+            self.truncate("Publication snapshot capped at 10000 sources; search covers that snapshot only")
+        self.manifest = {row["job_id"]: row for row in rows[:self.limits["publicationSnapshot"]]}
         self.jobs = list(self.manifest)
 
     def check(self):
@@ -109,8 +111,18 @@ class Session:
         return vector
 
     def entity(self, entity_id):
-        rows = self.cypher("MATCH (e:Entity {id:$id})<-[:MENTIONS]-(c:Chunk) WHERE c.active=true AND c.jobId IN $jobs RETURN e.id,e.label,e.type,e.description LIMIT 1", {"id": entity_id}, "resolve published entity")
-        return {"id": rows[0][0], "name": rows[0][1], "type": rows[0][2], "description": rows[0][3]} if rows else None
+        rows = self.cypher("MATCH (e:Entity {id:$id})<-[:RESOLVED_TO]-(m:Mention)<-[:HAS_MENTION]-(c:Chunk) WHERE c.active=true AND m.active=true AND c.jobId IN $jobs AND m.jobId=c.jobId RETURN e.id,e.label,e.type,e.description,c.id,m.text,m.startOffset,m.endOffset ORDER BY c.id,m.id LIMIT 1", {"id": entity_id}, "resolve published entity")
+        if not rows:
+            return None
+        row = rows[0]
+        support = self.chunks([row[4]]).get(row[4])
+        if not support:
+            return None
+        chunk = support["payload"]
+        start, end = row[6], row[7]
+        if start < chunk["startOffset"] or end > chunk["endOffset"] or end - start != len(row[5]) or chunk["text"][start - chunk["startOffset"]:end - chunk["startOffset"]] != row[5]:
+            return None
+        return {"id": row[0], "name": row[1], "type": row[2], "description": (row[3] or "")[:1200], "mention": row[5], "citation": self.citation(support, start, end), "metadataMeaning": "Canonical identity metadata; current source wording is in mention"}
 
     def finish(self, payload, outcome=None):
         current = []
@@ -124,8 +136,7 @@ class Session:
             self.warnings.append("Publication changed during retrieval. Results withheld; retry against the current revision.")
         response = {"runId": self.id, "tool": self.tool, "arguments": self.arguments, "outcome": outcome or ("truncated" if self.truncations else "answered" if payload.get("items") or payload.get("paths") else "not_found"), **payload, "graphName": self.graph_name, "publicationCount": len(self.jobs), "trace": self.trace, "warnings": self.warnings, "truncations": self.truncations, "budget": {"limits": self.limits, "databaseCalls": self.calls, "elapsedMs": (time.monotonic() - self.started) * 1000}, "generation": False}
         if len(json.dumps(response, ensure_ascii=False)) > self.limits["outputCharacters"]:
-            response = {**response, "items": [], "paths": [], "outcome": "output_budget_exceeded", "truncations": [*self.truncations, "Structured result exceeds response budget; request fewer results"]}
-            response.pop("discoveryTree", None)
+            response = {"runId": self.id, "tool": self.tool, "outcome": "output_budget_exceeded", "items": [], "paths": [], "graphName": self.graph_name, "publicationCount": len(self.jobs), "generation": False, "truncations": ["Structured result exceeds 64000 characters; request fewer results"], "budget": {"databaseCalls": self.calls, "elapsedMs": (time.monotonic() - self.started) * 1000}}
         with connection() as conn:
             conn.execute("INSERT INTO api_runs(id,payload) VALUES(%s,%s)", (self.id, Jsonb(response)))
         return response

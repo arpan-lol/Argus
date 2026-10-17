@@ -1,0 +1,50 @@
+import logging
+
+from fastapi import APIRouter, HTTPException
+from pydantic import ValidationError
+
+from . import tools
+from .contracts import Invocation, SearchSources, TOOLS, catalog
+from .session import BudgetReached, Session
+
+
+logger = logging.getLogger("argus.retrieval")
+router = APIRouter()
+
+
+def execute(name, arguments):
+    if name not in TOOLS:
+        raise HTTPException(404, "Unknown retrieval tool")
+    try:
+        validated = TOOLS[name][0].model_validate(arguments)
+    except ValidationError as error:
+        raise HTTPException(400, [{"field": ".".join(map(str, item["loc"])), "message": item["msg"]} for item in error.errors()]) from error
+    session = Session(name, validated.model_dump())
+    if not session.jobs:
+        session.warnings.append("No active semantic publications for the configured embedding profile. Legacy corpus is not searched by these tools.")
+        return session.finish({"items": []}, "no_published_sources")
+    try:
+        payload = getattr(tools, name)(session, validated)
+        outcome = "unknown_entity" if payload.get("unknownEntityIds") else "partial" if payload.get("partial") else None
+    except BudgetReached:
+        payload, outcome = {"items": []}, "budget_exceeded"
+    except Exception:
+        logger.exception("Retrieval tool failed: %s run=%s", name, session.id)
+        session.warnings.append("Requested retrieval failed; no results inferred. Inspect this run's trace and server logs.")
+        payload, outcome = {"items": []}, "unavailable"
+    return session.finish(payload, outcome)
+
+
+@router.get("/retrieval/tools")
+def tool_catalog():
+    return {"tools": catalog(), "scope": "Published semantic sources only", "rawCypher": False, "schemaAccess": False, "agentLoop": False, "langgraphBinding": "app.retrieval.bindings.get_tools"}
+
+
+@router.post("/retrieval/tools/{name}")
+def invoke(name: str, body: Invocation):
+    return execute(name, body.arguments)
+
+
+@router.post("/retrieval/search")
+def search(body: SearchSources):
+    return execute("search_sources", body.model_dump())

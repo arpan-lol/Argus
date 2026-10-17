@@ -71,7 +71,7 @@ class Invocation(Arguments):
 
 TOOLS = {
     "search_sources": (SearchSources, "Find published source chunks with BM25, vectors or reciprocal-rank fusion. Scores measure relevance, never confidence."),
-    "find_entities": (FindEntities, "Find published entities by literal name or alias. Return source-supported identities; do not silently choose between ambiguous matches."),
+    "find_entities": (FindEntities, "Find published entities by literal canonical name or current source mention. Return source-supported identities; do not silently choose between ambiguous matches."),
     "read_chunks": (ReadChunks, "Read published chunks with exact source offsets and connected entity identities. Shared mentions are navigation, not scientific claims."),
     "inspect_assertions": (InspectAssertions, "Inspect source-grounded assertions involving an existing entity. Preserve polarity, conditions and source quotations."),
     "expand_connections": (ExpandConnections, "Follow bounded, directed semantic assertion hops from existing entity identities. Each hop retains its supporting source; composition is not a new scientific fact."),

@@ -9,6 +9,7 @@ from app.config import settings
 from app.database import migrate
 from app.routes.api import router
 from app.services.worker import IngestionWorkers
+from app.retrieval.routes import router as retrieval_router
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger=logging.getLogger("argus")
@@ -33,6 +34,7 @@ async def lifespan(app):
 app=FastAPI(title="Argus",version="0.2.0",lifespan=lifespan)
 app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_origin],allow_methods=["GET","POST"],allow_headers=["*"])
 app.include_router(router,prefix="/api")
+app.include_router(retrieval_router,prefix="/api")
 try:
     from app.ingestion.routes import router as ingestion_router
     app.include_router(ingestion_router,prefix="/api")
