@@ -41,6 +41,8 @@ def chunk_document(document, scope, config):
             "startOffset": left, "endOffset": right, "tokenCount": tokens,
             "offsetUnit": "unicode_code_point", "blockOrdinals": [block["ordinal"] for block in related],
             "sourceLocations": [block["location"] for block in related],
+            "sourceContext": [{"kind": block["kind"], "role": block.get("role", "content"), "location": block["location"]} for block in related],
+            "actualTokenCount": len(encoding.encode(text[left:right])),
             "oversizedSentence": tokens > config["chunkTokens"],
         })
         if end >= len(bounds):

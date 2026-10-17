@@ -93,7 +93,7 @@ class Session:
         return {**self.citation(row), "text": text[:cap], "excerptEndOffset": chunk["startOffset"] + min(len(text), cap), "textTruncated": clipped}
 
     def query_vector(self, query):
-        profile = {key: self.config[key] for key in ("provider", "embeddingModel", "embeddingDimensions")}
+        profile = {key: self.config.get(key) for key in ("provider", "embeddingModel", "embeddingDimensions", "embeddingResourceIdentity")}
         profile["task"] = "retrieval_query"
         key = fingerprint([profile, query])
         cached = self.sql("SELECT vector,receipt FROM retrieval_query_embeddings WHERE id=%s AND profile=%s", (key, Jsonb(profile)), "query embedding cache")
