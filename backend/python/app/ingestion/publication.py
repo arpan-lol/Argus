@@ -1,6 +1,5 @@
 import json
 import math
-import os
 
 from falkordb import FalkorDB
 from psycopg.types.json import Jsonb
@@ -9,12 +8,15 @@ from app.config import settings
 from app.database import connection
 
 from .config import fingerprint
-from .providers import Providers
+from .extraction import source_span
 from .structure import sections_for, chunk_sections
 
 
 def semantic_graph_name(config):
-    return config["semanticGraph"] + "_" + fingerprint([config["provider"], config["embeddingModel"], config["embeddingDimensions"]])[:10]
+    space = [config["provider"], config["embeddingModel"], config["embeddingDimensions"]]
+    if config.get("embeddingResourceIdentity"):
+        space.append(config["embeddingResourceIdentity"])
+    return config["semanticGraph"] + "_" + fingerprint(space)[:10]
 
 
 def graph_connection(config):
@@ -31,6 +33,36 @@ def index(graph, label, dimensions):
 
 def publication_lease_key(source_id):
     return "argus-source-publication:" + source_id
+
+
+def supported_spans(chunk, record):
+    quote = record["quote"]
+    spans = record.get("sourceSpans")
+    if spans is None:
+        spans = []
+        cursor = 0
+        while quote and (start := chunk["text"].find(quote, cursor)) >= 0:
+            spans.append(source_span(chunk, start, start + len(quote)))
+            cursor = start + 1
+    if not spans:
+        raise ValueError("Published source records require an exact source occurrence")
+    verified = []
+    for span in spans:
+        start, end = span.get("chunkStart"), span.get("chunkEnd")
+        if isinstance(start, bool) or isinstance(end, bool) or not isinstance(start, int) or not isinstance(end, int):
+            raise ValueError("Published source occurrence requires integer offsets")
+        if not 0 <= start < end <= len(chunk["text"]) or chunk["text"][start:end] != quote:
+            raise ValueError("Published source occurrence does not match its source text")
+        expected = source_span(chunk, start, end)
+        if any(span.get(key) != expected[key] for key in ("startOffset", "endOffset", "offsetUnit")):
+            raise ValueError("Published source occurrence absolute offsets are inconsistent")
+        if expected not in verified:
+            verified.append(expected)
+    verified.sort(key=lambda span: (span["chunkStart"], span["chunkEnd"]))
+    primary = record.get("sourceSpan")
+    if primary is not None and primary not in verified:
+        raise ValueError("Primary source occurrence is not one of the recorded exact occurrences")
+    return verified, primary or verified[0], "multiple_occurrences" if len(verified) > 1 else "exact"
 
 
 def publish(pipeline, job):
@@ -64,7 +96,7 @@ def _publish(pipeline, job):
     metadata = document["metadata"]
     title = metadata.get("title") or job["filename"]
     graph = graph_connection(job["configuration"])
-    provider = Providers(job["configuration"], pipeline.call_recorder(job["id"]))
+    affected_entities = {row[0] for row in graph.query("MATCH (m:Mention {documentId:$source})-[:RESOLVED_TO]->(e:Entity) RETURN DISTINCT e.id", {"source": job["source_id"]}).result_set}
     for label in ("Chunk", "Entity", "Assertion"):
         index(graph, label, job["configuration"]["embeddingDimensions"])
     for label in ("Document", "SourceRevision", "Section", "Chunk", "Entity", "Mention", "Assertion", "ResolutionDecision"):
@@ -75,10 +107,11 @@ def _publish(pipeline, job):
                 raise
     graph.query("MERGE (d:Document {id:$id}) ON CREATE SET d.title=$title,d.active=false MERGE (r:SourceRevision {id:$job}) SET r.sourceId=$id,r.revision=$revision,r.processingVersion=$version,r.active=false MERGE (d)-[:HAS_REVISION]->(r)", {"id": job["source_id"], "job": job["id"], "title": title, "revision": job["revision"], "version": job["processing_version"]})
     sections = sections_for(document, job)
-    graph.query("MATCH (s:Section {jobId:$job}) SET s.projectionCurrent=false", {"job": job["id"]})
+    graph.query("MATCH (s:Section {documentId:$source}) WHERE s.jobId=$job SET s.projectionCurrent=false", {"source": job["source_id"], "job": job["id"]})
     for section in sections:
         graph.query("MATCH (d:Document {id:$document}),(r:SourceRevision {id:$job}) MERGE (s:Section {id:$id}) SET s.documentId=$document,s.jobId=$job,s.title=$title,s.startOffset=$start,s.endOffset=$end,s.projectionCurrent=true,s.active=false MERGE (d)-[:HAS_SECTION]->(s) MERGE (r)-[:HAS_SECTION]->(s)", {"document": job["source_id"], "job": job["id"], "id": section["id"], "title": section["title"], "start": section["startOffset"], "end": section["endOffset"]})
-    mention_count = assertion_count = 0
+    mention_count = assertion_count = fallback_count = 0
+    extraction_warnings = []
     entities = {}
     accepted_aliases = {}
     publication_chunks = []
@@ -94,8 +127,13 @@ def _publish(pipeline, job):
             graph.query("MATCH (a:Chunk {id:$a}),(b:Chunk {id:$b}) MERGE (a)-[:NEXT_CHUNK]->(b)", {"a": previous, "b": chunk["id"]})
         previous = chunk["id"]
         extraction = pipeline.item(job["id"], "extract", chunk["id"])
+        extraction_metadata = extraction.get("metadata", {})
+        if extraction_metadata.get("fallback"):
+            fallback_count += 1
+            extraction_warnings.append({"chunkId": chunk["id"], "code": "gliner_only_fallback", "message": extraction_metadata.get("warning", "Only local mentions were retained; connections were not extracted."), "reason": extraction_metadata.get("reason")})
+        graph.query("MATCH (c:Chunk {id:$id}) SET c.extractionMethod=$method,c.llmVerified=$verified,c.extractionFallback=$fallback,c.extractionMetadata=$metadata", {"id": chunk["id"], "method": extraction_metadata.get("method", "unknown"), "verified": extraction_metadata.get("llmVerified") is True, "fallback": bool(extraction_metadata.get("fallback")), "metadata": json.dumps(extraction_metadata)})
         facts = extraction["relationships"]
-        fact_vectors = pipeline.retry_call(job, "assertion_embed", chunk["id"], lambda rows=facts: {"vectors": provider.embed([row["predicate"] + "\n" + row["polarity"] + "\n" + row["quote"] for row in rows]) if rows else []})["vectors"]
+        fact_vectors = pipeline.item(job["id"], "assertion_embed", chunk["id"])["vectors"]
         if len(fact_vectors) != len(facts) or any(len(vector) != job["configuration"]["embeddingDimensions"] or any(not math.isfinite(value) for value in vector) for vector in fact_vectors):
             raise ValueError("Assertion embeddings must be finite and match the configured vector space")
         graph.query("MATCH (c:Chunk {id:$id}) OPTIONAL MATCH (c)-[r:MENTIONS]->() DELETE r", {"id": chunk["id"]})
@@ -107,34 +145,48 @@ def _publish(pipeline, job):
                 decision = conn.execute("SELECT * FROM ingestion_resolution_decisions WHERE id=%s", (resolved["decisionId"],)).fetchone()
                 canonical = conn.execute("SELECT * FROM ingestion_entities WHERE id=%s", (decision["canonical_id"],)).fetchone()
             canonical_id = canonical["id"]
+            affected_entities.add(canonical_id)
             accepted_aliases.setdefault(canonical_id, set()).add(entity["name"])
             local[entity["key"]] = canonical_id
-            relative = chunk["text"].index(entity["quote"])
-            start = chunk["startOffset"] + relative
-            graph.query("MATCH (c:Chunk {id:$chunk}) MERGE (e:Entity {id:$entity}) ON CREATE SET e.label=$label,e.type=$type,e.description=$description,e.embedding=vecf32($vector),e.embeddingModel=$model MERGE (m:Mention {id:$mention}) SET m.jobId=$job,m.text=$quote,m.startOffset=$start,m.endOffset=$end,m.documentId=$document,m.active=false MERGE (c)-[:HAS_MENTION]->(m)", {"chunk": chunk["id"], "entity": canonical_id, "label": canonical["label"], "type": canonical["entity_type"], "description": canonical["description"], "vector": canonical["embedding"], "model": canonical["embedding_model"], "mention": mention_id, "job": job["id"], "document": job["source_id"], "quote": entity["quote"], "start": start, "end": start + len(entity["quote"])})
+            spans, primary_span, span_status = supported_spans(chunk, entity)
+            start, end = primary_span["startOffset"], primary_span["endOffset"]
+            method = entity.get("extractionMethod", extraction_metadata.get("method", "unknown"))
+            llm_verified = entity.get("llmVerified", extraction_metadata.get("llmVerified")) is True
+            graph.query("MATCH (c:Chunk {id:$chunk}) MERGE (e:Entity {id:$entity}) ON CREATE SET e.label=$label,e.type=$type,e.description=$description,e.embedding=vecf32($vector),e.embeddingModel=$model MERGE (m:Mention {id:$mention}) SET m.jobId=$job,m.text=$quote,m.startOffset=$start,m.endOffset=$end,m.sourceSpans=$spans,m.sourceSpanStatus=$spanStatus,m.sourceSpanAmbiguous=$ambiguous,m.extractionMethod=$method,m.llmVerified=$verified,m.documentId=$document,m.active=false MERGE (c)-[:HAS_MENTION]->(m)", {"chunk": chunk["id"], "entity": canonical_id, "label": canonical["label"], "type": canonical["entity_type"], "description": canonical["description"], "vector": canonical["embedding"], "model": canonical["embedding_model"], "mention": mention_id, "job": job["id"], "document": job["source_id"], "quote": entity["quote"], "start": start, "end": end, "spans": json.dumps(spans), "spanStatus": span_status, "ambiguous": len(spans) > 1, "method": method, "verified": llm_verified})
             graph.query("MATCH (m:Mention {id:$mention}) OPTIONAL MATCH (m)-[old:RESOLVED_TO]->() DELETE old", {"mention": mention_id})
             graph.query("MATCH (c:Chunk {id:$chunk}),(m:Mention {id:$mention}),(e:Entity {id:$entity}) MERGE (m)-[:RESOLVED_TO]->(e) MERGE (c)-[:MENTIONS]->(e) MERGE (r:ResolutionDecision {id:$decision}) SET r.jobId=$job,r.decision=$verdict,r.rationale=$rationale,r.reverted=$reverted MERGE (r)-[:RESOLVES]->(m)", {"chunk": chunk["id"], "mention": mention_id, "entity": canonical_id, "decision": decision["id"], "job": job["id"], "verdict": decision["decision"], "rationale": decision["rationale"], "reverted": decision["reverted"]})
-            entities.setdefault(canonical_id, {"id": canonical_id, "label": canonical["label"], "type": canonical["entity_type"], "extractionMethod": "gliner_llm_verified", "mentions": []})["mentions"].append({"chunkId": chunk["id"], "startOffset": start, "endOffset": start + len(entity["quote"]), "text": entity["quote"]})
+            published_entity = entities.setdefault(canonical_id, {"id": canonical_id, "label": canonical["label"], "type": canonical["entity_type"], "extractionMethods": [], "llmVerified": True, "mentions": []})
+            if method not in published_entity["extractionMethods"]:
+                published_entity["extractionMethods"].append(method)
+            published_entity["extractionMethod"] = method if len(published_entity["extractionMethods"]) == 1 else "mixed"
+            published_entity["llmVerified"] = published_entity["llmVerified"] and llm_verified
+            published_entity["mentions"].append({"id": mention_id, "chunkId": chunk["id"], "startOffset": start, "endOffset": end, "sourceSpans": spans, "sourceSpanStatus": span_status, "sourceSpanAmbiguous": len(spans) > 1, "text": entity["quote"], "extractionMethod": method, "llmVerified": llm_verified, "duplicateCheckingDeferred": decision["decision"] == "deferred"})
             mention_count += 1
         for ordinal, relationship in enumerate(extraction["relationships"]):
             assertion_id = "assertion:" + fingerprint([job["id"], chunk["id"], ordinal, relationship])
-            relative = chunk["text"].index(relationship["quote"])
-            start = chunk["startOffset"] + relative
-            graph.query("MATCH (c:Chunk {id:$chunk}) MERGE (a:Assertion {id:$id}) SET a.jobId=$job,a.documentId=$document,a.predicate=$predicate,a.quote=$quote,a.conditions=$conditions,a.polarity=$polarity,a.startOffset=$start,a.endOffset=$end,a.embedding=vecf32($vector),a.embeddingModel=$model,a.active=false MERGE (a)-[:SUPPORTED_BY]->(c)", {"chunk": chunk["id"], "id": assertion_id, "job": job["id"], "document": job["source_id"], "predicate": relationship["predicate"], "quote": relationship["quote"], "conditions": json.dumps(relationship["conditions"]), "polarity": relationship["polarity"], "start": start, "end": start + len(relationship["quote"]), "vector": fact_vectors[ordinal], "model": job["configuration"]["embeddingModel"]})
+            spans, primary_span, span_status = supported_spans(chunk, relationship)
+            start, end = primary_span["startOffset"], primary_span["endOffset"]
+            graph.query("MATCH (c:Chunk {id:$chunk}) MERGE (a:Assertion {id:$id}) SET a.jobId=$job,a.documentId=$document,a.predicate=$predicate,a.quote=$quote,a.conditions=$conditions,a.polarity=$polarity,a.startOffset=$start,a.endOffset=$end,a.sourceSpans=$spans,a.sourceSpanStatus=$spanStatus,a.sourceSpanAmbiguous=$ambiguous,a.extractionMethod=$method,a.llmVerified=$verified,a.embedding=vecf32($vector),a.embeddingModel=$model,a.active=false MERGE (a)-[:SUPPORTED_BY]->(c)", {"chunk": chunk["id"], "id": assertion_id, "job": job["id"], "document": job["source_id"], "predicate": relationship["predicate"], "quote": relationship["quote"], "conditions": json.dumps(relationship["conditions"]), "polarity": relationship["polarity"], "start": start, "end": end, "spans": json.dumps(spans), "spanStatus": span_status, "ambiguous": len(spans) > 1, "method": relationship.get("extractionMethod", extraction_metadata.get("method", "unknown")), "verified": relationship.get("llmVerified", extraction_metadata.get("llmVerified")) is True, "vector": fact_vectors[ordinal], "model": job["configuration"]["embeddingModel"]})
+            graph.query("MATCH (a:Assertion {id:$id})-[:SUBJECT]->(s:Entity)-[r:RELATES]->() WHERE r.assertionId=$id DELETE r", {"id": assertion_id})
             graph.query("MATCH (a:Assertion {id:$id}) OPTIONAL MATCH (a)-[r:SUBJECT|OBJECT]->() DELETE r", {"id": assertion_id})
-            graph.query("MATCH ()-[r:RELATES {assertionId:$id}]->() DELETE r", {"id": assertion_id})
             graph.query("MATCH (a:Assertion {id:$id}),(s:Entity {id:$subject}),(o:Entity {id:$object}) MERGE (a)-[:SUBJECT]->(s) MERGE (a)-[:OBJECT]->(o) MERGE (s)-[r:RELATES {assertionId:$id}]->(o) SET r.predicate=$predicate,r.rel_type=$predicate,r.jobId=$job,r.sourceId=$source,r.active=false", {"id": assertion_id, "subject": local[relationship["subject"]], "object": local[relationship["object"]], "predicate": relationship["predicate"], "job": job["id"], "source": job["source_id"]})
             assertion_count += 1
-        publication_chunks.append({**chunk, "documentId": job["source_id"], "revisionId": job["revision"], "processingVersion": job["processing_version"], "sectionId": section_id, "sectionIds": [section["id"] for section in related_sections], "sectionTitle": primary["title"], "sourceUrl": metadata.get("sourceUrl") or job["source_url"], "locationKind": "source"})
+        publication_chunks.append({**chunk, "documentId": job["source_id"], "revisionId": job["revision"], "processingVersion": job["processing_version"], "sectionId": section_id, "sectionIds": [section["id"] for section in related_sections], "sectionTitle": primary["title"], "sourceUrl": metadata.get("sourceUrl") or job["source_url"], "locationKind": "source", "extractionMetadata": extraction_metadata})
 
-    payload = {**metadata, "id": job["source_id"], "revisionId": job["revision"], "processingVersion": job["processing_version"], "rawPath": job["original_path"], "title": title, "text": document["text"], "textLength": len(document["text"]), "sections": sections, "chunks": publication_chunks, "entities": list(entities.values()), "sourceUrl": metadata.get("sourceUrl") or job["source_url"], "offsetUnit": "unicode_codepoint", "blocks": document["blocks"], "normalization": document["normalization"], "extractionBoundary": "GLiNER candidate recognition and source-grounded LLM assertions; exact support is structurally verified, scientific correctness has not been independently reviewed."}
+    extraction_quality = {"fallbackChunks": fallback_count, "quality": "partial_connections" if fallback_count else "llm_processed", "warnings": [*metadata.get("warnings", []), *extraction_warnings], "sourceCoverage": metadata.get("sourceCoverage")}
+    payload = {**metadata, "id": job["source_id"], "revisionId": job["revision"], "processingVersion": job["processing_version"], "rawPath": job["original_path"], "title": title, "text": document["text"], "textLength": len(document["text"]), "sections": sections, "chunks": publication_chunks, "entities": list(entities.values()), "sourceUrl": metadata.get("sourceUrl") or job["source_url"], "offsetUnit": "unicode_codepoint", "blocks": document["blocks"], "normalization": document["normalization"], "extractionQuality": extraction_quality, "warnings": extraction_quality["warnings"], "extractionBoundary": "Extraction method and LLM processing status are recorded per chunk and mention. GLiNER-only fallback retains mentions without connections or automatic duplicate checking. Exact source occurrences are checked; multiple occurrences remain explicit, and scientific correctness has not been independently reviewed."}
     from app.services.corpus import publish_document
-    counts = {"documents": 1, "sections": len(sections), "chunks": len(chunks), "entities": len(entities), "mentions": mention_count, "assertions": assertion_count, "graph": semantic_graph_name(job["configuration"])}
+    counts = {"documents": 1, "sections": len(sections), "chunks": len(chunks), "entities": len(entities), "mentions": mention_count, "assertions": assertion_count, "graph": semantic_graph_name(job["configuration"]), **extraction_quality}
     with connection() as conn:
         conn.execute("UPDATE ingestion_publications SET active=false WHERE source_id=%s", (job["source_id"],))
         publish_document(payload, conn)
         conn.execute("INSERT INTO ingestion_publications(job_id,source_id,counts,active) VALUES(%s,%s,%s,false) ON CONFLICT(job_id) DO UPDATE SET active=false,counts=excluded.counts,published_at=now()", (job["id"], job["source_id"], Jsonb(counts)))
-    graph.query("MATCH (d:Document {id:$source}) SET d.active=true,d.activeJobId=$job,d.title=$title,d.revisionId=$revision,d.sourceUrl=$url WITH d MATCH (n) WHERE n.documentId=$source OR n.sourceId=$source SET n.active=CASE WHEN (n.jobId=$job OR n.id=$job) AND coalesce(n.projectionCurrent,true) THEN true ELSE false END WITH DISTINCT d OPTIONAL MATCH ()-[r:RELATES]->() WHERE r.sourceId=$source SET r.active=(r.jobId=$job) WITH DISTINCT d MATCH (e:Entity) OPTIONAL MATCH (m:Mention {active:true})-[:RESOLVED_TO]->(e) WITH e,count(m) AS mentions SET e.active=(mentions>0)", {"source": job["source_id"], "job": job["id"], "title": title, "revision": job["revision"], "url": metadata.get("sourceUrl") or job["source_url"] or ""})
+    for label, property_name in (("SourceRevision", "sourceId"), ("Section", "documentId"), ("Chunk", "documentId"), ("Mention", "documentId"), ("Assertion", "documentId")):
+        graph.query(f"MATCH (n:{label} {{{property_name}:$source}}) SET n.active=CASE WHEN (n.jobId=$job OR n.id=$job) AND coalesce(n.projectionCurrent,true) THEN true ELSE false END", {"source": job["source_id"], "job": job["id"]})
+    graph.query("MATCH (a:Assertion {documentId:$source})-[:SUBJECT]->(s:Entity)-[r:RELATES]->() WHERE r.assertionId=a.id AND r.sourceId=$source SET r.active=(r.jobId=$job)", {"source": job["source_id"], "job": job["id"]})
+    if affected_entities:
+        graph.query("UNWIND $ids AS id MATCH (e:Entity {id:id}) OPTIONAL MATCH (e)<-[:RESOLVED_TO]-(m:Mention) WHERE m.active=true WITH e,count(m) AS mentions SET e.active=(mentions>0)", {"ids": sorted(affected_entities)})
+    graph.query("MATCH (d:Document {id:$source}) SET d.active=true,d.activeJobId=$job,d.title=$title,d.revisionId=$revision,d.sourceUrl=$url,d.extractionQuality=$quality,d.sourceCoverage=$coverage", {"source": job["source_id"], "job": job["id"], "title": title, "revision": job["revision"], "url": metadata.get("sourceUrl") or job["source_url"] or "", "quality": json.dumps(extraction_quality), "coverage": json.dumps(metadata.get("sourceCoverage"))})
     graph.query("MATCH (r:SourceRevision {id:$job}) SET r.graphComplete=true", {"job": job["id"]})
     with connection() as conn:
         conn.execute("UPDATE ingestion_publications SET active=false WHERE source_id=%s AND job_id<>%s", (job["source_id"], job["id"]))
