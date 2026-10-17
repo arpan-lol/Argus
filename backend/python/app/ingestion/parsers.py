@@ -1,5 +1,6 @@
 import csv
 import gzip
+import hashlib
 import io
 import json
 import re
@@ -31,7 +32,7 @@ def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_a
                 raise ValueError("Office archive exceeds configured member or expanded-byte processing limits")
     blocks = []
     text_characters = 0
-    metadata = {"filename": path.name, "format": suffix, "parser": "source-blocks-2", "warnings": []}
+    metadata = {"filename": path.name, "format": suffix, "parser": "source-blocks-3", "warnings": []}
 
     def add(text, kind="paragraph", location=None, structured=None):
         nonlocal text_characters
@@ -39,7 +40,8 @@ def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_a
             text_characters += len(text)
             if text_characters > max_text_chars:
                 raise ValueError(f"Parsed text exceeds configured {max_text_chars} character processing limit")
-            blocks.append({"ordinal": len(blocks), "kind": kind, "text": text, "location": location or {}, "structured": structured})
+            location = location or {}
+            blocks.append({"ordinal": len(blocks), "kind": kind, "role": location.get("role", "table" if kind == "table" else "content"), "text": text, "location": location, "structured": structured})
 
     if suffix in {".xml", ".jats"}:
         root = ElementTree.fromstring(raw)
@@ -48,9 +50,6 @@ def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_a
         article = root if root.tag.split("}")[-1] == "article" else next((n for n in root.iter() if n.tag.split("}")[-1] == "article"), root)
         metadata["sourceDocumentType"] = article.get("article-type", "unspecified")
         body = next((node for node in article if node.tag.split("}")[-1] == "body"), None)
-        metadata["sourceCoverage"] = {"bodyPresent": body is not None, "bodyTextCharacters": len("".join(body.itertext()).strip()) if body is not None else 0, "scope": "available_jats_text"}
-        if body is None:
-            metadata["warnings"].append("No JATS body is present. Available abstract, front matter and back matter are parsed; this is not complete article body coverage.")
         metadata["authors"] = []
         for node in article.iter():
             tag = node.tag.split("}")[-1]
@@ -74,21 +73,68 @@ def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_a
         if metadata.get("pmc") or metadata.get("pmcid"):
             ident = metadata.get("pmcid") or metadata["pmc"]
             metadata["sourceUrl"] = f"https://pmc.ncbi.nlm.nih.gov/articles/{ident if ident.startswith('PMC') else 'PMC' + ident}/"
-        containers = {"p", "title", "article-title", "table", "disp-formula", "list-item", "caption", "mixed-citation", "element-citation"}
-        def walk(node, ancestry):
+        containers = {"p", "title", "article-title", "table", "disp-formula", "list-item", "caption", "mixed-citation", "element-citation", "preformat"}
+        roles = {"front": "front_matter", "body": "body", "back": "back_matter", "abstract": "abstract", "trans-abstract": "abstract", "ref-list": "references", "ref": "references", "table": "table", "caption": "caption"}
+
+        def non_whitespace(text):
+            return "".join(text.split())
+
+        def walk(node, ancestry, role="content", region="content", section_path=()):
             tag = node.tag.split("}")[-1]
             structural = f"{ancestry}/{tag}"
-            if tag in containers:
+            role = roles.get(tag, role)
+            if tag in {"front", "body", "back"}:
+                region = tag
+            if tag == "sec":
+                heading = next((child for child in node if child.tag.split("}")[-1] == "title"), None)
+                section_path = (*section_path, {"title": "".join(heading.itertext()).strip() if heading is not None else "", "structuralPath": structural, "sourceId": node.get("id")})
+            location = {"structuralPath": structural, "element": tag, "role": role, "sourceRegion": region, "sectionPath": list(section_path)}
+            if node.get("id"):
+                location["sourceId"] = node.get("id")
+            nested_blocks = any(child.tag.split("}")[-1] in containers for child in node.iter() if child is not node)
+            if tag == "table" or (tag in containers and not nested_blocks):
                 if tag == "table":
                     rows = [["".join(cell.itertext()).strip() for cell in row if cell.tag.split("}")[-1] in {"td", "th"}] for row in node.iter() if row.tag.split("}")[-1] == "tr"]
-                    add("\n".join("\t".join(row) for row in rows), "table", {"structuralPath": structural}, {"rows": rows})
+                    source_text = "".join(node.itertext())
+                    row_text = "\n".join("\t".join(row) for row in rows)
+                    retained = row_text if non_whitespace(row_text) == non_whitespace(source_text) else source_text
+                    add(retained, "table", location, {"rows": rows, "textRendering": "rows" if retained == row_text else "source_text"})
                 else:
-                    kind = "citation" if tag in {"mixed-citation", "element-citation"} else "heading" if tag in {"title", "article-title"} else "paragraph"
-                    add("".join(node.itertext()), kind, {"structuralPath": structural})
+                    kind = "citation" if tag in {"mixed-citation", "element-citation"} else "heading" if tag in {"title", "article-title"} else "preformatted" if tag == "preformat" else "caption" if tag == "caption" else "paragraph"
+                    add("".join(node.itertext()), kind, location)
                 return
+            kind = "citation" if role == "references" else "caption" if role == "caption" else "paragraph"
+            add(node.text, kind, {**location, "textPosition": "text"})
             for ordinal, child in enumerate(node):
-                walk(child, f"{structural}[{ordinal}]")
+                walk(child, f"{structural}[{ordinal}]", role, region, section_path)
+                add(child.tail, kind, {**location, "textPosition": "tail", "afterChild": ordinal})
         walk(article, "")
+        body_text = "".join(body.itertext()) if body is not None else ""
+        body_available = non_whitespace(body_text)
+        body_retained = non_whitespace("".join(block["text"] for block in blocks if block["location"].get("sourceRegion") == "body"))
+        complete = body is not None and body_available == body_retained
+        reasons = []
+        if body is None:
+            reasons.append("No JATS body is present; available front matter, abstract and back matter do not establish complete article body coverage.")
+        elif not body_available:
+            reasons.append("The JATS body contains no readable text; images or external content may require a different reader.")
+        elif not complete:
+            reasons.append("Retained body text differs from the original ordered body text; processing requires attention before extraction.")
+        metadata["sourceCoverage"] = {
+            "bodyPresent": body is not None,
+            "bodyTextCharacters": len(body_text.strip()),
+            "bodyAvailableNonWhitespaceCharacters": len(body_available),
+            "bodyRetainedNonWhitespaceCharacters": len(body_retained),
+            "bodyMissingNonWhitespaceCharacters": max(0, len(body_available) - len(body_retained)),
+            "bodyCoverageComplete": complete and bool(body_available),
+            "bodyAvailableTextSha256": hashlib.sha256(body_available.encode("utf-8")).hexdigest(),
+            "bodyRetainedTextSha256": hashlib.sha256(body_retained.encode("utf-8")).hexdigest(),
+            "accounting": "exact_ordered_non_whitespace_characters",
+            "scope": "available_jats_text",
+            "requiresAttention": bool(reasons),
+            "attentionReasons": reasons,
+        }
+        metadata["warnings"].extend(reasons)
     elif suffix == ".pdf":
         from pypdf import PdfReader
         for index, page in enumerate(PdfReader(io.BytesIO(raw)).pages):
