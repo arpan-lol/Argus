@@ -14,14 +14,17 @@ def describe(entity):
 
 
 def plan_resolution(pipeline, job, provider, graph):
-    previous = pipeline.item(job["id"], "resolve_plan", "batched-pairs-1")
+    version = "batched-pairs-deferred-2"
+    previous = pipeline.item(job["id"], "resolve_plan", version)
     if previous:
         return previous
     records = []
     for chunk in pipeline.artifact(job["id"], "chunk")["chunks"]:
-        for entity in pipeline.item(job["id"], "extract", chunk["id"])["entities"]:
+        extraction = pipeline.item(job["id"], "extract", chunk["id"])
+        deferred = bool(extraction.get("metadata", {}).get("fallback"))
+        for entity in extraction["entities"]:
             mention_id = "mention:" + fingerprint([chunk["id"], entity["key"]])
-            records.append({"mentionId": mention_id, "entity": entity, "chunkId": chunk["id"], "provisionalId": "entity:" + fingerprint([job["id"], mention_id])})
+            records.append({"mentionId": mention_id, "entity": entity, "chunkId": chunk["id"], "provisionalId": "entity:" + fingerprint([job["id"], mention_id]), "deferred": deferred})
     missing = [record for record in records if pipeline.item(job["id"], "entity_embed", record["mentionId"]) is None]
     batch_size = job["configuration"].get("entityEmbeddingBatchSize", int(os.getenv("ARGUS_ENTITY_EMBED_BATCH_SIZE", "32")))
     if batch_size < 1:
@@ -39,16 +42,19 @@ def plan_resolution(pipeline, job, provider, graph):
             raise ValueError("Entity embedding contains nonfinite values")
         with connection() as conn:
             conn.execute("INSERT INTO ingestion_entities(id,label,entity_type,description,aliases,embedding,embedding_model,created_by_job,source_quote) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", (record["provisionalId"], entity["name"], entity["entity_type"], entity["description"], Jsonb([entity["name"]]), Jsonb(vector), job["configuration"]["embeddingModel"], job["id"], entity["quote"]))
-        graph.query("MERGE (e:Entity {id:$id}) ON CREATE SET e.label=$name,e.type=$type,e.description=$description,e.embedding=vecf32($vector),e.embeddingModel=$model,e.jobId=$job,e.active=false", {"id": record["provisionalId"], "name": entity["name"], "type": entity["entity_type"], "description": entity["description"], "vector": vector, "model": job["configuration"]["embeddingModel"], "job": job["id"]})
+        graph.query("MERGE (e:Entity {id:$id}) ON CREATE SET e.label=$name,e.type=$type,e.description=$description,e.embedding=vecf32($vector),e.embeddingModel=$model,e.jobId=$job,e.active=false SET e.resolutionDeferred=$deferred", {"id": record["provisionalId"], "name": entity["name"], "type": entity["entity_type"], "description": entity["description"], "vector": vector, "model": job["configuration"]["embeddingModel"], "job": job["id"], "deferred": record["deferred"]})
     pairs = {}
     anchors = set()
     provisional = {record["provisionalId"] for record in records}
+    deferred_ids = [record["provisionalId"] for record in records if record["deferred"]]
     for record in records:
+        if record["deferred"]:
+            continue
         entity = record["entity"]
         vector = pipeline.item(job["id"], "entity_embed", record["mentionId"])["vector"]
-        neighbors = graph.query("CALL db.idx.vector.queryNodes('Entity','embedding',$limit,vecf32($vector)) YIELD node,score WHERE node.embeddingModel=$model AND (node.active=true OR node.jobId=$job) RETURN node.id,score", {"limit": job["configuration"]["resolutionSearchCandidates"], "vector": vector, "model": job["configuration"]["embeddingModel"], "job": job["id"]}).result_set
+        neighbors = graph.query("CALL db.idx.vector.queryNodes('Entity','embedding',$limit,vecf32($vector)) YIELD node,score WHERE node.embeddingModel=$model AND (node.active=true OR node.jobId=$job) AND coalesce(node.resolutionDeferred,false)=false RETURN node.id,score", {"limit": job["configuration"]["resolutionSearchCandidates"], "vector": vector, "model": job["configuration"]["embeddingModel"], "job": job["id"]}).result_set
         with connection() as conn:
-            candidates = conn.execute("SELECT e.* FROM ingestion_entities e WHERE id<>%s AND embedding_model=%s AND (id=ANY(%s) OR lower(label)=lower(%s)) AND (created_by_job=%s OR EXISTS(SELECT 1 FROM ingestion_resolution_decisions d JOIN ingestion_publications p ON p.job_id=d.job_id WHERE d.canonical_id=e.id AND p.active)) ORDER BY CASE WHEN lower(label)=lower(%s) THEN 0 ELSE 1 END,created_at LIMIT %s", (record["provisionalId"], job["configuration"]["embeddingModel"], [row[0] for row in neighbors], entity["name"], job["id"], entity["name"], job["configuration"]["resolutionSearchCandidates"])).fetchall()
+            candidates = conn.execute("SELECT e.* FROM ingestion_entities e WHERE e.id<>%s AND embedding_model=%s AND (e.id=ANY(%s) OR lower(label)=lower(%s)) AND NOT(e.id=ANY(%s)) AND NOT EXISTS(SELECT 1 FROM ingestion_resolution_decisions blocked JOIN ingestion_publications published ON published.job_id=blocked.job_id WHERE blocked.canonical_id=e.id AND blocked.decision='deferred' AND published.active) AND (created_by_job=%s OR EXISTS(SELECT 1 FROM ingestion_resolution_decisions d JOIN ingestion_publications p ON p.job_id=d.job_id WHERE d.canonical_id=e.id AND d.decision<>'deferred' AND p.active)) ORDER BY CASE WHEN lower(label)=lower(%s) THEN 0 ELSE 1 END,created_at LIMIT %s", (record["provisionalId"], job["configuration"]["embeddingModel"], [row[0] for row in neighbors], entity["name"], deferred_ids, job["id"], entity["name"], job["configuration"]["resolutionSearchCandidates"])).fetchall()
         scored = []
         for candidate in candidates:
             other = candidate["embedding"]
@@ -66,10 +72,10 @@ def plan_resolution(pipeline, job, provider, graph):
             pairs.setdefault(pair_id, {"pair_id": pair_id, "left": left, "right": right, "records": pair_records, "cosine": cosine})
             if candidate["id"] not in provisional:
                 anchors.add(candidate["id"])
-    plan = {"version": job["configuration"].get("resolutionVersion", "batched-pairs-1"), "records": records, "pairs": sorted(pairs.values(), key=lambda pair: pair["pair_id"]), "anchors": sorted(anchors), "pairBatchSize": job["configuration"].get("resolutionBatchPairs", int(os.getenv("ARGUS_RESOLUTION_BATCH_PAIRS", "32")))}
+    plan = {"version": version, "records": records, "pairs": sorted(pairs.values(), key=lambda pair: pair["pair_id"]), "anchors": sorted(anchors), "deferredMentions": len(deferred_ids), "pairBatchSize": job["configuration"].get("resolutionBatchPairs", int(os.getenv("ARGUS_RESOLUTION_BATCH_PAIRS", "32")))}
     if plan["pairBatchSize"] < 1:
         raise ValueError("Resolution pair batch size must be positive")
-    pipeline.save_item(job["id"], "resolve_plan", "batched-pairs-1", plan)
+    pipeline.save_item(job["id"], "resolve_plan", version, plan)
     return plan
 
 
@@ -131,10 +137,16 @@ def resolve(pipeline, job):
         verdict = "same" if canonical != provisional else "uncertain" if uncertain else "new"
         candidate_id = canonical if canonical != provisional else uncertain[0]["candidateId"] if uncertain else None
         rationale = "Canonical identity follows unanimous paired judgments; explicit negative pairs and distinct published anchors cannot be transitively merged." if verdict == "same" else "Identity remains separate; no consistent unanimous merge was established."
+        if record["deferred"]:
+            canonical = provisional
+            verdict = "deferred"
+            candidate_id = None
+            votes = []
+            rationale = "Duplicate checking is deferred because LLM extraction failed. This GLiNER-only mention remains separate until extraction is reviewed or retried."
         decision_id = "resolution:" + fingerprint([job["id"], record["mentionId"]])
         with connection() as conn:
             conn.execute("INSERT INTO ingestion_resolution_decisions(id,job_id,mention_id,candidate_id,canonical_id,decision,rationale,votes) VALUES(%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET candidate_id=excluded.candidate_id,canonical_id=excluded.canonical_id,decision=excluded.decision,rationale=excluded.rationale,votes=excluded.votes WHERE NOT ingestion_resolution_decisions.reverted", (decision_id, job["id"], record["mentionId"], candidate_id, canonical, verdict, rationale, Jsonb(votes)))
-        pipeline.save_item(job["id"], "resolve", record["mentionId"], {"mentionId": record["mentionId"], "canonicalId": canonical, "decisionId": decision_id, "decision": verdict, "candidateId": candidate_id})
+        pipeline.save_item(job["id"], "resolve", record["mentionId"], {"mentionId": record["mentionId"], "canonicalId": canonical, "decisionId": decision_id, "decision": verdict, "candidateId": candidate_id, "deferred": record["deferred"], "reason": rationale})
     for pair in outcomes.values():
         pipeline.save_item(job["id"], "identity_comparison", pair["pair_id"], pair)
-    return {"resolvedMentions": len(plan["records"]), "candidatePairs": len(plan["pairs"]), "pairBatchSize": plan["pairBatchSize"], "mergeConflicts": conflicts, "method": plan["version"], "mergePolicy": "Two order-reversed judgments; constrained identity components; original mentions retained"}
+    return {"resolvedMentions": len(plan["records"]), "deferredMentions": plan["deferredMentions"], "candidatePairs": len(plan["pairs"]), "pairBatchSize": plan["pairBatchSize"], "mergeConflicts": conflicts, "method": plan["version"], "mergePolicy": "Two order-reversed judgments for LLM-processed records; GLiNER-only fallback mentions remain separate and excluded from duplicate candidates", "deferredPolicy": "Review or retry failed extraction before automatic duplicate checking"}

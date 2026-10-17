@@ -173,11 +173,14 @@ class IngestionPipeline:
                 return {**state, "stopped": True}
         return execute
 
-    def retry_call(self, job, stage, key, operation):
+    def retry_call(self, job, stage, key, operation, max_attempts=None):
         previous = self.item(job["id"], stage, key)
         if previous is not None:
             return previous
-        for attempt in range(job["configuration"]["retries"]):
+        attempts = job["configuration"]["retries"] if max_attempts is None else min(job["configuration"]["retries"], max_attempts)
+        if attempts < 1:
+            raise ValueError("Provider retry attempts must be positive")
+        for attempt in range(attempts):
             try:
                 if stage not in {"embed", "entity_embed", "entity_embed_batch", "assertion_embed"}:
                     self.budget(job)
@@ -188,7 +191,7 @@ class IngestionPipeline:
                 raise
             except Exception as error:
                 self.save_item(job["id"], "retry_history", str(uuid.uuid4()), {"stage": stage, "itemId": key, "attempt": attempt + 1, "error": str(error)})
-                if attempt + 1 >= job["configuration"]["retries"]:
+                if attempt + 1 >= attempts:
                     raise
                 provider_delay = re.search(r"retry in\s+([\d.]+)\s*s", str(error), re.IGNORECASE)
                 delay = max(job["configuration"]["retryBaseSeconds"] * (2 ** attempt), float(provider_delay.group(1)) + 1 if provider_delay else 0)
@@ -263,6 +266,9 @@ class IngestionPipeline:
         return {"chunks": len(chunks), "model": job["configuration"]["embeddingModel"], "dimensions": job["configuration"]["embeddingDimensions"], "storage": "Durable PostgreSQL staging; FalkorDB vector properties/index published only after validation"}
 
     def stage_extract(self, job):
+        if job["configuration"].get("extractionVersion") == "two-attempt-gliner-fallback-1":
+            from .extraction import extract_document
+            return extract_document(self, job)
         provider = Providers(job["configuration"], self.call_recorder(job["id"]))
         document = self.artifact(job["id"], "normalize")
         chunks = self.artifact(job["id"], "chunk")["chunks"]
@@ -341,6 +347,7 @@ class IngestionPipeline:
         document = self.artifact(job["id"], "normalize")
         chunks = self.artifact(job["id"], "chunk")["chunks"]
         assertions = 0
+        fallback_chunks = 0
         for chunk in chunks:
             if document["text"][chunk["startOffset"]:chunk["endOffset"]] != chunk["text"]:
                 raise ValueError("Chunk source offset mismatch")
@@ -349,12 +356,13 @@ class IngestionPipeline:
                 raise ValueError("Chunk embedding missing, nonfinite or wrong dimensionality")
             extraction = self.item(job["id"], "extract", chunk["id"])
             self.validate_extraction(chunk, extraction)
+            fallback_chunks += int(bool(extraction.get("metadata", {}).get("fallback")))
             assertions += len(extraction["relationships"])
             for entity in extraction["entities"]:
                 mention_id = "mention:" + fingerprint([chunk["id"], entity["key"]])
                 if not self.item(job["id"], "resolve", mention_id):
                     raise ValueError("Entity resolution artifact missing")
-        return {"chunks": len(chunks), "assertions": assertions, "offsets": "exact_match", "semanticValidation": "LLM source grounding plus structural validation; scientific correctness not independently established"}
+        return {"chunks": len(chunks), "assertions": assertions, "offsets": "exact_match", "fallbackChunks": fallback_chunks, "semanticValidation": "GLiNER-only mentions retained with exact spans; duplicate checks deferred and no assertions extracted from fallback chunks" if fallback_chunks else "LLM source grounding plus structural validation; scientific correctness not independently established"}
 
     def stage_publish(self, job):
         from .publication import publish

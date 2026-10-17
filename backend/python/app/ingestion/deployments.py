@@ -1,6 +1,8 @@
 import os
 from urllib.parse import urlsplit
 
+from .azure import azure_base_url
+
 
 def base_url(value, default_path="/openai/v1"):
     parsed = urlsplit(value)
@@ -11,7 +13,9 @@ def base_url(value, default_path="/openai/v1"):
         if path.endswith(suffix):
             path = path[:-len(suffix)]
             break
-    return parsed._replace(path=path or default_path).geturl()
+    if path == "/models":
+        return parsed._replace(netloc=parsed.netloc.lower(), path=path).geturl()
+    return azure_base_url(value).rstrip("/")
 
 
 def deployment(prefix):

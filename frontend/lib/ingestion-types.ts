@@ -41,6 +41,7 @@ export interface UploadedDocument {
 }
 
 export interface IngestedDocument extends EvidenceDocument {
+  processingWarnings?: string[];
   filename?: string;
   status?: string;
 }
@@ -99,6 +100,7 @@ export function normalizeSourceDocument(value: unknown): IngestedDocument {
   });
   return {
     id, text, title, sections, chunks,
+    processingWarnings: [...new Set([...(Array.isArray(source.processingWarnings) ? source.processingWarnings : []), ...(Array.isArray(metadata.warnings) ? metadata.warnings : [])].filter((warning): warning is string => typeof warning === 'string'))].slice(0, 20),
     revisionId: string(source.revisionId, string(source.revision)),
     filename: string(source.filename, string(metadata.filename)),
     status: string(source.status),

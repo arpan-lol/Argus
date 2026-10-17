@@ -36,6 +36,19 @@ def publication_lease_key(source_id):
     return "argus-source-publication:" + source_id
 
 
+def quote_offset(chunk, record):
+    span = record.get("sourceSpan")
+    if span:
+        start, end = span.get("chunkStart"), span.get("chunkEnd")
+        if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(chunk["text"]) or chunk["text"][start:end] != record["quote"] or span.get("startOffset") != chunk["startOffset"] + start or span.get("endOffset") != chunk["startOffset"] + end:
+            raise ValueError("Extraction source span does not match its exact quotation")
+        return start
+    offset = chunk["text"].find(record["quote"])
+    if offset < 0:
+        raise ValueError("Extraction quotation is absent from its source chunk")
+    return offset
+
+
 def publish(pipeline, job):
     with connection() as lease:
         key=publication_lease_key(job["source_id"])
@@ -112,16 +125,16 @@ def _publish(pipeline, job):
             canonical_id = canonical["id"]
             accepted_aliases.setdefault(canonical_id, set()).add(entity["name"])
             local[entity["key"]] = canonical_id
-            relative = chunk["text"].index(entity["quote"])
+            relative = quote_offset(chunk, entity)
             start = chunk["startOffset"] + relative
-            graph.query("MATCH (c:Chunk {id:$chunk}) MERGE (e:Entity {id:$entity}) ON CREATE SET e.label=$label,e.type=$type,e.description=$description,e.embedding=vecf32($vector),e.embeddingModel=$model MERGE (m:Mention {id:$mention}) SET m.jobId=$job,m.text=$quote,m.startOffset=$start,m.endOffset=$end,m.documentId=$document,m.active=false MERGE (c)-[:HAS_MENTION]->(m)", {"chunk": chunk["id"], "entity": canonical_id, "label": canonical["label"], "type": canonical["entity_type"], "description": canonical["description"], "vector": canonical["embedding"], "model": canonical["embedding_model"], "mention": mention_id, "job": job["id"], "document": job["source_id"], "quote": entity["quote"], "start": start, "end": start + len(entity["quote"])})
+            graph.query("MATCH (c:Chunk {id:$chunk}) MERGE (e:Entity {id:$entity}) ON CREATE SET e.label=$label,e.type=$type,e.description=$description,e.embedding=vecf32($vector),e.embeddingModel=$model MERGE (m:Mention {id:$mention}) SET m.jobId=$job,m.text=$quote,m.startOffset=$start,m.endOffset=$end,m.documentId=$document,m.llmVerified=$verified,m.extractionMethod=$method,m.active=false MERGE (c)-[:HAS_MENTION]->(m)", {"chunk": chunk["id"], "entity": canonical_id, "label": canonical["label"], "type": canonical["entity_type"], "description": canonical["description"], "vector": canonical["embedding"], "model": canonical["embedding_model"], "mention": mention_id, "job": job["id"], "document": job["source_id"], "quote": entity["quote"], "verified": entity.get("llmVerified", True), "method": entity.get("extractionMethod", "gliner_llm_verified"), "start": start, "end": start + len(entity["quote"])})
             graph.query("MATCH (m:Mention {id:$mention}) OPTIONAL MATCH (m)-[old:RESOLVED_TO]->() DELETE old", {"mention": mention_id})
             graph.query("MATCH (c:Chunk {id:$chunk}),(m:Mention {id:$mention}),(e:Entity {id:$entity}) MERGE (m)-[:RESOLVED_TO]->(e) MERGE (c)-[:MENTIONS]->(e) MERGE (r:ResolutionDecision {id:$decision}) SET r.jobId=$job,r.decision=$verdict,r.rationale=$rationale,r.reverted=$reverted MERGE (r)-[:RESOLVES]->(m)", {"chunk": chunk["id"], "mention": mention_id, "entity": canonical_id, "decision": decision["id"], "job": job["id"], "verdict": decision["decision"], "rationale": decision["rationale"], "reverted": decision["reverted"]})
-            entities.setdefault(canonical_id, {"id": canonical_id, "label": canonical["label"], "type": canonical["entity_type"], "extractionMethod": "gliner_llm_verified", "mentions": []})["mentions"].append({"chunkId": chunk["id"], "startOffset": start, "endOffset": start + len(entity["quote"]), "text": entity["quote"]})
+            entities.setdefault(canonical_id, {"id": canonical_id, "label": canonical["label"], "type": canonical["entity_type"], "extractionMethod": entity.get("extractionMethod", "gliner_llm_verified"), "llmVerified": entity.get("llmVerified", True), "mentions": []})["mentions"].append({"chunkId": chunk["id"], "startOffset": start, "endOffset": start + len(entity["quote"]), "text": entity["quote"]})
             mention_count += 1
         for ordinal, relationship in enumerate(extraction["relationships"]):
             assertion_id = "assertion:" + fingerprint([job["id"], chunk["id"], ordinal, relationship])
-            relative = chunk["text"].index(relationship["quote"])
+            relative = quote_offset(chunk, relationship)
             start = chunk["startOffset"] + relative
             graph.query("MATCH (c:Chunk {id:$chunk}) MERGE (a:Assertion {id:$id}) SET a.jobId=$job,a.documentId=$document,a.predicate=$predicate,a.quote=$quote,a.conditions=$conditions,a.polarity=$polarity,a.startOffset=$start,a.endOffset=$end,a.embedding=vecf32($vector),a.embeddingModel=$model,a.active=false MERGE (a)-[:SUPPORTED_BY]->(c)", {"chunk": chunk["id"], "id": assertion_id, "job": job["id"], "document": job["source_id"], "predicate": relationship["predicate"], "quote": relationship["quote"], "conditions": json.dumps(relationship["conditions"]), "polarity": relationship["polarity"], "start": start, "end": start + len(relationship["quote"]), "vector": fact_vectors[ordinal], "model": job["configuration"]["embeddingModel"]})
             graph.query("MATCH (a:Assertion {id:$id}) OPTIONAL MATCH (a)-[r:SUBJECT|OBJECT]->() DELETE r", {"id": assertion_id})
@@ -130,7 +143,9 @@ def _publish(pipeline, job):
             assertion_count += 1
         publication_chunks.append({**chunk, "documentId": job["source_id"], "revisionId": job["revision"], "processingVersion": job["processing_version"], "sectionId": section_id, "sectionIds": [section["id"] for section in related_sections], "sectionTitle": primary["title"], "sourceUrl": metadata.get("sourceUrl") or job["source_url"], "locationKind": "source"})
 
-    payload = {**metadata, "id": job["source_id"], "revisionId": job["revision"], "processingVersion": job["processing_version"], "rawPath": job["original_path"], "title": title, "text": document["text"], "textLength": len(document["text"]), "sections": sections, "chunks": publication_chunks, "entities": list(entities.values()), "sourceUrl": metadata.get("sourceUrl") or job["source_url"], "offsetUnit": "unicode_codepoint", "blocks": document["blocks"], "normalization": document["normalization"], "extractionBoundary": "GLiNER candidate recognition and source-grounded LLM assertions; exact support is structurally verified, scientific correctness has not been independently reviewed."}
+    extraction = pipeline.artifact(job["id"], "extract") or {}
+    metadata = {**metadata, "extractionQuality": extraction.get("quality"), "warnings": [*metadata.get("warnings", []), *[warning["message"] for warning in extraction.get("warnings", [])]]}
+    payload = {**metadata, "id": job["source_id"], "revisionId": job["revision"], "processingVersion": job["processing_version"], "rawPath": job["original_path"], "title": title, "text": document["text"], "textLength": len(document["text"]), "sections": sections, "chunks": publication_chunks, "entities": list(entities.values()), "sourceUrl": metadata.get("sourceUrl") or job["source_url"], "offsetUnit": "unicode_codepoint", "blocks": document["blocks"], "normalization": document["normalization"], "extractionBoundary": "GLiNER-only fallback mentions are not LLM-verified and their duplicate checks are deferred; no assertions are generated for fallback chunks." if extraction.get("fallbackChunks") else "GLiNER candidate recognition and source-grounded LLM assertions; exact support is structurally verified, scientific correctness has not been independently reviewed."}
     from app.services.corpus import publish_document
     counts = {"documents": 1, "sections": len(sections), "chunks": len(chunks), "entities": len(entities), "mentions": mention_count, "assertions": assertion_count, "graph": semantic_graph_name(job["configuration"])}
     with connection() as conn:

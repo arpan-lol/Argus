@@ -139,21 +139,33 @@ class Providers:
             raise ConfigurationRequired(f"Unsupported LLM provider '{provider}'")
         return provider, endpoint, version
 
+    def safe_error(self, error):
+        message = str(error)
+        for name in ("LLM1_DEPLOYMENT_KEY", "LLM2_DEPLOYMENT_KEY", "EMBEDDING_MODEL_KEY", "AZURE_API_KEY", "AZURE_OPENAI_API_KEY", "AZURE_INFERENCE_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"):
+            secret = os.getenv(name)
+            if secret:
+                message = message.replace(secret, "[redacted]")
+        return message
+
     def embed(self, texts):
         key = self.credentials(credential_env=self.config.get("embeddingCredentialEnv"))
         if self.config["provider"] == "google":
             from langchain_google_genai import GoogleGenerativeAIEmbeddings
-            client = GoogleGenerativeAIEmbeddings(model=self.config["embeddingModel"], google_api_key=key, output_dimensionality=self.config["embeddingDimensions"])
+            client = GoogleGenerativeAIEmbeddings(model=self.config["embeddingModel"], google_api_key=key, output_dimensionality=self.config["embeddingDimensions"], request_options={"timeout": self.config["modelTimeoutSeconds"]})
         elif self.config["provider"] == "azure_openai":
             return self.azure_embeddings(texts, query=False)
         else:
             from langchain_openai import OpenAIEmbeddings
-            client = OpenAIEmbeddings(model=self.config["embeddingModel"], api_key=key, dimensions=self.config["embeddingDimensions"], max_retries=0)
+            client = OpenAIEmbeddings(model=self.config["embeddingModel"], api_key=key, dimensions=self.config["embeddingDimensions"], max_retries=0, request_timeout=self.config["modelTimeoutSeconds"])
         started = time.monotonic()
         try:
             result = client.embed_documents(texts)
+            if len(result) != len(texts) or any(len(vector) != self.config["embeddingDimensions"] for vector in result):
+                raise ValueError("Embedding response dimensions or item count do not match the processing configuration")
+            if any(any(not math.isfinite(value) for value in vector) or not any(vector) for vector in result):
+                raise ValueError("Embeddings must contain finite values with nonzero magnitude")
         except Exception as error:
-            self.record_call({"kind": "embedding", "status": "failed", "model": self.config["embeddingModel"], "items": len(texts), "durationMs": (time.monotonic() - started) * 1000, "error": str(error), "usage": None, "cost": None})
+            self.record_call({"kind": "embedding", "status": "failed", "model": self.config["embeddingModel"], "items": len(texts), "durationMs": (time.monotonic() - started) * 1000, "error": self.safe_error(error), "usage": None, "cost": None})
             raise
         if len(result) != len(texts) or any(len(vector) != self.config["embeddingDimensions"] for vector in result):
             raise ValueError("Embedding response dimensions or item count do not match the processing configuration")
@@ -193,7 +205,7 @@ class Providers:
             if any(not math.isfinite(value) for value in vector) or not any(value != 0 for value in vector):
                 raise ValueError("Query embedding must contain finite values with nonzero magnitude")
         except Exception as error:
-            self.record_call({**receipt, "status": "failed", "durationMs": (time.monotonic() - started) * 1000, "error": str(error)})
+            self.record_call({**receipt, "status": "failed", "durationMs": (time.monotonic() - started) * 1000, "error": self.safe_error(error)})
             raise
         self.record_call({**receipt, "status": "complete", "durationMs": (time.monotonic() - started) * 1000})
         return vector
@@ -215,7 +227,7 @@ class Providers:
             if any(len(vector) != self.config["embeddingDimensions"] or any(not math.isfinite(value) for value in vector) or not any(value != 0 for value in vector) for vector in vectors):
                 raise ValueError("Embedding response dimensions or values do not match the processing configuration")
         except Exception as error:
-            self.record_call({**receipt, "status": "failed", "durationMs": (time.monotonic() - started) * 1000, "usage": None, "error": str(error)})
+            self.record_call({**receipt, "status": "failed", "durationMs": (time.monotonic() - started) * 1000, "usage": None, "error": self.safe_error(error)})
             raise
         self.record_call({**receipt, "status": "complete", "durationMs": (time.monotonic() - started) * 1000, "usage": response.usage.model_dump(mode="json") if response.usage else None})
         return vectors
@@ -271,7 +283,7 @@ class Providers:
                 parsed, parsing_error = result.get("parsed"), result.get("parsing_error")
                 usage = result["raw"].usage_metadata
         except Exception as error:
-            self.record_call({**receipt, "status": "failed", "durationMs": (time.monotonic() - started) * 1000, "usage": None, "error": str(error)})
+            self.record_call({**receipt, "status": "failed", "durationMs": (time.monotonic() - started) * 1000, "usage": None, "error": self.safe_error(error)})
             if "GenerateRequestsPerDay" in str(error):
                 raise ConfigurationRequired(f"Daily generation quota exhausted for {model}. Completed outputs are retained; resume when this model's quota is available.") from error
             raise

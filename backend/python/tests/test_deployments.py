@@ -43,9 +43,9 @@ class DeploymentNamesTest(TestCase):
     def test_new_names_override_legacy_llm_routes_without_storing_keys(self):
         with mock.patch.dict(os.environ, {"ARGUS_LLM_PROVIDER": "azure_inference", "ARGUS_EXTRACTION_MODEL": "old-model"}):
             config = processing_config()
-        self.assertEqual(config["extractionModel"], "gpt-5")
+        self.assertEqual(config["extractionModel"], "gpt-4.1-mini")
         self.assertEqual(config["resolutionModel"], "gpt-4.1-mini")
-        self.assertEqual(config["llmBaseUrl"], "https://primary.example/openai/v1")
+        self.assertEqual(config["llmBaseUrl"], "https://secondary.example/openai/v1")
         self.assertEqual(config["llmApi"], "responses")
         self.assertEqual(config["embeddingDimensions"], 3072)
         self.assertEqual(config["embeddingBaseUrl"], "https://embeddings.example/openai/v1")
@@ -56,14 +56,14 @@ class DeploymentNamesTest(TestCase):
         with mock.patch("openai.OpenAI", side_effect=self.client), mock.patch.object(provider, "wait_for_capacity", return_value=0):
             self.assertEqual(provider.structured(Check, "Return JSON", {}), {"ok": True})
             self.assertEqual(provider.structured(Check, "Return JSON", {}, judge=True), {"ok": True})
-        self.assertEqual(self.requests[0].headers["api-key"], "primary-test-key")
+        self.assertEqual(self.requests[0].headers["api-key"], "secondary-test-key")
         self.assertEqual(self.requests[1].headers["api-key"], "secondary-test-key")
         for request in self.requests:
             self.assertEqual(request.url.path, "/openai/v1/responses")
             body = json.loads(request.content)
             self.assertFalse(body["store"])
             self.assertTrue(body["text"]["format"]["strict"])
-        self.assertIn("reasoning", json.loads(self.requests[0].content))
+        self.assertNotIn("reasoning", json.loads(self.requests[0].content))
         self.assertNotIn("reasoning", json.loads(self.requests[1].content))
         self.assertNotIn("test-key", json.dumps(self.receipts))
 

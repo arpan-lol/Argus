@@ -37,11 +37,13 @@ Stages: register → parse → normalize → chunk → embed → extract → res
 
 Each file has immutable originals, a content revision, a processing configuration fingerprint, stage attempts, per-item artifacts, timings, model receipts, and Postgres LangGraph checkpoints. A bounded worker queue processes explicitly scheduled uploads and retries. Registered inventory does not automatically trigger model calls. `--through chunk` stops before provider calls; `--register-only` only records the original and job.
 
+JATS parsing retains ordered text from nested body structures, front matter, abstracts, captions, tables and references, with explicit body coverage accounting and warnings when body text is missing. Existing parsed sources require a new processing job to use this parser version.
+
 The parser supports JATS/XML and gzip, text/Markdown, HTML, text-bearing PDF, DOCX, CSV/TSV, XLSX, and JSON. It retains source blocks and logical/page/cell locations. Scanned PDFs require OCR, which is not enabled. Legacy Office binaries and presentations are not parsed. Binary formats outside the supported parsers fail explicitly.
 
 Chunking adapts the published FalkorDB SDK v1.4.0 sentence/token algorithm: 512 tokens with two-sentence overlap. Source whitespace and offsets are retained. Oversized individual sentences remain whole and are labeled. The upstream Apache-2.0 license and modification notice are included under backend/python/licenses/.
 
-GLiNER supplies windowed candidate mentions. The configured LLM verifies entities and relationships against exact source quotes. An explicitly configured type vocabulary is optional; otherwise a recorded LLM step infers types from the document. Entity resolution uses FalkorDB vector candidates, exact-name candidates, two order-reversed batched judgments, and constraints against contradictory merges. Similarity alone never merges entities. Invalid model output retries with recorded validation feedback; there is no entity-only fallback.
+GLiNER supplies windowed candidate mentions. The configured LLM verifies entities and relationships against exact source quotes. An explicitly configured type vocabulary is optional; otherwise a recorded LLM step infers types from the document. Entity resolution uses FalkorDB vector candidates, exact-name candidates, two order-reversed batched judgments, and constraints against contradictory merges. Similarity alone never merges entities. New processing profiles allow two extraction attempts with recorded validation feedback. If both fail, exact GLiNER spans remain explicitly labeled as unverified fallback mentions with no relationships; duplicate checks are deferred. Missing deployment or access configuration still stops the job. The processed file reader displays fallback and source-coverage warnings. Older saved jobs retain their previous extraction policy.
 
 Assertions preserve their source quotes, offsets, polarity, and conditions. Chunk, entity, and assertion vectors are indexed in FalkorDB. Semantic graphs use an embedding-space namespace such as `argus_sources_v2_<hash>`; model spaces are not mixed. Source replacements retire older graph records logically. Postgres and FalkorDB are separate transaction domains; interrupted publication requires an idempotent retry.
 
@@ -51,15 +53,15 @@ Use the deployment variables in `backend/python/.env.example`:
 
 | Variables | Role |
 | --- | --- |
-| `LLM1_DEPLOYMENT_NAME`, `LLM1_DEPLOYMENT_URL`, `LLM1_DEPLOYMENT_KEY` | Chat and source extraction; default deployment `gpt-5` |
-| `LLM2_DEPLOYMENT_NAME`, `LLM2_DEPLOYMENT_URL`, `LLM2_DEPLOYMENT_KEY` | Entity resolution judgments; default deployment `gpt-4.1-mini` |
+| `LLM1_DEPLOYMENT_NAME`, `LLM1_DEPLOYMENT_URL`, `LLM1_DEPLOYMENT_KEY` | Chat; default deployment `gpt-5` |
+| `LLM2_DEPLOYMENT_NAME`, `LLM2_DEPLOYMENT_URL`, `LLM2_DEPLOYMENT_KEY` | Source extraction and entity resolution judgments; default deployment `gpt-4.1-mini` |
 | `AZURE_API_KEY` | Shared fallback when a role-specific Azure key is absent |
 | `AZURE_OPENAI_ENDPOINT` | Fallback embedding base URL when an embedding endpoint is absent |
 | `EMBEDDING_MODEL_NAME`, `EMBEDDING_MODEL_ENDPOINT`, `EMBEDDING_MODEL_KEY` | Document and query embeddings; default model `text-embedding-3-large`, 3,072 dimensions |
 
 LLM URLs can be the complete Responses endpoint, such as `https://YOUR-RESOURCE.services.ai.azure.com/openai/v1/responses`. The application splits the API protocol from the base URL. A bare embedding resource endpoint gains `/openai/v1`; `/openai/v1/embeddings` is also accepted and normalized. An explicit `/models` embedding base uses the Azure inference API version. URLs must use HTTPS without credentials or query strings. Role-specific keys are used for their corresponding requests and never stored in processing profiles, graphs, or receipts. Responses requests use `store=false` and schema-validated output.
 
-`LLM1_*` takes precedence over legacy chat/extraction settings; `LLM2_*` takes precedence over legacy resolution settings. When LLM2 is omitted, resolution uses LLM1. Existing Google/OpenAI/Azure profiles and older `ARGUS_*` model settings remain supported. When `EMBEDDING_MODEL_NAME` is present, new profiles default to Azure embeddings unless `ARGUS_MODEL_PROVIDER` explicitly selects another provider. `ARGUS_EMBEDDING_DIMENSIONS` can override the model's default dimensions.
+`LLM1_*` takes precedence over legacy chat settings; `LLM2_*` takes precedence over legacy extraction and resolution settings. GPT-5 cannot be selected as LLM2 in new profiles. When LLM2 is omitted, resolution uses LLM1. Existing Google/OpenAI/Azure profiles and older `ARGUS_*` model settings remain supported. When `EMBEDDING_MODEL_NAME` is present, new profiles default to Azure embeddings unless `ARGUS_MODEL_PROVIDER` explicitly selects another provider. `ARGUS_EMBEDDING_DIMENSIONS` can override the model's default dimensions.
 
 Embedding model, dimensions, provider, and normalized Azure embedding endpoint define the new vector namespace and query cache. Existing vectors are retained; switching to a new namespace requires reprocessing sources before they become searchable there. Model and endpoint changes produce new processing versions rather than rewriting saved jobs. Provider errors do not silently select another model. Ingestion uses configured timeouts, rate limits and bounded retries.
 
