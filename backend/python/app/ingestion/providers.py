@@ -130,6 +130,42 @@ class Providers:
         self.record_call({"kind": "embedding", "status": "complete", "model": self.config["embeddingModel"], "items": len(texts), "durationMs": (time.monotonic() - started) * 1000, "inputCharacters": sum(map(len, texts)), "usage": None, "cost": None})
         return result
 
+    def embed_query(self, text):
+        started = time.monotonic()
+        receipt = {"kind": "query_embedding", "provider": self.config["provider"], "model": self.config["embeddingModel"], "dimensions": self.config["embeddingDimensions"], "items": 1, "usage": None, "cost": None, "taskType": "retrieval_query", "timeoutSeconds": 20, "maxRetries": 0}
+        try:
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("Query embedding requires nonempty text")
+            receipt["inputCharacters"] = len(text)
+            key = self.credentials()
+            if self.config["provider"] == "google":
+                from google.genai import Client
+                from google.genai.types import EmbedContentConfig, HttpOptions, HttpRetryOptions
+                with Client(api_key=key, http_options=HttpOptions(timeout=20000, retry_options=HttpRetryOptions(attempts=1))) as client:
+                    response = client.models.embed_content(model=self.config["embeddingModel"], contents=text, config=EmbedContentConfig(task_type="RETRIEVAL_QUERY", output_dimensionality=self.config["embeddingDimensions"]))
+                if not response.embeddings or len(response.embeddings) != 1:
+                    raise ValueError("Query embedding must return exactly one vector")
+                result = response.embeddings[0].values
+                usage = getattr(response, "usage_metadata", None)
+                if usage is not None:
+                    receipt["usage"] = usage.model_dump(mode="json")
+            elif self.config["provider"] == "openai":
+                from langchain_openai import OpenAIEmbeddings
+                client = OpenAIEmbeddings(model=self.config["embeddingModel"], api_key=key, dimensions=self.config["embeddingDimensions"], max_retries=0, request_timeout=20)
+                result = client.embed_query(text)
+            else:
+                raise ConfigurationRequired("Query embedding provider is not supported")
+            if result is None or len(result) != self.config["embeddingDimensions"]:
+                raise ValueError("Query embedding dimensions do not match the published vector space")
+            vector = [float(value) for value in result]
+            if any(not math.isfinite(value) for value in vector) or not any(value != 0 for value in vector):
+                raise ValueError("Query embedding must contain finite values with nonzero magnitude")
+        except Exception as error:
+            self.record_call({**receipt, "status": "failed", "durationMs": (time.monotonic() - started) * 1000, "error": str(error)})
+            raise
+        self.record_call({**receipt, "status": "complete", "durationMs": (time.monotonic() - started) * 1000})
+        return vector
+
     def structured(self, schema, prompt, payload, judge=False):
         key = self.credentials()
         model = self.config["resolutionModel"] if judge else self.config["extractionModel"]
