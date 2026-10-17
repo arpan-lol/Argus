@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowUp, ChevronDown, FileText, Loader2, MessageSquare, Moon, Network, PanelLeftClose, PanelLeftOpen, Paperclip, Plus, Settings2, Sun, Upload, X } from 'lucide-react';
+import { ArrowUp, ArrowUpRight, ChevronDown, FileText, Loader2, MessageSquare, Moon, Network, PanelLeftClose, PanelLeftOpen, Paperclip, Plus, Settings2, Sun, Upload, X } from 'lucide-react';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { Switch } from '@/components/ui/switch';
 import { CitationButton } from '@/components/CitationButton';
@@ -88,7 +88,7 @@ export function SourceWorkspace() {
     }
   };
   const selectCitation = (source: EvidenceResult) => { focusSource(source.documentId, source.chunkId); setMapFocus({nodeId:source.chunkId,nonce:Date.now()}); setView('graph'); };
-  const selectNode = (node: MapNode) => { setSelectedId(node.id); setSelectedNode(node); };
+  const selectNode = (node: MapNode) => { if (node.documentId) focusSource(node.documentId, node.chunkId); setSelectedId(node.id); setSelectedNode(node); };
   const upload = () => { setView('files'); setUploadRequest(previous => previous + 1); };
   const submit = async (event?: FormEvent, suggestion?: string) => {
     event?.preventDefault();
@@ -106,7 +106,8 @@ export function SourceWorkspace() {
   const selectedChunk = document?.chunks.find(chunk => chunk.id === (selectedNode?.chunkId || selectedNode?.id));
   const selectedSection = document?.sections.find(section => section.id === (selectedNode?.sectionId || selectedNode?.id));
   const recordContent = nodeDetails?.content && typeof nodeDetails.content === 'object' ? nodeDetails.content as Record<string, unknown> : null;
-  const relatedNodes = Array.isArray(nodeDetails?.neighbors) ? nodeDetails.neighbors as Array<{id: string; relationship: string}> : [];
+  const selectedSource = document?.id === selectedNode?.documentId ? document : null;
+  const sourceTitle = selectedSource?.title || (selectedNode?.type === 'document' ? selectedNode.preview || selectedNode.label : null);
 
   return <div className={`ce-workspace ${sidebarOpen ? '' : 'ce-sidebar-collapsed'}`}>
     <aside className="ce-sidebar">
@@ -135,14 +136,11 @@ export function SourceWorkspace() {
       </ResizablePanelGroup>
     </main>
     <dialog ref={nodeDialog} className="ce-node-dialog" onCancel={() => setSelectedNode(null)} onClick={event => { if (event.target === event.currentTarget) setSelectedNode(null); }} aria-labelledby="node-title">
-      <div className="ce-node-dialog-heading"><span>{selectedNode?.type}</span><button className="ce-icon" onClick={() => setSelectedNode(null)} aria-label="Close node details"><X size={18} /></button></div>
-      <h2 id="node-title">{selectedNode?.label}</h2>
-      <dl><div><dt>Node ID</dt><dd>{selectedNode?.id}</dd></div>{selectedNode?.documentId && <div><dt>Document</dt><dd>{selectedNode.documentId}</dd></div>}{selectedChunk && <div><dt>Source offsets</dt><dd>{selectedChunk.startOffset}–{selectedChunk.endOffset}</dd></div>}</dl>
-      {typeof nodeDetails?.description === 'string' && <p className="ce-node-description">{nodeDetails.description}</p>}
-      <p>{typeof recordContent?.text === 'string' ? recordContent.text : selectedChunk?.text || selectedSection?.title || selectedNode?.preview}</p>
-      {nodeDetails && <details className="ce-node-record"><summary>Source record</summary><dl>{Object.entries(recordContent || nodeDetails).filter(([key, value]) => key !== 'text' && (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{String(value)}</dd></div>)}</dl></details>}
-      {relatedNodes.length > 0 && <details className="ce-node-record"><summary>Connected nodes ({relatedNodes.length}{nodeDetails?.neighborsTruncated ? '+' : ''})</summary><div className="ce-related-nodes">{relatedNodes.map((node, index) => <button key={`${node.id}-${index}`} onClick={() => { setMapFocus({nodeId:node.id,nonce:Date.now()}); setSelectedNode(null); }}><span>{node.relationship}</span><span>{node.id}</span></button>)}</div></details>}
-      <div className="ce-node-actions"><button className="ce-open-file" onClick={() => { if (selectedNode) setMapFocus({nodeId:selectedNode.id,nonce:Date.now()}); setSelectedNode(null); }}><Network size={15} />Explore source</button>{selectedNode?.documentId && <button className="ce-open-file ce-secondary-action" onClick={() => { if (selectedNode?.documentId) focusSource(selectedNode.documentId, selectedNode.chunkId || (selectedNode.type === 'chunk' ? selectedNode.id : undefined)); setView('files'); setSelectedNode(null); }}><FileText size={15} />Read file</button>}</div>
+      <div className="ce-node-dialog-heading"><h2 id="node-title">{selectedNode?.type === 'chunk' ? 'Chunk preview' : selectedNode?.type === 'document' ? 'Source document' : selectedNode?.label}</h2><button className="ce-icon" onClick={() => setSelectedNode(null)} aria-label="Close node details"><X size={18} /></button></div>
+      {selectedNode?.documentId && <div className="ce-node-source"><span>Source</span><button disabled={!sourceTitle} onClick={() => { if (selectedNode?.documentId) { setView('graph'); setMapFocus({nodeId:selectedNode.documentId,nonce:Date.now()}); } setSelectedNode(null); }}>{sourceTitle || 'Loading document…'}{sourceTitle && <ArrowUpRight size={15} />}</button></div>}
+      {(selectedNode?.type === 'entity' || selectedNode?.type === 'group') && typeof nodeDetails?.description === 'string' && <p className="ce-node-description">{nodeDetails.description}</p>}
+      {selectedNode?.type !== 'document' && <p className="ce-node-content">{typeof recordContent?.text === 'string' ? recordContent.text : selectedChunk?.text || selectedSection?.title || selectedNode?.preview}</p>}
+      <div className="ce-node-actions">{selectedNode?.documentId ? <button className="ce-open-file" onClick={() => { if (selectedNode?.documentId) focusSource(selectedNode.documentId, selectedNode.chunkId || (selectedNode.type === 'chunk' ? selectedNode.id : undefined)); setView('files'); setSelectedNode(null); }}><FileText size={15} />Read file</button> : <button className="ce-open-file" onClick={() => { if (selectedNode) setMapFocus({nodeId:selectedNode.id,nonce:Date.now()}); setSelectedNode(null); }}><Network size={15} />Show in graph</button>}</div>
     </dialog>
   </div>;
 }

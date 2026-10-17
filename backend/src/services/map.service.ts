@@ -6,7 +6,7 @@ import { corpusService } from './corpus.service.js';
 import { graphService } from './graph.service.js';
 import { AppError } from '../types/errors.js';
 import type { MapBounds, MapNode, MapEdge } from '../types/map.types.js';
-import type { Chunk, Section, Entity } from '../types/evidence.types.js';
+import type { Chunk, Entity } from '../types/evidence.types.js';
 import { logger } from '../utils/logger.util.js';
 
 const CELL = 512;
@@ -23,6 +23,7 @@ class MapService {
   private documents = new Map<string, LayoutDocument>();
   private entities = new Map<string, MapNode>();
   private groupEdges: MapEdge[] = [];
+  private childPositions = new Map<string, Map<string, { x: number; y: number }>>();
 
   private initialize() {
     if (this.initialized && Number(this.source!.prepare('SELECT count(*) AS count FROM documents').get()?.count) === this.documents.size) return;
@@ -38,6 +39,7 @@ class MapService {
     const entityHomes = new Map<string, { label: string; type: string; x: number; y: number; count: number; groups: Map<string, number> }>();
     this.documents.clear();
     this.entities.clear();
+    this.childPositions.clear();
     this.layout.exec('BEGIN');
     try {
       const rows = this.source.prepare(`SELECT d.id,d.title,(SELECT json_group_array(json_object('id',json_extract(e.value,'$.id'),'label',json_extract(e.value,'$.label'),'type',json_extract(e.value,'$.type'))) FROM json_each(d.metadata_json,'$.entities') e) AS entities_json FROM documents d ORDER BY d.id`).all();
@@ -110,18 +112,44 @@ class MapService {
   private childNode(id: string, documentId: string, sectionId?: string): MapNode {
     const document = this.documents.get(documentId);
     if (!document) throw new AppError('Map document not found', 404, true);
+    const position = this.childPosition(id, document);
     if (sectionId) {
       const row = this.source!.prepare('SELECT payload FROM chunks WHERE id=?').get(id);
       if (!row) throw new AppError('Chunk not found', 404, true);
       const chunk = JSON.parse(String(row.payload)) as Chunk;
-      const ordinal = Math.max(0, chunk.ordinal - 1);
-      return { id, type: 'chunk', label: short(chunk.text, 52), preview: short(chunk.text, 220), documentId, sectionId, chunkId: id, x: document.x + 84 + (ordinal % 24) * 15, y: document.y + 136 + Math.floor(ordinal / 24) * 15, radius: 4, ordinal: chunk.ordinal, startOffset: chunk.startOffset, endOffset: chunk.endOffset };
+      return { id, type: 'chunk', label: short(chunk.text, 52), preview: short(chunk.text, 220), documentId, sectionId, chunkId: id, ...position, radius: 4, ordinal: chunk.ordinal, startOffset: chunk.startOffset, endOffset: chunk.endOffset };
     }
     const row = this.source!.prepare('SELECT title,metadata_json FROM sections WHERE id=?').get(id);
     if (!row) throw new AppError('Section not found', 404, true);
-    const section = JSON.parse(String(row.metadata_json)) as Section;
-    const ordinal = Math.max(0, section.ordinal - 1);
-    return { id, type: 'section', label: String(row.title), preview: String(row.title), documentId, sectionId: id, x: document.x + 84 + (ordinal % 24) * 15, y: document.y + 80 + Math.floor(ordinal / 24) * 15, radius: 6 };
+    return { id, type: 'section', label: String(row.title), preview: String(row.title), documentId, sectionId: id, ...position, radius: 6 };
+  }
+
+  private childPosition(id: string, document: LayoutDocument) {
+    let positions = this.childPositions.get(document.id);
+    if (!positions) {
+      positions = new Map();
+      const sections = this.source!.prepare('SELECT id FROM sections WHERE document_id=? ORDER BY start_offset,id').all(document.id);
+      const chunks = this.source!.prepare('SELECT id,section_id FROM chunks WHERE document_id=? ORDER BY start_offset,id').all(document.id);
+      const children = new Map<string, string[]>();
+      for (const chunk of chunks) {
+        const key = String(chunk.section_id);
+        const entries = children.get(key) || [];
+        entries.push(String(chunk.id)); children.set(key, entries);
+      }
+      const leaves = sections.reduce((count, section) => count + Math.max(1, children.get(String(section.id))?.length || 0), 0);
+      const spacing = Math.min(18, 384 / Math.max(1, leaves - 1));
+      const startX = document.x + CELL / 2 - (leaves - 1) * spacing / 2;
+      let slot = 0;
+      for (const section of sections) {
+        const entries = children.get(String(section.id)) || [];
+        const width = Math.max(1, entries.length);
+        positions.set(String(section.id), { x: startX + (slot + (width - 1) / 2) * spacing, y: document.y + 116 });
+        entries.forEach((chunkId, index) => positions!.set(chunkId, { x: startX + (slot + index) * spacing, y: document.y + 206 }));
+        slot += width;
+      }
+      this.childPositions.set(document.id, positions);
+    }
+    return positions.get(id) || { x: document.x + CELL / 2, y: document.y + 206 };
   }
 
   private groups(): MapNode[] {

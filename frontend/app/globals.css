@@ -240,24 +240,22 @@ button:disabled { cursor:not-allowed; }
 .ce-configuration p { font-size:10px; color:var(--ce-muted); margin-top:10px; }
 .ce-inline-error { margin:12px 16px; padding:11px 13px; color:#99472e; background:#fff1eb; font-size:12px; line-height:1.7; border-radius:7px; }
 .dark .ce-inline-error { background:#412a25; color:#f8b5a1; }
-.ce-node-dialog { width:min(510px,calc(100vw - 35px)); max-height:80dvh; overflow:auto; margin:auto; padding:24px; background:var(--ce-bg); color:var(--ce-text); border:0; border-radius:14px; box-shadow:0 12px 65px #00000038; }
+.ce-node-dialog { width:min(600px,calc(100vw - 32px)); max-height:82dvh; overflow:auto; margin:auto; padding:24px; background:var(--ce-bg); color:var(--ce-text); border:0; border-radius:14px; box-shadow:0 12px 65px #00000038; }
 .ce-node-dialog::backdrop { background:#16181965; }
-.ce-node-dialog-heading { display:flex; align-items:center; justify-content:space-between; }
-.ce-node-dialog-heading > span { color:var(--ce-muted); font-size:12px; text-transform:capitalize; }
-.ce-node-dialog h2 { font-size:19px; font-weight:550; letter-spacing:-.025em; line-height:1.5; margin:9px 0 20px; overflow-wrap:anywhere; }
-.ce-node-dialog dl > div { display:flex; justify-content:space-between; gap:20px; margin:10px 0; font-size:11px; }
-.ce-node-dialog dt { color:var(--ce-muted); flex-shrink:0; }
-.ce-node-dialog dd { overflow-wrap:anywhere; text-align:right; }
-.ce-node-dialog > p { font-size:13px; line-height:1.9; margin-top:22px; white-space:pre-wrap; overflow-wrap:anywhere; }
-.ce-open-file { display:flex; align-items:center; gap:8px; border:0; border-radius:7px; padding:10px 12px; background:var(--ce-accent); color:#2b261a; font-size:12px; margin-top:22px; }
-.ce-node-actions { display:flex; flex-wrap:wrap; gap:8px; }
-.ce-secondary-action { background:var(--ce-hover); color:var(--ce-text); }
-.ce-node-record { margin-top:20px; padding-top:15px; border-top:1px solid var(--ce-line); }
-.ce-node-record summary { color:var(--ce-muted); font-size:12px; }
-.ce-node-dialog > .ce-node-description { color:var(--ce-muted); font-size:12px; margin-top:12px; }
-.ce-related-nodes { display:flex; flex-direction:column; margin-top:10px; gap:5px; }
-.ce-related-nodes button { display:flex; justify-content:space-between; gap:12px; background:var(--ce-surface); color:var(--ce-text); border:0; border-radius:5px; padding:9px; font-size:10px; text-align:left; }
-.ce-related-nodes button span:last-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ce-node-dialog-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
+.ce-node-dialog-heading .ce-icon { flex-shrink:0; margin-top:-3px; }
+.ce-node-dialog h2 { font-size:18px; font-weight:600; letter-spacing:-.02em; line-height:1.5; margin:0; overflow-wrap:anywhere; }
+.ce-node-source { margin-top:20px; padding-bottom:20px; border-bottom:1px solid var(--ce-line); }
+.ce-node-source > span { display:block; color:var(--ce-muted); font-size:11px; margin-bottom:6px; }
+.ce-node-source button { display:inline-flex; align-items:baseline; gap:8px; padding:0; border:0; background:none; color:var(--ce-text); font-size:13px; line-height:1.65; font-weight:500; text-align:left; overflow-wrap:anywhere; text-decoration:underline; text-decoration-color:var(--ce-line); text-underline-offset:4px; transition:text-decoration-color .15s; }
+.ce-node-source button:hover { text-decoration-color:currentColor; }
+.ce-node-source button:disabled { color:var(--ce-muted); text-decoration:none; }
+.ce-node-source button svg { flex-shrink:0; align-self:center; }
+.ce-node-dialog > .ce-node-content { font-size:14px; line-height:1.85; margin-top:20px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.ce-open-file { display:flex; align-items:center; gap:8px; border:0; border-radius:7px; padding:10px 12px; background:var(--ce-hover); color:var(--ce-text); font-size:12px; }
+.ce-open-file:hover { background:var(--ce-line); }
+.ce-node-actions { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:8px; margin-top:24px; }
+.ce-node-dialog > .ce-node-description { color:var(--ce-muted); font-size:12px; line-height:1.8; margin-top:16px; }
 @media(max-width:1200px) { .ce-sidebar { width:195px; padding-left:10px; padding-right:10px; } .ce-configuration-button > span { display:none; } .ce-messages { padding-left:23px; padding-right:23px; } }
 @media(max-width:850px) { .ce-sidebar { width:165px; } .ce-brand { gap:5px; } .ce-brand strong { font-size:19px; } .ce-brand img { width:24px; height:24px; } .ce-brand .ce-icon { width:25px; } .ce-user { gap:6px; } .ce-user small { font-size:9px; } .ce-user strong { font-size:11px; } .ce-explorer-heading { padding-left:13px; gap:5px; } .ce-explorer-heading h2 { font-size:12px; } .ce-explorer-actions { gap:0; } .ce-explorer-actions .ce-icon { width:28px; } .ce-messages { padding-left:17px; padding-right:17px; } .ce-composer-wrap { padding:15px; } .ce-chat-empty h1 { font-size:24px; } .ce-chat-empty > p { font-size:12px; } .ce-session { font-size:11px; } }
 @media(max-width:680px) { .ce-workspace { display:block; height:auto; min-height:100dvh; overflow:visible; } .ce-sidebar { display:none; } .ce-main { min-height:100dvh; } .ce-panels { flex-direction:column !important; height:auto !important; } .ce-panels > [data-slot=resizable-panel] { flex:none !important; overflow:hidden !important; width:100%; } .ce-chat-panel { height:65dvh; min-height:440px; } .ce-explorer-panel { height:75dvh; min-height:480px; border-top:1px solid var(--ce-line); } .ce-resize { display:none; } .ce-chat-heading { height:52px; padding:12px 18px; } .ce-chat-heading:before { content:'Falcor'; font-size:18px; font-weight:600; color:var(--ce-text); margin-right:8px; } .ce-mobile-brand { display:none; } .ce-chat-heading > .ce-icon:first-child { display:none; } .ce-mobile-source { display:inline-flex !important; margin-left:auto; } .ce-chat-empty { padding:20px 0; } .ce-chat-empty img { width:32px; height:32px; } .ce-chat-empty h1 { font-size:25px; margin-top:12px; } .ce-chat-empty > p { margin-top:10px; } .ce-suggestions { margin-top:20px; } .ce-suggestions button { font-size:11px; } .ce-configuration-button > span { display:inline; } .ce-explorer-heading { padding:12px 15px; } .ce-explorer-heading h2 { font-size:13px; } .ce-explorer-content .graph-scroll { min-height:250px; } }

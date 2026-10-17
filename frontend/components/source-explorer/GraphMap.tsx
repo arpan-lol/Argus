@@ -85,10 +85,19 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
       if (!a || !b) continue;
       if ((a.x < -30 && b.x < -30) || (a.x > width + 30 && b.x > width + 30) || (a.y < -30 && b.y < -30) || (a.y > height + 30 && b.y > height + 30)) continue;
       const active = [selected.current, hovered.current].some(id => id && (edge.source === id || edge.target === id));
-      context.strokeStyle = active ? (dark ? '#cfb46b' : '#9c833e') : desired === 'groups' ? (dark ? '#66776b' : '#a3b4a7') : (dark ? '#39443e' : '#d2ddd4');
-      context.lineWidth = active ? 1.8 : desired === 'groups' ? 1 : .7;
+      const branch = edge.type === 'HAS_SECTION' || edge.type === 'HAS_CHUNK';
+      context.strokeStyle = active ? (dark ? '#dfc374' : '#88702c') : branch ? (dark ? '#80968a' : '#7c9284') : (dark ? '#64796b' : '#92a497');
+      context.lineWidth = active ? 1.9 : branch ? 1.25 : 1;
       context.setLineDash(edge.derived || edge.type === 'SHARES_TERM' || edge.type === 'SHARED_MENTION' ? [3, 4] : []);
-      context.beginPath(); context.moveTo(a.x, a.y); context.lineTo(b.x, b.y); context.stroke();
+      context.beginPath(); context.moveTo(a.x, a.y);
+      if (branch) {
+        const junction = a.y + (b.y - a.y) * .52;
+        context.bezierCurveTo(a.x, junction, b.x, junction, b.x, b.y);
+      } else if (edge.type === 'NEXT_CHUNK') {
+        const bend = Math.min(28, Math.abs(b.x - a.x) * .25 + 9);
+        context.bezierCurveTo(a.x, a.y + bend, b.x, b.y + bend, b.x, b.y);
+      } else context.lineTo(b.x, b.y);
+      context.stroke();
     }
     context.setLineDash([]);
     screenNodes.current = [];
@@ -147,16 +156,20 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
       if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { move(target); return; }
       const distance = Math.hypot(target.x - from.x, target.y - from.y);
       const travelZoom = scale(Math.min(from.zoom, target.zoom, Math.min(dimensions.current.width, dimensions.current.height) / Math.max(distance * 1.4, 1)));
-      const started = performance.now(), duration = distance > 600 ? 1600 : 700;
+      const zoomOutMs = distance > 600 ? 480 : 210;
+      const panMs = distance > 600 ? Math.min(2400, 1200 + Math.sqrt(distance) * 5) : 650;
+      const zoomInMs = distance > 600 ? 560 : 245;
+      const started = performance.now(), duration = zoomOutMs + panMs + zoomInMs;
       const ease = (n: number) => 1 - Math.pow(1 - n, 3);
+      const smooth = (n: number) => n * n * (3 - 2 * n);
       const interpolate = (a: number, b: number, amount: number) => a + (b - a) * amount;
       const frame = (now: number) => {
         if (disposed.current) return;
-        const progress = Math.min(1, (now - started) / duration);
-        const pan = ease(Math.max(0, Math.min(1, (progress - .18) / .58)));
-        const zoom = progress < .3 ? Math.exp(interpolate(Math.log(from.zoom), Math.log(travelZoom), ease(progress / .3))) : progress > .65 ? Math.exp(interpolate(Math.log(travelZoom), Math.log(target.zoom), ease((progress - .65) / .35))) : travelZoom;
+        const elapsed = Math.min(duration, now - started);
+        const pan = smooth(Math.max(0, Math.min(1, (elapsed - zoomOutMs) / panMs)));
+        const zoom = elapsed < zoomOutMs ? Math.exp(interpolate(Math.log(from.zoom), Math.log(travelZoom), ease(elapsed / zoomOutMs))) : elapsed > zoomOutMs + panMs ? Math.exp(interpolate(Math.log(travelZoom), Math.log(target.zoom), ease((elapsed - zoomOutMs - panMs) / zoomInMs))) : travelZoom;
         move({ x: interpolate(from.x, target.x, pan), y: interpolate(from.y, target.y, pan), zoom });
-        if (progress < 1) animation.current = requestAnimationFrame(frame);
+        if (elapsed < duration) animation.current = requestAnimationFrame(frame);
       };
       animation.current = requestAnimationFrame(frame);
     } catch (failure) { if (!disposed.current) setError(failure instanceof Error ? failure.message : 'Unable to find this source.'); }
