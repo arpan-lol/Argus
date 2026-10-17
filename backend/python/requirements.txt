@@ -8,3 +8,4 @@ falkordb==1.8.0
 langgraph>=1,<2
 langgraph-checkpoint-postgres>=3,<4
 python-multipart>=0.0.20
+mcp>=1.30,<2

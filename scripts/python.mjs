@@ -18,6 +18,7 @@ const commands = {
   build: ['-m', 'compileall', '-q', 'backend/python/app', 'backend/python/scripts'],
   setup: ['-m', 'pip', 'install', '-r', 'backend/python/requirements.txt', '-r', 'backend/python/requirements-ingestion.txt'],
   migrate: ['backend/python/scripts/migrate_legacy.py'],
+  mcp: ['backend/python/scripts/research_mcp.py'],
   ingest: ['scripts/python/ingest.py'],
 };
 if (!commands[mode]) throw new Error(`Unknown Python command: ${mode}`);
