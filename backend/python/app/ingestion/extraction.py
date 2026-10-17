@@ -122,7 +122,7 @@ def extract_document(pipeline, job):
                     pipeline.validate_extraction(chunk, prior)
                 except ValueError as error:
                     feedback.update({"error": provider.safe_error(error), "previous_output": prior, "instruction": "Repair rejected output using exact case-sensitive source substrings. Omit unsupported records."})
-            provider.credentials()
+            provider.credentials(job["configuration"].get("llmProvider"), job["configuration"].get("llmCredentialEnv"))
             attempts = 0
             completed_output = False
 

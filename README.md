@@ -69,11 +69,11 @@ Chunk, entity and connection vectors are indexed in FalkorDB. Azure text-embeddi
 
 On 2026-10-18 the user authorized backing up and clearing all derived corpus data. The active parsed corpus, graphs, vectors, jobs and search history are empty. Raw downloaded files and preserved originals remain outside Git, along with an ignored archival backup. Do not ingest from data/backups/ or restore old parsed artifacts into the new pipeline by default.
 
-Dashboard chat still uses the earlier BM25 endpoint and currently has no indexed data. The agent is being developed separately; ingestion preparation does not run the corpus. Source Explorer retains the existing layouts/readers and shows processing stages when files are explicitly submitted.
+Dashboard chat uses the merged bounded LangGraph investigation over published semantic sources and currently has no indexed data. Ingestion preparation does not run the corpus or invoke the agent. Source Explorer retains the existing layouts/readers and shows processing stages when files are explicitly submitted.
 
 ## Published retrieval tools
 
-`GET /api/retrieval/tools` lists six typed tools: `search_sources`, `find_entities`, `read_chunks`, `inspect_assertions`, `expand_connections`, and `find_paths`. Invoke one with `POST /api/retrieval/tools/{name}` and body `{"arguments": {...}}`. The agent receives these contracts rather than schema access or arbitrary Cypher. `app.retrieval.bindings.get_tools()` returns LangChain StructuredTools for a later LangGraph ToolNode; no agent loop or MCP transport is enabled yet.
+`GET /api/retrieval/tools` lists six typed tools: `search_sources`, `find_entities`, `read_chunks`, `inspect_assertions`, `expand_connections`, and `find_paths`. Invoke one with `POST /api/retrieval/tools/{name}` and body `{"arguments": {...}}`. The agent receives these contracts rather than schema access or arbitrary Cypher. `app.retrieval.bindings.get_tools()` returns LangChain StructuredTools for the merged LangGraph investigation agent. MCP transport is not enabled.
 
 `POST /api/retrieval/search` accepts `{"query":"your question","mode":"hybrid","limit":10}`. Modes are lexical, vector and hybrid. Search combines published Postgres BM25 with native FalkorDB chunk ANN using reciprocal-rank fusion, constant 60. Query embeddings use explicit retrieval-query semantics, matching the publication's provider/model/dimensions, with a persistent profile-keyed cache. Hybrid channel failure is explicitly reported as partial, never silently disguised as hybrid success.
 
@@ -88,3 +88,34 @@ Slice 4 was previously exercised on one semantic source before the reset. That s
 The source map retains both Network and Trees layouts, stable positions, progressive viewport loading, citation navigation, and expanded modal viewing. The native FalkorDB Browser can inspect semantic graphs once fresh ingestion creates them.
 
 Downloaded corpus files, provider credentials, databases, model artifacts, and detailed local progress remain outside Git. The root docs/ folder is intentionally ignored. Read agents.md for working agreements.
+
+## Model deployment configuration
+
+
+Use the deployment variables in `backend/python/.env.example`:
+
+| Variables | Role |
+| --- | --- |
+| `LLM1_DEPLOYMENT_NAME`, `LLM1_DEPLOYMENT_URL`, `LLM1_DEPLOYMENT_KEY` | Chat; default deployment `gpt-5` |
+| `LLM2_DEPLOYMENT_NAME`, `LLM2_DEPLOYMENT_URL`, `LLM2_DEPLOYMENT_KEY` | Source extraction and entity resolution judgments; default deployment `gpt-4.1-mini` |
+| `AZURE_API_KEY` | Legacy agent fallback only; ingestion requires explicit role keys |
+| `AZURE_OPENAI_ENDPOINT` | Legacy provider setting; ingestion uses explicit embedding settings |
+| `EMBEDDING_MODEL_NAME`, `EMBEDDING_MODEL_ENDPOINT`, `EMBEDDING_MODEL_KEY` | Document and query embeddings; default model `text-embedding-3-large`, 3,072 dimensions |
+
+LLM URLs can be the complete Responses endpoint, such as `https://YOUR-RESOURCE.services.ai.azure.com/openai/v1/responses`. The application splits the API protocol from the base URL. A bare embedding resource endpoint gains `/openai/v1`; `/openai/v1/embeddings` is also accepted and normalized. An explicit `/models` embedding base uses the Azure inference API version. URLs must use HTTPS without credentials or query strings. Role-specific keys are used for their corresponding requests and never stored in processing profiles, graphs, or receipts. Responses requests use `store=false` and schema-validated output.
+
+`LLM1_*` takes precedence over legacy chat settings; `LLM2_*` takes precedence over legacy extraction and resolution settings. GPT-5 cannot be selected as LLM2 in new profiles. Ingestion requires LLM2 and never substitutes LLM1. Existing Google/OpenAI/Azure profiles and older `ARGUS_*` model settings remain supported. When `EMBEDDING_MODEL_NAME` is present, new profiles default to Azure embeddings unless `ARGUS_MODEL_PROVIDER` explicitly selects another provider. The approved ingestion deployment uses native 3,072 dimensions.
+
+Embedding model, dimensions, provider, and normalized Azure embedding endpoint define the new vector namespace and query cache. Existing vectors are retained; switching to a new namespace requires reprocessing sources before they become searchable there. Model and endpoint changes produce new processing versions rather than rewriting saved jobs. Provider errors do not silently select another model. Ingestion uses configured timeouts, rate limits and bounded retries.
+
+## Conversational research
+
+`POST /api/chat` returns NDJSON events for acceptance, model activity, real tool calls, usage, and the final cited report. Greetings receive a conversational answer without keyword searches. Research answers use the six published-source tools, validate citation revisions and quotations, and open the cited processing job in Files. The legacy map retains its own identifiers and scope.
+
+Configure the `LLM1_*` deployment variables above to select the chat model. Legacy independent `ARGUS_CHAT_*` settings remain available when LLM1 is absent. Responses requests use `store=false`.
+
+Postgres stores run events, tool receipts, budgets, and LangGraph checkpoints. `GET /api/chat/{runId}` reconnects to saved results; `POST /api/chat/{runId}/resume` retries an unfinished step. The browser retains at most 12 run IDs in session storage for reload recovery, and sends only two preceding turns as conversational context. New chat clears those browser references. There is no cross-conversation semantic memory.
+
+Each run admits at most eight model calls and eight retrieval calls, with 10,000 estimated context tokens, 2,048 maximum output tokens per call, and 64,000 reserved tokens overall. Two concurrent workers are allowed. A 180-second admission deadline and individual model request timeouts bound execution; in-flight work can exceed the admission deadline. Token reservations are estimates; reported usage is displayed separately. The optional $0.25 reservation limit applies only when both `ARGUS_CHAT_INPUT_USD_PER_MILLION` and `ARGUS_CHAT_OUTPUT_USD_PER_MILLION` are configured with deployment prices. No dollar cost is invented when prices are absent. Budget environment overrides in `.env.example` may lower these limits.
+
+Run recovery preserves previous budget reservations. Completed tool results replay from their receipts; a crash after a paid model call but before its checkpoint can cause that call to repeat on resume. Citation validation checks source identity and quotation offsets; it does not prove every generated interpretation. Available publication counts are shown in the chat and engine configuration.

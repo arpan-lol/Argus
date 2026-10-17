@@ -37,8 +37,11 @@ def connection():
 
 
 def migrate():
+    from app.ingestion.schema import ensure_schema
+
     with connection() as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version text PRIMARY KEY, applied_at timestamptz DEFAULT now())")
+        ensure_schema(conn)
         for path in sorted((__import__('pathlib').Path(__file__).resolve().parent.parent / "migrations").glob("*.sql")):
             if not conn.execute("SELECT 1 FROM schema_migrations WHERE version=%s", (path.name,)).fetchone():
                 conn.execute(path.read_text(encoding="utf-8"))

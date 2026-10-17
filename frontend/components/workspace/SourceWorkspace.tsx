@@ -4,13 +4,21 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowUp, ArrowUpRight, ChevronDown, FileText, Loader2, Maximize2, MessageSquare, Minimize2, Moon, Network, PanelLeftClose, PanelLeftOpen, Paperclip, Plus, Settings2, Sun, Upload, X } from 'lucide-react';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { Switch } from '@/components/ui/switch';
-import { CitationButton } from '@/components/CitationButton';
+import { ChatResponse } from './ChatResponse';
+import { streamChat, type ChatTurn, type ChatSource, type ChatResult, type ChatEvent, type SavedChat, type ChatCoverage } from '@/lib/chat';
 import { FileExplorer } from '@/components/source-explorer/FileExplorer';
 import { GraphMap, type MapNode } from '@/components/source-explorer/GraphMap';
 import { useSearchOptions } from '@/hooks/use-search-options';
-import { api, type DocumentSummary, type EvidenceDocument, type EvidenceResult, type SearchRun } from '@/lib/evidence-types';
+import { api, type DocumentSummary, type EvidenceDocument } from '@/lib/evidence-types';
 
-type Turn = { id: string; query: string; run?: SearchRun; error?: string };
+
+
+function savedRuns(): string[] {
+  try {
+    const value: unknown = JSON.parse(sessionStorage.getItem('argus-chat-runs') || '[]');
+    return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string' && /^[a-f0-9-]{36}$/.test(id)).slice(-12) : [];
+  } catch { return []; }
+}
 
 export function SourceWorkspace() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -28,8 +36,11 @@ export function SourceWorkspace() {
   const [selectedNode, setSelectedNode] = useState<MapNode | null>(null);
   const [nodeDetails, setNodeDetails] = useState<Record<string, unknown> | null>(null);
   const [query, setQuery] = useState('');
-  const [turns, setTurns] = useState<Turn[]>([]);
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [pipelineFocus, setPipelineFocus] = useState<ChatSource | null>(null);
+  const [chatConfig, setChatConfig] = useState<{model: string; coverage: ChatCoverage} | null>(null);
   const [busy, setBusy] = useState(false);
+  const [activeTurnId, setActiveTurnId] = useState<string>();
   const { options, updateOptions } = useSearchOptions('source-workspace');
   const messages = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
@@ -38,6 +49,9 @@ export function SourceWorkspace() {
   const pendingChunk = useRef<string | undefined>(undefined);
 
   useEffect(() => {
+    void api<{model: string; coverage: ChatCoverage}>('/chat-config').then(setChatConfig).catch(() => undefined);
+    const saved = savedRuns();
+    void Promise.all(saved.slice(-12).map(id => api<SavedChat>(`/chat/${id}`).catch(() => null))).then(runs => setTurns(runs.filter((run): run is SavedChat => !!run).map(run => ({id: run.runId, runId: run.runId, query: run.query, model: run.model, events: run.events, result: run.result || undefined, error: run.result ? undefined : run.error || 'This investigation has saved progress. Reconnect to continue.'}))));
     setMapMode(localStorage.getItem('argus-map-mode') === 'grouped' ? 'grouped' : 'network');
     const value = localStorage.getItem('falkor-theme') === 'dark';
     setDark(value);
@@ -101,25 +115,54 @@ export function SourceWorkspace() {
     localStorage.setItem('falkor-theme', next ? 'dark' : 'light');
   };
   const focusSource = (nextDocumentId: string, chunkId?: string) => {
+    setPipelineFocus(null);
     if (nextDocumentId !== documentId) { pendingChunk.current = chunkId; setDocumentId(nextDocumentId); }
     else {
       setSelectedId(chunkId || nextDocumentId);
     }
   };
-  const selectCitation = (source: EvidenceResult) => { focusSource(source.documentId, source.chunkId); setMapFocus({nodeId:source.chunkId,nonce:Date.now()}); setView('graph'); };
+  const selectCitation = (source: ChatSource) => { setPipelineFocus(source); setView('files'); };
   const selectNode = (node: MapNode) => { if (node.documentId) focusSource(node.documentId, node.chunkId); setSelectedId(node.id); setSelectedNode(node); };
   const upload = () => { setView('files'); setUploadRequest(previous => previous + 1); };
+  const receive = (id: string, event: ChatEvent) => {
+    if (event.type === 'accepted' && event.runId) {
+      const saved = savedRuns();
+      sessionStorage.setItem('argus-chat-runs', JSON.stringify([...new Set([...saved, event.runId])].slice(-12)));
+    }
+    setTurns(previous => previous.map(turn => turn.id === id ? {
+      ...turn, runId: event.runId || turn.runId, model: event.model || turn.model,
+      events: [...turn.events, event],
+      ...(event.type === 'done' ? {result: event as unknown as ChatResult, error: undefined} : {}),
+      ...(event.type === 'error' ? {error: event.message || 'The investigation stopped. Resume to retry.'} : {}),
+    } : turn));
+  };
+  const resume = async (turn: ChatTurn) => {
+    if (!turn.runId || busy) return;
+    setBusy(true); setActiveTurnId(turn.id);
+    try {
+      const saved = await api<SavedChat>(`/chat/${turn.runId}`);
+      if (saved.result) receive(turn.id, {type: 'done', ...saved.result} as ChatEvent);
+      else if (saved.status === 'running') throw new Error('The investigation is still running. Reconnect shortly to retrieve its answer.');
+      else {
+        setTurns(previous => previous.map(item => item.id === turn.id ? {...item, error: undefined} : item));
+        await streamChat(`/chat/${turn.runId}/resume`, {}, event => receive(turn.id, event));
+      }
+    } catch (failure) { setTurns(previous => previous.map(item => item.id === turn.id ? {...item, error: failure instanceof Error ? failure.message : 'Could not reconnect.'} : item)); }
+    finally { setBusy(false); }
+  };
   const submit = async (event?: FormEvent, suggestion?: string) => {
     event?.preventDefault();
     const value = (suggestion || query).trim();
     if (!value || busy) return;
     const id = crypto.randomUUID();
-    setTurns(previous => [...previous, { id, query: value }]);
-    setQuery(''); setBusy(true);
-    try {
-      const run = await api<SearchRun>('/search', { method: 'POST', body: JSON.stringify({ query: value, options: { graphExpansion: options.graphExpansion, limit: 8 } }) });
-      setTurns(previous => previous.map(turn => turn.id === id ? { ...turn, run } : turn));
-    } catch (failure) { setTurns(previous => previous.map(turn => turn.id === id ? { ...turn, error: failure instanceof Error ? failure.message : 'Search failed. Please retry.' } : turn)); }
+    const history = turns.filter(turn => turn.result).slice(-2).flatMap(turn => [
+      {role: 'user', content: turn.query.slice(0, 2000)},
+      {role: 'assistant', content: turn.result!.report.paragraphs.map(paragraph => paragraph.text).join('\n').slice(0, 2000)},
+    ]);
+    setTurns(previous => [...previous, {id, query: value, model: chatConfig?.model, events: []}]);
+    setQuery(''); setBusy(true); setActiveTurnId(id);
+    try { await streamChat('/chat', {query: value, history, graph_expansion: options.graphExpansion}, event => receive(id, event)); }
+    catch (failure) { setTurns(previous => previous.map(turn => turn.id === id ? {...turn, error: failure instanceof Error ? failure.message : 'The request failed. Please retry.'} : turn)); }
     finally { setBusy(false); }
   };
   const selectedChunk = document?.chunks.find(chunk => chunk.id === (selectedNode?.chunkId || selectedNode?.id));
@@ -130,10 +173,10 @@ export function SourceWorkspace() {
 
   return <div className={`ce-workspace ${sidebarOpen ? '' : 'ce-sidebar-collapsed'}`}>
     <aside className="ce-sidebar">
-      <div className="ce-brand"><img src="/cosmic-logo.png" alt="" width={29} height={29} /><strong>Argus</strong><button className="ce-icon" onClick={() => setSidebarOpen(false)} aria-label="Collapse sidebar"><PanelLeftClose size={17} /></button></div>
-      <button className="ce-new-chat" onClick={() => { setTurns([]); setQuery(''); composer.current?.focus(); }} disabled={busy}><Plus size={17} />New chat</button>
+      <div className="ce-brand"><img src="/argus-logo.svg" alt="" width={29} height={29} /><strong>Argus</strong><button className="ce-icon" onClick={() => setSidebarOpen(false)} aria-label="Collapse sidebar"><PanelLeftClose size={17} /></button></div>
+      <button className="ce-new-chat" onClick={() => { setTurns([]); sessionStorage.removeItem('argus-chat-runs'); setQuery(''); composer.current?.focus(); }} disabled={busy}><Plus size={17} />New chat</button>
       <div className="ce-navigation-label">Your workspace</div>
-      <button className="ce-session active" onClick={() => messages.current?.scrollTo({ top: 0, behavior: 'smooth' })}><MessageSquare size={16} /><span>Materials & water</span></button>
+      <button className="ce-session active" onClick={() => messages.current?.scrollTo({ top: 0, behavior: 'smooth' })}><MessageSquare size={16} /><span>Current conversation</span></button>
       <div className="ce-sidebar-bottom"><div className="ce-user"><span className="ce-avatar">AT</span><span><strong>Arpan Taneja</strong><small>Local workspace · demo profile</small></span></div><button className="ce-theme" onClick={toggleTheme} aria-label={`Switch to ${dark ? 'light' : 'dark'} mode`}>{dark ? <Sun size={16} /> : <Moon size={16} />}<span>{dark ? 'Light mode' : 'Dark mode'}</span></button></div>
     </aside>
     <main className="ce-main">
@@ -141,8 +184,8 @@ export function SourceWorkspace() {
         <ResizablePanel defaultSize={52} minSize={30} className="ce-chat-panel">
           <div className="ce-chat-heading">{!sidebarOpen && <><button className="ce-icon" onClick={() => setSidebarOpen(true)} aria-label="Expand sidebar"><PanelLeftOpen size={18} /></button><span className="ce-mobile-brand">Argus</span></>}<span>Chat</span><button className="ce-icon ce-mobile-theme" onClick={toggleTheme} aria-label={`Switch to ${dark ? 'light' : 'dark'} mode`}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button><button className="ce-icon ce-mobile-source" onClick={() => window.document.querySelector('.ce-explorer-panel')?.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'})} aria-label="Open Source Explorer"><Network size={17} /></button></div>
           <div className="ce-messages" ref={messages}>
-            {!turns.length && <div className="ce-chat-empty"><img src="/cosmic-logo.png" alt="" width={46} height={46} /><h1>Start with a question.</h1><p>Explore your sources, follow their connections,<br />and pick up right where a citation leads.</p><div className="ce-suggestions"><button onClick={() => void submit(undefined, 'adsorption regeneration water')}>Find research on water treatment<ArrowUp size={14} /></button><button onClick={() => void submit(undefined, 'metal organic framework pollutant removal')}>Explore metal–organic frameworks<ArrowUp size={14} /></button></div></div>}
-            {turns.map(turn => <div className="ce-turn" key={turn.id}><div className="ce-user-message">{turn.query}</div><div className="ce-response"><div className="ce-response-name"><img src="/cosmic-logo.png" alt="" width={22} height={22} /><strong>Source search</strong></div>{turn.error ? <div className="ce-inline-error" role="alert">{turn.error}</div> : !turn.run ? <div className="ce-searching"><Loader2 size={15} className="spinning" />Searching your sources…</div> : <><p className="ce-response-summary">{turn.run.results.length ? `Found ${turn.run.results.length} source matches. Select a citation to explore its location in the graph.` : 'No source matches. Try another phrase or a more specific term.'}</p><p className="ce-retrieval-note">Retrieved excerpts · answer generation is not connected</p>{turn.run.results.map((source, index) => <article className={`ce-source-match ${selectedId === source.chunkId ? 'is-focused' : ''}`} key={source.chunkId}><h2>{source.documentTitle}</h2><p>{source.text.length > 550 ? `${source.text.slice(0, 550)}…` : source.text}</p><CitationButton citation={source} index={index + 1} onCitationClick={() => selectCitation(source)} selected={selectedId === source.chunkId} /></article>)}</>}</div></div>)}
+            {!turns.length && <div className="ce-chat-empty"><img src="/argus-logo.svg" alt="" width={46} height={46} /><h1>Start with a question.</h1><p>Ask Argus a question and open its citations.<br />{chatConfig ? `${chatConfig.model.toUpperCase()} · ${chatConfig.coverage.publishedDocuments} published sources available` : 'Connecting to the assistant…'}</p><div className="ce-suggestions"><button onClick={() => void submit(undefined, 'Summarize a published source')}>Summarize a published source<ArrowUp size={14} /></button><button onClick={() => void submit(undefined, 'What sources can you search?')}>What can you search?<ArrowUp size={14} /></button></div></div>}
+            {turns.map(turn => <div className="ce-turn" key={turn.id}><div className="ce-user-message">{turn.query}</div><ChatResponse turn={turn} pending={busy && turn.id === activeTurnId && !turn.result && !turn.error} onCitation={selectCitation} onResume={() => void resume(turn)} /></div>)}
           </div>
           <form className="ce-composer-wrap" onSubmit={submit}><div className="ce-composer"><button type="button" className="ce-icon" onClick={upload} aria-label="Upload a file"><Paperclip size={20} /></button><textarea ref={composer} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit(); } }} rows={1} placeholder="Ask about your sources…" aria-label="Message" disabled={busy} /><button type="submit" className="ce-send" disabled={busy || !query.trim()} aria-label="Send message">{busy ? <Loader2 size={18} className="spinning" /> : <ArrowUp size={19} />}</button></div></form>
         </ResizablePanel>
@@ -151,8 +194,8 @@ export function SourceWorkspace() {
           <dialog open ref={explorerDialog} className={`ce-explorer-shell ${explorerExpanded ? 'is-expanded' : ''}`} aria-labelledby="source-explorer-title" onCancel={event => { event.preventDefault(); if (explorerExpanded) setExplorerExpanded(false); }}>
           <div className="ce-explorer-heading"><h2 id="source-explorer-title">Source Explorer</h2><div className="ce-explorer-actions"><button className="ce-icon" onClick={() => setExplorerExpanded(previous => !previous)} title={explorerExpanded ? 'Restore Source Explorer' : 'Expand Source Explorer'} aria-label={explorerExpanded ? 'Restore Source Explorer' : 'Expand Source Explorer'}>{explorerExpanded ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button><button className="ce-icon" onClick={upload} title="Upload file" aria-label="Upload file"><Upload size={17} /></button><button className={`ce-icon ${view === 'files' ? 'is-active' : ''}`} onClick={() => setView(previous => previous === 'graph' ? 'files' : 'graph')} title={view === 'graph' ? 'Open file viewer' : 'Open graph'} aria-label={view === 'graph' ? 'Open file viewer' : 'Open graph'}>{view === 'graph' ? <FileText size={18} /> : <Network size={18} />}</button><button className={`ce-configuration-button ${configurationOpen ? 'is-active' : ''}`} onClick={() => setConfigurationOpen(previous => !previous)} aria-label="Engine configuration" aria-expanded={configurationOpen} aria-controls="engine-configuration"><Settings2 size={16} /><span>Engine configuration</span><ChevronDown size={12} /></button></div></div>
           {view === 'graph' && <div className="ce-map-toolbar"><div className="ce-map-modes" role="group" aria-label="Graph layout"><button aria-pressed={mapMode === 'network'} onClick={() => { setMapMode('network'); localStorage.setItem('argus-map-mode', 'network'); }}>Network</button><button aria-pressed={mapMode === 'grouped'} onClick={() => { setMapMode('grouped'); localStorage.setItem('argus-map-mode', 'grouped'); }}>Trees</button></div><span title="This view uses the original dictionary-based corpus. New processing results are available in Files.">Legacy graph · {mapMode === 'network' ? 'Shared mentions' : 'Document branches'}</span></div>}
-          {configurationOpen && <section id="engine-configuration" className="ce-configuration"><div><strong>Engine configuration</strong><button className="ce-icon" onClick={() => setConfigurationOpen(false)} aria-label="Close engine configuration"><X size={16} /></button></div><label><span>Graph expansion<small>Follow shared connections after search</small></span><Switch checked={options.graphExpansion} onCheckedChange={checked => updateOptions({ graphExpansion: checked })} /></label><label><span>BM25 search<small>Lexical retrieval · always on</small></span><Switch checked disabled /></label><label><span>Vector search + RRF<small>Embedding pipeline not connected</small></span><Switch checked={false} disabled /></label><p>Changes apply to your next message.</p></section>}
-          <div className="ce-explorer-content">{view === 'graph' ? <>{graphError && <div className="ce-inline-error" role="alert">{graphError}</div>}<GraphMap mode={mapMode} expanded={explorerExpanded} onExpand={() => setExplorerExpanded(previous => !previous)} focus={mapFocus} onSelect={selectNode} onFocus={target => { if (target.documentId) focusSource(target.documentId, target.chunkId); }} /></> : <FileExplorer focusDocumentId={documentId} focusChunkId={selectedId || undefined} uploadRequest={uploadRequest} onDocumentFocus={(id, chunkId) => { focusSource(id, chunkId); if (chunkId) { setMapFocus({nodeId:chunkId,nonce:Date.now()}); setView('graph'); } }} />}</div>
+          {configurationOpen && <section id="engine-configuration" className="ce-configuration"><div><strong>Engine configuration</strong><button className="ce-icon" onClick={() => setConfigurationOpen(false)} aria-label="Close engine configuration"><X size={16} /></button></div><label><span>Graph expansion<small>Follow shared connections after search</small></span><Switch checked={options.graphExpansion} onCheckedChange={checked => updateOptions({ graphExpansion: checked })} /></label><label><span>Hybrid source search<small>BM25 + vectors · selected by the assistant</small></span><Switch checked disabled /></label><p>{chatConfig?.model.toUpperCase() || 'GPT-5'} · {chatConfig?.coverage.publishedDocuments ?? '…'} published sources. The legacy graph is a separate catalog.</p><p>Changes apply to your next message.</p></section>}
+          <div className="ce-explorer-content">{view === 'graph' ? <>{graphError && <div className="ce-inline-error" role="alert">{graphError}</div>}<GraphMap mode={mapMode} expanded={explorerExpanded} onExpand={() => setExplorerExpanded(previous => !previous)} focus={mapFocus} onSelect={selectNode} onFocus={target => { if (target.documentId) focusSource(target.documentId, target.chunkId); }} /></> : <FileExplorer focusDocumentId={pipelineFocus?.documentId || documentId} focusChunkId={pipelineFocus?.chunkId || selectedId || undefined} focusCollection={pipelineFocus ? 'pipeline' : 'legacy'} focusJobId={pipelineFocus?.jobId} uploadRequest={uploadRequest} onDocumentFocus={(id, chunkId) => { focusSource(id, chunkId); if (chunkId) { setMapFocus({nodeId:chunkId,nonce:Date.now()}); setView('graph'); } }} />}</div>
           </dialog>
         </ResizablePanel>
       </ResizablePanelGroup>

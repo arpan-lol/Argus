@@ -14,8 +14,9 @@ from .structure import sections_for, chunk_sections
 
 def semantic_graph_name(config):
     space = [config["provider"], config["embeddingModel"], config["embeddingDimensions"]]
-    if config.get("embeddingResourceIdentity"):
-        space.append(config["embeddingResourceIdentity"])
+    resource = config.get("embeddingResourceIdentity") or config.get("embeddingBaseUrl")
+    if resource:
+        space.append(resource)
     return config["semanticGraph"] + "_" + fingerprint(space)[:10]
 
 

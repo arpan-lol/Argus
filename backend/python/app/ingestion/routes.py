@@ -217,10 +217,34 @@ def latest_document_job(source_id):
 @router.get("/documents/{source_id}")
 def document(source_id: str):
     record = latest_document_job(source_id)
+    return document_for_job(record)
+
+
+@router.get("/jobs/{job_id}/document")
+def job_document(job_id: str):
+    try:
+        return document_for_job(pipeline.job_row(job_id))
+    except KeyError:
+        raise HTTPException(404, "Source job not found")
+
+
+@router.get("/jobs/{job_id}/original")
+def job_original(job_id: str):
+    try:
+        record = pipeline.job_row(job_id)
+    except KeyError:
+        raise HTTPException(404, "Source job not found")
+    return FileResponse(record["original_path"], filename=record["filename"])
+
+
+def document_for_job(record):
+    source_id = record["source_id"]
     normalized = pipeline.artifact(record["id"], "normalize")
     if not normalized:
         raise HTTPException(409, "Source text is not parsed yet")
     chunks = pipeline.artifact(record["id"], "chunk") or {"chunks": []}
+    extraction = pipeline.artifact(record["id"], "extract") or {}
+    processing_warnings = [*normalized["metadata"].get("warnings", []), *[warning["message"] for warning in extraction.get("warnings", [])]]
     title = normalized["metadata"].get("title", record["filename"])
     source_url = normalized["metadata"].get("sourceUrl") or record["source_url"]
     sections = sections_for(normalized, record)
@@ -228,7 +252,7 @@ def document(source_id: str):
     for chunk in chunks["chunks"]:
         primary, related = chunk_sections(chunk, sections)
         enriched_chunks.append({**chunk, "documentId": source_id, "sectionId": primary["id"], "sectionIds": [section["id"] for section in related], "sectionTitle": primary["title"], "sourceUrl": source_url, "locationKind": "source"})
-    return {**normalized["metadata"], "id": source_id, "title": title, "filename": record["filename"], "text": normalized["text"], "textLength": len(normalized["text"]), "chunks": enriched_chunks, "sections": sections, "entities": [], "offsetUnit": "unicode_codepoint", "textNormalization": normalized["normalization"], "extractionBoundary": "Inspect the ingestion job for extraction/validation readiness; parsed text does not imply indexed semantic assertions.", "blocks": normalized["blocks"], "metadata": normalized["metadata"], "status": record["status"], "jobId": record["id"], "revision": record["revision"], "processingVersion": record["processing_version"], "sourceUrl": source_url, "capabilities": {"original": True, "parsedText": True, "chunks": bool(chunks["chunks"]), "indexed": record["status"] == "complete"}}
+    return {**normalized["metadata"], "id": source_id, "title": title, "processingWarnings": processing_warnings, "extractionQuality": extraction.get("quality"), "filename": record["filename"], "text": normalized["text"], "textLength": len(normalized["text"]), "chunks": enriched_chunks, "sections": sections, "entities": [], "offsetUnit": "unicode_codepoint", "textNormalization": normalized["normalization"], "extractionBoundary": "Inspect the ingestion job for extraction/validation readiness; parsed text does not imply indexed semantic assertions.", "blocks": normalized["blocks"], "metadata": normalized["metadata"], "status": record["status"], "jobId": record["id"], "revision": record["revision"], "processingVersion": record["processing_version"], "sourceUrl": source_url, "capabilities": {"original": True, "parsedText": True, "chunks": bool(chunks["chunks"]), "indexed": record["status"] == "complete"}}
 
 
 @router.get("/documents/{source_id}/download")
