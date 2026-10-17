@@ -6,7 +6,7 @@ from psycopg.types.json import Jsonb
 from app.database import connection
 from .config import fingerprint
 from .providers import Providers, ResolutionBatch, RESOLUTION_PROMPT
-from .publication import graph_connection, index
+from .publication import graph_connection, index, semantic_graph_name
 
 
 def describe(entity):
@@ -14,7 +14,7 @@ def describe(entity):
 
 
 def plan_resolution(pipeline, job, provider, graph):
-    version = "batched-pairs-deferred-2"
+    version = job["configuration"].get("resolutionVersion", "batched-pairs-scoped-3")
     previous = pipeline.item(job["id"], "resolve_plan", version)
     if previous:
         return previous
@@ -38,8 +38,8 @@ def plan_resolution(pipeline, job, provider, graph):
     for record in records:
         entity = record["entity"]
         vector = pipeline.item(job["id"], "entity_embed", record["mentionId"])["vector"]
-        if any(not math.isfinite(value) for value in vector):
-            raise ValueError("Entity embedding contains nonfinite values")
+        if len(vector) != job["configuration"]["embeddingDimensions"] or not any(vector) or any(not math.isfinite(value) for value in vector):
+            raise ValueError("Entity embedding is missing, nonfinite, zero or has the wrong dimensions")
         with connection() as conn:
             conn.execute("INSERT INTO ingestion_entities(id,label,entity_type,description,aliases,embedding,embedding_model,created_by_job,source_quote) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", (record["provisionalId"], entity["name"], entity["entity_type"], entity["description"], Jsonb([entity["name"]]), Jsonb(vector), job["configuration"]["embeddingModel"], job["id"], entity["quote"]))
         graph.query("MERGE (e:Entity {id:$id}) ON CREATE SET e.label=$name,e.type=$type,e.description=$description,e.embedding=vecf32($vector),e.embeddingModel=$model,e.jobId=$job,e.active=false SET e.resolutionDeferred=$deferred", {"id": record["provisionalId"], "name": entity["name"], "type": entity["entity_type"], "description": entity["description"], "vector": vector, "model": job["configuration"]["embeddingModel"], "job": job["id"], "deferred": record["deferred"]})
@@ -54,7 +54,7 @@ def plan_resolution(pipeline, job, provider, graph):
         vector = pipeline.item(job["id"], "entity_embed", record["mentionId"])["vector"]
         neighbors = graph.query("CALL db.idx.vector.queryNodes('Entity','embedding',$limit,vecf32($vector)) YIELD node,score WHERE node.embeddingModel=$model AND (node.active=true OR node.jobId=$job) AND coalesce(node.resolutionDeferred,false)=false RETURN node.id,score", {"limit": job["configuration"]["resolutionSearchCandidates"], "vector": vector, "model": job["configuration"]["embeddingModel"], "job": job["id"]}).result_set
         with connection() as conn:
-            candidates = conn.execute("SELECT e.* FROM ingestion_entities e WHERE e.id<>%s AND embedding_model=%s AND (e.id=ANY(%s) OR lower(label)=lower(%s)) AND NOT(e.id=ANY(%s)) AND NOT EXISTS(SELECT 1 FROM ingestion_resolution_decisions blocked JOIN ingestion_publications published ON published.job_id=blocked.job_id WHERE blocked.canonical_id=e.id AND blocked.decision='deferred' AND published.active) AND (created_by_job=%s OR EXISTS(SELECT 1 FROM ingestion_resolution_decisions d JOIN ingestion_publications p ON p.job_id=d.job_id WHERE d.canonical_id=e.id AND d.decision<>'deferred' AND p.active)) ORDER BY CASE WHEN lower(label)=lower(%s) THEN 0 ELSE 1 END,created_at LIMIT %s", (record["provisionalId"], job["configuration"]["embeddingModel"], [row[0] for row in neighbors], entity["name"], deferred_ids, job["id"], entity["name"], job["configuration"]["resolutionSearchCandidates"])).fetchall()
+            candidates = conn.execute("SELECT e.* FROM ingestion_entities e WHERE e.id<>%s AND embedding_model=%s AND (e.id=ANY(%s) OR lower(label)=lower(%s)) AND NOT(e.id=ANY(%s)) AND NOT EXISTS(SELECT 1 FROM ingestion_resolution_decisions blocked JOIN ingestion_publications published ON published.job_id=blocked.job_id WHERE blocked.canonical_id=e.id AND blocked.decision='deferred' AND published.active AND published.counts->>'graph'=%s) AND (created_by_job=%s OR EXISTS(SELECT 1 FROM ingestion_resolution_decisions d JOIN ingestion_publications p ON p.job_id=d.job_id WHERE d.canonical_id=e.id AND d.decision<>'deferred' AND p.active AND p.counts->>'graph'=%s)) ORDER BY CASE WHEN lower(label)=lower(%s) THEN 0 ELSE 1 END,created_at LIMIT %s", (record["provisionalId"], job["configuration"]["embeddingModel"], [row[0] for row in neighbors], entity["name"], deferred_ids, semantic_graph_name(job["configuration"]), job["id"], semantic_graph_name(job["configuration"]), entity["name"], job["configuration"]["resolutionSearchCandidates"])).fetchall()
         scored = []
         for candidate in candidates:
             other = candidate["embedding"]
