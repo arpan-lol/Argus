@@ -62,7 +62,9 @@ export interface SearchRun {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api${path}`, { ...init, headers: { 'Content-Type': 'application/json', ...init?.headers }, cache: 'no-store' });
+  const headers = new Headers(init?.headers);
+  if (!(init?.body instanceof FormData) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  const response = await fetch(`/api${path}`, { ...init, headers, cache: 'no-store' });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     throw new Error(body.message || (typeof body.error === 'string' ? body.error : body.error?.message) || `Request failed (${response.status}). Check that the backend is running.`);

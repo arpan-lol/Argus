@@ -1,0 +1,10 @@
+CREATE EXTENSION IF NOT EXISTS pg_search;
+CREATE TABLE legacy_documents(id text PRIMARY KEY, title text NOT NULL, metadata jsonb NOT NULL, payload bytea NOT NULL, imported_at timestamptz DEFAULT now());
+CREATE TABLE legacy_sections(id text PRIMARY KEY, document_id text NOT NULL REFERENCES legacy_documents(id), title text NOT NULL, start_offset integer, end_offset integer, payload jsonb NOT NULL);
+CREATE INDEX legacy_sections_document ON legacy_sections(document_id,start_offset);
+CREATE TABLE legacy_chunks(id text PRIMARY KEY, document_id text NOT NULL REFERENCES legacy_documents(id), section_id text, start_offset integer, text text NOT NULL, document_title text NOT NULL, section_title text NOT NULL, payload jsonb NOT NULL);
+CREATE INDEX legacy_chunks_document ON legacy_chunks(document_id,start_offset);
+CREATE INDEX legacy_chunks_bm25 ON legacy_chunks USING bm25(id,text,document_title,section_title) WITH(key_field='id');
+CREATE TABLE layout_positions(mode text NOT NULL, kind text NOT NULL, id text NOT NULL, slot integer, x double precision NOT NULL, y double precision NOT NULL, label text, entity_type text, PRIMARY KEY(mode,kind,id));
+CREATE TABLE api_runs(id text PRIMARY KEY, created_at timestamptz NOT NULL DEFAULT now(), payload jsonb NOT NULL);
+CREATE TABLE catalog_metadata(id text PRIMARY KEY, payload jsonb NOT NULL);

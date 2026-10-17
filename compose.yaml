@@ -1,4 +1,19 @@
 services:
+  postgres:
+    image: paradedb/paradedb@sha256:3f608f8a531e5552b2e546471271fa11e305a1261b9c4cccfb723b0fa4ad092a
+    environment:
+      POSTGRES_USER: argus
+      POSTGRES_PASSWORD: argus_local
+      POSTGRES_DB: argus
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - argus-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U argus -d argus"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
   falkordb:
     image: falkordb/falkordb@sha256:b0bdcac2cbaff989e77cb0610439b7a9289e86de033ccbbd4368b66fb680ae7a
     ports:
@@ -7,4 +22,5 @@ services:
     volumes:
       - falkor-data:/var/lib/falkordb/data
 volumes:
+  argus-postgres:
   falkor-data:

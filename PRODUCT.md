@@ -8,11 +8,11 @@ web
 
 ## Stack
 
-Application stack authorized on 2026-10-16: Next.js/React/TypeScript frontend and Express/TypeScript backend extended from Cosmic Engine. FalkorDB stores graph structure; a local source catalog and event ledger preserve source and traces. A standalone ingestion worker acquires and parses scientific full text. The earlier Python engine remains a reference spike.
+Current stack: Next.js/React/TypeScript frontend extended from Cosmic Engine, Python/FastAPI backend, LangGraph ingestion with Postgres checkpoints, Postgres with pg_search, and FalkorDB semantic graphs and vectors. A bounded Postgres queue processes uploaded and acquired files through shared stages. The earlier Express implementation and independent Python spike are inactive migration references.
 
 ## Users
 
-The user confirmed that the primary workspace should serve the person reviewing source, with a full technical inspector alongside it. Proposed application users are engineers reviewing protocol implementations and materials researchers comparing published source. The application personas are proposals, not interview-validated customers.
+The primary workspace serves a person reviewing sources, with central chat and the Source Explorer for graphs, files, chunks, and processing details. Proposed application users are engineers reviewing protocol implementations and materials researchers comparing published sources. The application personas are proposals, not interview-validated customers.
 
 ## Product Purpose
 

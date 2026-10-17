@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "scripts": { "dev": "tsx watch src/index.ts", "start": "node dist/index.js", "build": "tsc" },
+  "scripts": { "dev": "node ../scripts/python.mjs dev", "start": "node ../scripts/python.mjs start", "build": "node ../scripts/python.mjs build", "dev:legacy": "tsx watch src/index.ts" },
   "dependencies": { "cors": "^2.8.5", "dotenv": "^17.2.3", "express": "^5.1.0", "redis": "^5.9.0" },
   "devDependencies": { "@types/cors": "^2.8.19", "@types/express": "^5.0.3", "@types/node": "^24.1.0", "tsx": "^4.20.3", "typescript": "^5.8.3" }
 }

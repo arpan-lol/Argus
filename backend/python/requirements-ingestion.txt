@@ -1,0 +1,13 @@
+langgraph>=1.0,<2
+langgraph-checkpoint-postgres>=3,<4
+langchain-openai>=1.0,<2
+langchain-google-genai>=3,<5
+gliner>=0.2.21,<0.3
+protobuf>=5,<7
+tiktoken>=0.9,<1
+defusedxml>=0.7.1,<1
+pypdf>=5,<7
+python-docx>=1.1,<2
+openpyxl>=3.1,<4
+beautifulsoup4>=4.12,<5
+python-multipart>=0.0.20,<1

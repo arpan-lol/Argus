@@ -1,65 +1,60 @@
 # Argus
 
-A source workspace extended from [Cosmic Engine](https://github.com/arpan-lol/cosmic-engine), with central chat and a resizable Source Explorer. Argus takes its name from Greek mythology. Follow citations through a stable, progressively loaded graph, or switch the right panel to file and chunk readers.
+An inspectable source workspace extended from [Cosmic Engine](https://github.com/arpan-lol/cosmic-engine). Python and LangGraph run ingestion, Postgres stores processing state and BM25 indexes, and FalkorDB stores the semantic graph and vectors. The Next.js dashboard retains central chat and a resizable Source Explorer.
 
 ## Run locally
 
-Requirements: Node.js 22.13+, npm, Python 3.11+, and Docker for FalkorDB.
+Requirements: Python 3.12+ (this pass ran on 3.13), Node.js 22.13+, npm, and Docker.
 
 ```powershell
 docker compose up -d
 npm run setup
-npm run ingest -- --limit 150 --batch-size 25
+Copy-Item backend/python/.env.example backend/python/.env
 npm run dev
 ```
 
-- Workspace: http://localhost:3001
-- Express API: http://localhost:4000/api
-- FalkorDB browser: http://localhost:3000
+Configure a Google or OpenAI credential in the ignored Python environment file before model processing. `npm run setup` creates the local Python virtual environment when missing. The first local GLiNER run downloads model weights. All services bind to localhost; authentication remains outside this implementation pass.
 
-The first ingestion command discovers the available scientific collections, downloads a bounded batch of actual PMC full text, parses it, and writes a searchable local catalog. To continue acquisition toward a larger collection, rerun with a higher total target:
+- Dashboard: http://localhost:3001/dashboard
+- Python API and OpenAPI: http://localhost:4000/docs
+- FalkorDB Browser: http://localhost:3000
+- Postgres with pg_search: localhost:5434, database/user `argus`, development password `argus_local`.
+- FalkorDB Browser connection: localhost:6379, user `default`, empty password, TLS off.
+
+`npm run build` compiles Python and builds the frontend. `backend/src/` is retained as an inactive TypeScript migration reference; standard startup uses Python. `dev:legacy` is explicitly historical.
+
+## Ingestion
+
+Upload a file through Source Explorer or process an existing source:
 
 ```powershell
-npm run ingest -- --limit 6000 --batch-size 100
+npm run ingest -- path/to/source.pdf
+npm run ingest -- --glob "data/raw/*.xml.gz" --through chunk
+npm run ingest -- --resume job:your-job-identifier
 ```
 
-Acquisition is resumable. A discovery count is not a downloaded or indexed count. Network availability and source response times determine acquisition duration. Downloaded article text and local databases stay in ignored data/; reproduce them with the ingestion command after cloning.
+Stages: register → parse → normalize → chunk → embed → extract → resolve → validate → publish.
 
-npm run build builds both application packages. Backend configuration is described in [backend/.env.example](backend/.env.example). Keep the unauthenticated workspace bound to localhost.
+Each file has immutable originals, a content revision, a processing configuration fingerprint, stage attempts, per-item artifacts, timings, model receipts, and Postgres LangGraph checkpoints. A bounded worker queue processes explicitly scheduled uploads and retries. Registered inventory does not automatically trigger model calls. `--through chunk` stops before provider calls; `--register-only` only records the original and job.
 
-## Source Explorer
+The parser supports JATS/XML and gzip, text/Markdown, HTML, text-bearing PDF, DOCX, CSV/TSV, XLSX, and JSON. It retains source blocks and logical/page/cell locations. Scanned PDFs require OCR, which is not enabled. Legacy Office binaries and presentations are not parsed. Binary formats outside the supported parsers fail explicitly.
 
-The graph provides a collection overview, files, headings and chunks at increasing zoom levels. Positions remain stable when selecting nodes. Drag to pan, scroll to zoom, select a node for its details, and double-click a file to explore it. Citation navigation zooms out, moves to the source, and zooms in. Only the current viewport and nearby records are loaded; the browser does not render the complete graph at once.
+Chunking adapts the published FalkorDB SDK v1.4.0 sentence/token algorithm: 512 tokens with two-sentence overlap. Source whitespace and offsets are retained. Oversized individual sentences remain whole and are labeled. The upstream Apache-2.0 license and modification notice are included under backend/python/licenses/.
 
-Switch between Network, an organic document network, and Trees, the earlier grouped document map. Expand Source Explorer into a near-full-screen modal while preserving the current graph or reader. The inactive graph or file view is unmounted when switching between graph and files.
+GLiNER supplies windowed candidate mentions. The configured LLM verifies entities and relationships against exact source quotes. An explicitly configured type vocabulary is optional; otherwise a recorded LLM step infers types from the document. Entity resolution uses FalkorDB vector candidates, exact-name candidates, two order-reversed batched judgments, and constraints against contradictory merges. Similarity alone never merges entities. Invalid model output retries with recorded validation feedback; there is no entity-only fallback.
 
-Every edge has a defined type: document/section containment, chunk reading order, a chunk mentioning an entity, or a derived shared-name navigation summary. Hover an edge for its meaning. Shared mentions, grouping and distance do not imply agreement, semantic similarity or scientific validation.
+Assertions preserve their source quotes, offsets, polarity, and conditions. Chunk, entity, and assertion vectors are indexed in FalkorDB. Semantic graphs use an embedding-space namespace such as `argus_sources_v2_<hash>`; model spaces are not mixed. Source replacements retire older graph records logically. Postgres and FalkorDB are separate transaction domains; interrupted publication requires an idempotent retry.
 
-Cosmic-derived readers support local previews for PDF, DOCX, images, spreadsheets and text. Local file previews are labeled **Preview only** and are not uploaded or indexed. Server upload ingestion is pending agreement on its standardized processing pipeline. Presentations and legacy binary Word files have explicit fallback states.
+## Legacy corpus and current boundaries
 
-## Source and graph semantics
+The existing catalog contains 6,000 documents, 133,562 sections, and 252,654 chunks imported into Postgres. Existing SQLite databases are read only by the one-time migration utility:
 
-Use Case A is materials source review, initially adsorption and water remediation, with a broader catalysis discovery collection. Source articles are acquired through official PMC services and retain their source links and license metadata.
-
-JATS/XML article sections are logical navigation locations, not physical PDF pages. Chunks preserve exact source spans into normalized article text. The graph connects documents, sections, chunks, and explicitly labeled dictionary term mentions. A co-mention is not a validated experimental claim, a causal relationship, or a scientific endorsement.
-
-The first slice supports source-backed lexical retrieval and graph exploration without a model API key. Dense embeddings, model synthesis, and other unavailable strategies must remain visibly unavailable rather than return simulated results. Search scores are ranking values, not probabilities. Corpus search coverage and graph synchronization coverage are displayed separately.
-
-## Organization
-
-```text
-frontend/       Next.js dashboard, source viewer, graph and run inspector
-backend/        Express routes, controllers, services, errors and logging
-ingestion/      Resumable PMC discovery, acquisition, parsing and indexing
-scripts/        Local workspace launcher
-compose.yaml    Pinned FalkorDB service
-research/       Reproducible discovery audit
-engine/         Earlier independent Python integration spike
-fixtures/       Explicitly synthetic fixtures for the Python spike only
+```powershell
+npm run migrate:legacy
 ```
 
-The application reuses Cosmic Engine's UI primitives, theme, strategy-control pattern, and Express utility conventions. It does not require Cosmic's authentication, Milvus, or PostgreSQL services. The original project remains unmodified.
+The dashboard labels the earlier dictionary-based map and catalog **Legacy graph** and **Legacy corpus**. Newly processed sources appear separately in Files with their real stage status and readers. Parsing is not semantic readiness, and imported dictionary links are not newly extracted assertions. Current chat retrieval searches the legacy Postgres BM25 index; graph-assisted retrieval, the investigation agent, and new semantic-map integration belong to later slices.
 
-## Development agreement
+The source map retains both Network and Trees layouts, stable positions, progressive viewport loading, citation navigation, and expanded modal viewing. The native FalkorDB Browser can inspect the new semantic graph immediately.
 
-Read [agents.md](agents.md). Future architectural decisions require discussing the options with Arpan. Commit messages are lowercase. Local progress, goals, and detailed implementation notes live under the gitignored root docs/ directory.
+Downloaded corpus files, provider credentials, databases, model artifacts, and detailed local progress remain outside Git. The root docs/ folder is intentionally ignored. Read agents.md for working agreements.
