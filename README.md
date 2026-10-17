@@ -45,15 +45,23 @@ GLiNER supplies windowed candidate mentions. The configured LLM verifies entitie
 
 Assertions preserve their source quotes, offsets, polarity, and conditions. Chunk, entity, and assertion vectors are indexed in FalkorDB. Semantic graphs use an embedding-space namespace such as `argus_sources_v2_<hash>`; model spaces are not mixed. Source replacements retire older graph records logically. Postgres and FalkorDB are separate transaction domains; interrupted publication requires an idempotent retry.
 
-## Azure LLM configuration
+## Model deployment configuration
 
-Extraction and identity judgments can use Azure while embeddings keep their existing provider/model/dimensions. Set `ARGUS_LLM_PROVIDER` to `azure_openai` or `azure_inference`; `ARGUS_RESOLUTION_PROVIDER` optionally selects a separate judge provider. `ARGUS_EXTRACTION_MODEL` and `ARGUS_RESOLUTION_MODEL` identify the deployed models. Without an explicit LLM provider, existing Google/OpenAI profiles retain their original routing.
+Use the deployment variables in `backend/python/.env.example`:
 
-For Azure OpenAI v1, configure `AZURE_OPENAI_BASE_URL=https://YOUR-RESOURCE.openai.azure.com/openai/v1` and `AZURE_OPENAI_API_KEY`. Model names must match your deployment names; catalog listings do not establish that a model is deployed.
+| Variables | Role |
+| --- | --- |
+| `LLM1_DEPLOYMENT_NAME`, `LLM1_DEPLOYMENT_URL`, `LLM1_DEPLOYMENT_KEY` | Chat and source extraction; default deployment `gpt-5` |
+| `LLM2_DEPLOYMENT_NAME`, `LLM2_DEPLOYMENT_URL`, `LLM2_DEPLOYMENT_KEY` | Entity resolution judgments; default deployment `gpt-4.1-mini` |
+| `AZURE_API_KEY` | Shared fallback when a role-specific Azure key is absent |
+| `AZURE_OPENAI_ENDPOINT` | Fallback embedding base URL when an embedding endpoint is absent |
+| `EMBEDDING_MODEL_NAME`, `EMBEDDING_MODEL_ENDPOINT`, `EMBEDDING_MODEL_KEY` | Document and query embeddings; default model `text-embedding-3-large`, 3,072 dimensions |
 
-For the Azure AI model inference API, configure `AZURE_INFERENCE_ENDPOINT=https://YOUR-RESOURCE.services.ai.azure.com/models`, `AZURE_INFERENCE_API_VERSION=2024-05-01-preview`, and `AZURE_INFERENCE_API_KEY`. GPT-OSS-120B was exercised with strict structured output through this interface. Keep `/chat/completions` and the version query out of the base URL.
+LLM URLs can be the complete Responses endpoint, such as `https://YOUR-RESOURCE.services.ai.azure.com/openai/v1/responses`. The application splits the API protocol from the base URL. A bare embedding resource endpoint gains `/openai/v1`; `/openai/v1/embeddings` is also accepted and normalized. An explicit `/models` embedding base uses the Azure inference API version. URLs must use HTTPS without credentials or query strings. Role-specific keys are used for their corresponding requests and never stored in processing profiles, graphs, or receipts. Responses requests use `store=false` and schema-validated output.
 
-Optional `ARGUS_LLM_BASE_URL`/`ARGUS_RESOLUTION_BASE_URL` and corresponding `ARGUS_LLM_API_VERSION`/`ARGUS_RESOLUTION_API_VERSION` override the endpoints per role. Endpoints and models are recorded in the processing version; keys remain in the environment. Azure calls use schema-validated structured output, the configured timeout, and no SDK retries. The pipeline's bounded retry policy still applies. Provider changes never silently retry a different model or rewrite an existing job's configuration. `ARGUS_MODEL_PROVIDER` continues to identify the embedding provider when LLM routing is overridden, preserving embedding caches and graph namespaces.
+`LLM1_*` takes precedence over legacy chat/extraction settings; `LLM2_*` takes precedence over legacy resolution settings. When LLM2 is omitted, resolution uses LLM1. Existing Google/OpenAI/Azure profiles and older `ARGUS_*` model settings remain supported. When `EMBEDDING_MODEL_NAME` is present, new profiles default to Azure embeddings unless `ARGUS_MODEL_PROVIDER` explicitly selects another provider. `ARGUS_EMBEDDING_DIMENSIONS` can override the model's default dimensions.
+
+Embedding model, dimensions, provider, and normalized Azure embedding endpoint define the new vector namespace and query cache. Existing vectors are retained; switching to a new namespace requires reprocessing sources before they become searchable there. Model and endpoint changes produce new processing versions rather than rewriting saved jobs. Provider errors do not silently select another model. Ingestion uses configured timeouts, rate limits and bounded retries.
 
 ## Legacy corpus and current boundaries
 
@@ -87,7 +95,7 @@ Downloaded corpus files, provider credentials, databases, model artifacts, and d
 
 `POST /api/chat` returns NDJSON events for acceptance, model activity, real tool calls, usage, and the final cited report. Greetings receive a conversational answer without keyword searches. Research answers use the six published-source tools, validate citation revisions and quotations, and open the cited processing job in Files. The legacy map retains its own identifiers and scope.
 
-Configure `ARGUS_CHAT_MODEL=gpt-5`, `ARGUS_CHAT_PROVIDER=azure_openai`, `ARGUS_CHAT_API=responses`, and `ARGUS_CHAT_BASE_URL=https://YOUR-RESOURCE.services.ai.azure.com/openai/v1` with `AZURE_OPENAI_API_KEY`. Leave `ARGUS_CHAT_API_VERSION` empty for this Responses endpoint. Chat has independent provider settings; changing it does not republish sources or change ingestion models. Responses requests use `store=false`.
+Configure the `LLM1_*` deployment variables above to select the chat model. Legacy independent `ARGUS_CHAT_*` settings remain available when LLM1 is absent. Responses requests use `store=false`.
 
 Postgres stores run events, tool receipts, budgets, and LangGraph checkpoints. `GET /api/chat/{runId}` reconnects to saved results; `POST /api/chat/{runId}/resume` retries an unfinished step. The browser retains at most 12 run IDs in session storage for reload recovery, and sends only two preceding turns as conversational context. New chat clears those browser references. There is no cross-conversation semantic memory.
 
