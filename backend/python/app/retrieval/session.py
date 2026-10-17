@@ -1,0 +1,131 @@
+import json
+import logging
+import math
+import time
+import uuid
+
+from psycopg.types.json import Jsonb
+
+from app.database import connection
+from app.ingestion.config import fingerprint, processing_config
+from app.ingestion.providers import Providers
+from app.ingestion.publication import graph_connection, semantic_graph_name
+
+
+logger = logging.getLogger("argus.retrieval")
+
+
+class BudgetReached(RuntimeError):
+    pass
+
+
+class Session:
+    def __init__(self, tool, arguments):
+        self.id = str(uuid.uuid4())
+        self.tool = tool
+        self.arguments = arguments
+        self.started = time.monotonic()
+        self.config = processing_config()
+        self.graph_name = semantic_graph_name(self.config)
+        self.graph = graph_connection(self.config)
+        self.trace = []
+        self.warnings = []
+        self.truncations = []
+        self.calls = 0
+        self.cache = {}
+        self.manifest = {}
+        self.jobs = []
+        self.limits = {"databaseCalls": 64, "elapsedMs": 30000, "graphQueryMs": 1500, "sqlQueryMs": 1500, "annCandidates": 240, "fanout": 20, "frontier": 40, "outputCharacters": 64000, "chunkCharacters": 12000}
+        rows = self.sql("SELECT p.job_id,p.source_id,p.published_at,j.revision,j.processing_version FROM ingestion_publications p JOIN ingestion_jobs j ON j.id=p.job_id JOIN published_documents d ON d.id=p.source_id WHERE p.active AND p.counts->>'graph'=%s AND d.metadata->>'revisionId'=j.revision AND d.metadata->>'processingVersion'=j.processing_version ORDER BY p.source_id", (self.graph_name,), "publication snapshot")
+        self.manifest = {row["job_id"]: row for row in rows}
+        self.jobs = list(self.manifest)
+
+    def check(self):
+        if self.calls >= self.limits["databaseCalls"] or (time.monotonic() - self.started) * 1000 >= self.limits["elapsedMs"]:
+            self.truncate("Execution budget reached; search is incomplete")
+            raise BudgetReached("Execution budget reached")
+
+    def truncate(self, reason):
+        if reason not in self.truncations:
+            self.truncations.append(reason)
+
+    def sql(self, query, parameters, stage):
+        self.check()
+        self.calls += 1
+        started = time.monotonic()
+        with connection() as conn:
+            conn.execute("SET LOCAL statement_timeout = '1500ms'")
+            rows = conn.execute(query, parameters).fetchall()
+        self.trace.append({"stage": stage, "engine": "postgres", "durationMs": (time.monotonic() - started) * 1000, "outputCount": len(rows)})
+        return rows
+
+    def cypher(self, query, parameters, stage):
+        self.check()
+        self.calls += 1
+        started = time.monotonic()
+        result = self.graph.ro_query(query, {**parameters, "jobs": self.jobs}, timeout=self.limits["graphQueryMs"])
+        self.trace.append({"stage": stage, "engine": "falkordb", "durationMs": (time.monotonic() - started) * 1000, "databaseMs": result.run_time_ms, "outputCount": len(result.result_set)})
+        return result.result_set
+
+    def chunks(self, ids):
+        missing = list(set(ids) - self.cache.keys())
+        if missing:
+            rows = self.sql("SELECT c.id,c.document_id,c.payload,c.document_title,j.id AS job_id FROM published_chunks c JOIN ingestion_publications p ON p.source_id=c.document_id AND p.active JOIN ingestion_jobs j ON j.id=p.job_id WHERE c.id=ANY(%s) AND j.id=ANY(%s) AND c.payload->>'revisionId'=j.revision AND c.payload->>'processingVersion'=j.processing_version", (missing, self.jobs), "source support")
+            for row in rows:
+                self.cache[row["id"]] = row
+        return {key: self.cache[key] for key in ids if key in self.cache}
+
+    def citation(self, row, start=None, end=None):
+        chunk = row["payload"]
+        return {"chunkId": row["id"], "documentId": row["document_id"], "documentTitle": row["document_title"], "jobId": row["job_id"], "revisionId": chunk["revisionId"], "processingVersion": chunk["processingVersion"], "sectionId": chunk["sectionId"], "sectionTitle": chunk.get("sectionTitle", ""), "sourceUrl": chunk.get("sourceUrl"), "startOffset": chunk["startOffset"] if start is None else start, "endOffset": chunk["endOffset"] if end is None else end, "offsetUnit": "unicode_codepoint"}
+
+    def excerpt(self, row):
+        chunk = row["payload"]
+        text = chunk["text"]
+        cap = self.limits["chunkCharacters"]
+        clipped = len(text) > cap
+        if clipped:
+            self.truncate("Source excerpts clipped; read original for full context")
+        return {**self.citation(row), "text": text[:cap], "excerptEndOffset": chunk["startOffset"] + min(len(text), cap), "textTruncated": clipped}
+
+    def query_vector(self, query):
+        profile = {key: self.config[key] for key in ("provider", "embeddingModel", "embeddingDimensions")}
+        profile["task"] = "retrieval_query"
+        key = fingerprint([profile, query])
+        cached = self.sql("SELECT vector,receipt FROM retrieval_query_embeddings WHERE id=%s AND profile=%s", (key, Jsonb(profile)), "query embedding cache")
+        if cached:
+            vector = cached[0]["vector"]
+            self.trace.append({"stage": "query embedding", "cacheHit": True, "profile": profile, "durationMs": 0})
+        else:
+            self.check()
+            receipts = []
+            try:
+                vector = Providers(self.config, receipts.append).embed_query(query)
+            finally:
+                self.trace.extend({"stage": "query embedding", "cacheHit": False, **receipt} for receipt in receipts)
+            self.sql("INSERT INTO retrieval_query_embeddings(id,profile,vector,receipt) VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING id", (key, Jsonb(profile), Jsonb(vector), Jsonb(receipts)), "cache query embedding")
+        if len(vector) != profile["embeddingDimensions"] or any(not math.isfinite(value) for value in vector) or not any(vector):
+            raise ValueError("Invalid query vector")
+        return vector
+
+    def entity(self, entity_id):
+        rows = self.cypher("MATCH (e:Entity {id:$id})<-[:MENTIONS]-(c:Chunk) WHERE c.active=true AND c.jobId IN $jobs RETURN e.id,e.label,e.type,e.description LIMIT 1", {"id": entity_id}, "resolve published entity")
+        return {"id": rows[0][0], "name": rows[0][1], "type": rows[0][2], "description": rows[0][3]} if rows else None
+
+    def finish(self, payload, outcome=None):
+        current = []
+        with connection() as conn:
+            conn.execute("SET LOCAL statement_timeout = '1500ms'")
+            current = conn.execute("SELECT job_id,published_at FROM ingestion_publications WHERE active AND job_id=ANY(%s)", (self.jobs,)).fetchall()
+        unchanged = {row["job_id"]: row["published_at"] for row in current} == {key: row["published_at"] for key, row in self.manifest.items()}
+        if not unchanged:
+            payload = {"items": []}
+            outcome = "stale_publication"
+            self.warnings.append("Publication changed during retrieval. Results withheld; retry against the current revision.")
+        response = {"runId": self.id, "tool": self.tool, "arguments": self.arguments, "outcome": outcome or ("truncated" if self.truncations else "answered" if payload.get("items") or payload.get("paths") else "not_found"), **payload, "graphName": self.graph_name, "publicationCount": len(self.jobs), "trace": self.trace, "warnings": self.warnings, "truncations": self.truncations, "budget": {"limits": self.limits, "databaseCalls": self.calls, "elapsedMs": (time.monotonic() - self.started) * 1000}, "generation": False}
+        if len(json.dumps(response, ensure_ascii=False)) > self.limits["outputCharacters"]:
+            response = {**response, "items": [], "paths": [], "outcome": "output_budget_exceeded", "truncations": [*self.truncations, "Structured result exceeds response budget; request fewer results"]}
+            response.pop("discoveryTree", None)
+        with connection() as conn:
+            conn.execute("INSERT INTO api_runs(id,payload) VALUES(%s,%s)", (self.id, Jsonb(response)))
+        return response
