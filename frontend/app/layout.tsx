@@ -8,7 +8,7 @@ const mono = Geist_Mono({ variable: '--font-geist-mono', subsets: ['latin'] });
 export const metadata: Metadata = {
   title: 'Argus · Source workspace',
   description: 'Explore your sources in a connected chat and graph workspace.',
-  icons: { icon: '/cosmic-logo.png' },
+  icons: { icon: '/argus-logo.svg' },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

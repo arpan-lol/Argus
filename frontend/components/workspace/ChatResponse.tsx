@@ -20,7 +20,7 @@ export function ChatResponse({ turn, pending, onCitation, onResume }: { turn: Ch
     return source ? <CitationButton key={reference} citation={source} index={index + 1} onCitationClick={() => onCitation(source)} /> : null;
   });
   return <div className="ce-response">
-    <div className="ce-response-name"><img src="/cosmic-logo.png" alt="" width={22} height={22} /><strong>Argus</strong><span className="ce-model-label">{(result?.model || turn.model || 'gpt-5').toUpperCase()}</span></div>
+    <div className="ce-response-name"><img src="/argus-logo.svg" alt="" width={22} height={22} /><strong>Argus</strong><span className="ce-model-label">{(result?.model || turn.model || 'gpt-5').toUpperCase()}</span></div>
     {(starts.length > 0 || pending) && <details className="ce-chat-activity" open={pending}>
       <summary>{pending ? <Loader2 size={13} className="spinning" /> : <Check size={13} />}<span>{pending ? latest?.label || toolLabels[latest?.tool || ''] || 'Preparing the response' : `${starts.length} tool ${starts.length === 1 ? 'call' : 'calls'}`}</span><ChevronDown size={13} /></summary>
       {starts.length > 0 && <ol>{starts.map((event, index) => {
