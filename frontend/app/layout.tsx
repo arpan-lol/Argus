@@ -6,7 +6,7 @@ const geist = Geist({ variable: '--font-geist-sans', subsets: ['latin'] });
 const mono = Geist_Mono({ variable: '--font-geist-mono', subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'Falcor · Source workspace',
+  title: 'Argus · Source workspace',
   description: 'Explore your sources in a connected chat and graph workspace.',
   icons: { icon: '/cosmic-logo.png' },
 };

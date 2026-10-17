@@ -13,6 +13,7 @@ const CELL = 512;
 const hash = (value: string) => { let result = 2166136261; for (const char of value) result = Math.imul(result ^ char.charCodeAt(0), 16777619); return result >>> 0; };
 const quote = (value: unknown) => JSON.stringify(value);
 const short = (value: string, length = 70) => value.length > length ? `${value.slice(0, length).trim()}…` : value;
+export type MapMode = 'network' | 'grouped';
 type LayoutDocument = { id: string; title: string; slot: number; x: number; y: number };
 
 class MapService {
@@ -21,6 +22,9 @@ class MapService {
   private initialized = false;
   private documents = new Map<string, LayoutDocument>();
   private entities = new Map<string, MapNode>();
+  private groupedDocuments = new Map<string, LayoutDocument>();
+  private groupedEntities = new Map<string, MapNode>();
+  private groupedEdges: MapEdge[] = [];
   private groupEdges: MapEdge[] = [];
   private childPositions = new Map<string, Map<string, { x: number; y: number }>>();
 
@@ -140,16 +144,74 @@ class MapService {
       if (a >= 3 || b >= 3) return false;
       degree.set(edge.source, a + 1); degree.set(edge.target, b + 1); return true;
     }).slice(0, 9000);
+    this.initializeGrouped(rows);
     this.initialized = true;
     logger.info('MapService', 'Persistent organic source network initialized', { documents: this.documents.size, entities: this.entities.size, overviewLinks: this.groupEdges.length });
+  }
+
+  private initializeGrouped(rows: Record<string, unknown>[]) {
+    this.layout!.exec('CREATE TABLE IF NOT EXISTS document_positions(id TEXT PRIMARY KEY,slot INTEGER UNIQUE,x REAL,y REAL); CREATE TABLE IF NOT EXISTS entity_positions(id TEXT PRIMARY KEY,label TEXT,kind TEXT,x REAL,y REAL);');
+    const existing = this.layout!.prepare('SELECT id,slot,x,y FROM document_positions').all();
+    const positions = new Map(existing.map(row => [String(row.id), row]));
+    let nextSlot = existing.reduce((max, row) => Math.max(max, Number(row.slot) + 1), 0);
+    const insert = this.layout!.prepare('INSERT INTO document_positions(id,slot,x,y) VALUES(?,?,?,?)');
+    const homes = new Map<string, { label: string; type: string; x: number; y: number; count: number; groups: Set<string> }>();
+    this.groupedDocuments.clear(); this.groupedEntities.clear();
+    this.layout!.exec('BEGIN');
+    try {
+      for (const row of rows) {
+        const id = String(row.id);
+        let position = positions.get(id);
+        if (!position) {
+          const slot = nextSlot++;
+          position = { id, slot, x: (slot % 80) * CELL, y: Math.floor(slot / 80) * CELL };
+          insert.run(id, slot, Number(position.x), Number(position.y));
+        }
+        const document = { id, title: String(row.title), slot: Number(position.slot), x: Number(position.x), y: Number(position.y) };
+        this.groupedDocuments.set(id, document);
+        for (const entity of JSON.parse(String(row.entities_json || '[]')) as Pick<Entity, 'id' | 'label' | 'type'>[]) {
+          const home = homes.get(entity.id) || { label: entity.label, type: entity.type, x: 0, y: 0, count: 0, groups: new Set<string>() };
+          home.x += document.x + CELL / 2; home.y += document.y + CELL / 2; home.count++;
+          home.groups.add(this.groupId(document)); homes.set(entity.id, home);
+        }
+      }
+      const entityInsert = this.layout!.prepare('INSERT OR IGNORE INTO entity_positions(id,label,kind,x,y) VALUES(?,?,?,?,?)');
+      let index = 0;
+      for (const [id, home] of homes) { const angle = index++ * 2.399963; entityInsert.run(id, home.label, home.type, home.x / home.count + Math.cos(angle) * 80, home.y / home.count + Math.sin(angle) * 80); }
+      this.layout!.exec('COMMIT');
+    } catch (error) { this.layout!.exec('ROLLBACK'); throw error; }
+    for (const row of this.layout!.prepare('SELECT * FROM entity_positions').all()) this.groupedEntities.set(String(row.id), { id: String(row.id), type: 'entity', label: String(row.label), entityType: String(row.kind), x: Number(row.x), y: Number(row.y), radius: 8, count: homes.get(String(row.id))?.count || 0 });
+    const edges = new Map<string, MapEdge>();
+    for (const [entityId, home] of homes) {
+      const groups = [...home.groups].sort((a, b) => { const [, ax, ay] = a.split(':').map(Number), [, bx, by] = b.split(':').map(Number); return ay * 80 + ax - (by * 80 + bx); });
+      for (let index = 1; index < groups.length; index++) {
+        const source = groups[index - 1], target = groups[index], id = `${source}|SHARES_TERM|${target}`, previous = edges.get(id);
+        if (previous) { previous.count = Number(previous.count) + 1; if (previous.viaEntityIds!.length < 6) { previous.viaEntityIds!.push(entityId); previous.labels!.push(home.label); } }
+        else if (edges.size < 200) edges.set(id, { id, source, target, type: 'SHARES_TERM', derived: true, viaEntityIds: [entityId], labels: [home.label], count: 1, meaning: 'At least one document in each navigation group mentions the same dictionary term. This does not connect every document or assert a scientific relationship.', membershipSource: 'source-ledger' });
+      }
+    }
+    this.groupedEdges = [...edges.values()];
+  }
+
+  private documentsFor(mode: MapMode) { return mode === 'grouped' ? this.groupedDocuments : this.documents; }
+  private entitiesFor(mode: MapMode) { return mode === 'grouped' ? this.groupedEntities : this.entities; }
+  private groupId(document: LayoutDocument) { return `map-group:${Math.floor((document.slot % 80) / 8)}:${Math.floor(Math.floor(document.slot / 80) / 8)}`; }
+  private groups(): MapNode[] {
+    const groups = new Map<string, MapNode>();
+    for (const document of this.groupedDocuments.values()) {
+      const id = this.groupId(document), gx = Math.floor((document.slot % 80) / 8), gy = Math.floor(Math.floor(document.slot / 80) / 8);
+      const group = groups.get(id) || { id, type: 'group', label: 'Source neighborhood', preview: 'Fixed navigation grouping, not a scientific topic cluster.', x: gx * CELL * 8 + CELL * 4, y: gy * CELL * 8 + CELL * 4, count: 0, radius: 28 };
+      group.count = Number(group.count) + 1; group.label = `${group.count} documents`; groups.set(id, group);
+    }
+    return [...groups.values()];
   }
 
   private documentNode(document: LayoutDocument): MapNode {
     return { id: document.id, type: 'document', label: short(document.title), preview: document.title, documentId: document.id, x: document.x + CELL / 2, y: document.y + 38, radius: 12 };
   }
 
-  private childNode(id: string, documentId: string, sectionId?: string): MapNode {
-    const document = this.documents.get(documentId);
+  private childNode(id: string, documentId: string, sectionId?: string, mode: MapMode = 'network'): MapNode {
+    const document = this.documentsFor(mode).get(documentId);
     if (!document) throw new AppError('Map document not found', 404, true);
     const position = this.childPosition(id, document);
     if (sectionId) {
@@ -164,7 +226,8 @@ class MapService {
   }
 
   private childPosition(id: string, document: LayoutDocument) {
-    let positions = this.childPositions.get(document.id);
+    const cacheKey = `${document.id}:${document.x}:${document.y}`;
+    let positions = this.childPositions.get(cacheKey);
     if (!positions) {
       positions = new Map();
       const sections = this.source!.prepare('SELECT id FROM sections WHERE document_id=? ORDER BY start_offset,id').all(document.id);
@@ -186,48 +249,59 @@ class MapService {
         entries.forEach((chunkId, index) => positions!.set(chunkId, { x: startX + (slot + index) * spacing, y: document.y + 206 }));
         slot += width;
       }
-      this.childPositions.set(document.id, positions);
+      this.childPositions.set(cacheKey, positions);
     }
     return positions.get(id) || { x: document.x + CELL / 2, y: document.y + 206 };
   }
 
-  overview() {
+  overview(mode: MapMode = 'network') {
     this.initialize();
+    if (mode === 'grouped') {
+      const rows = Math.ceil(Math.max(1, ...[...this.groupedDocuments.values()].map(document => document.slot + 1)) / 80);
+      const bounds = { minX: 0, minY: 0, maxX: 80 * CELL, maxY: rows * CELL };
+      return { version: 1, mode, bounds, worldBounds: bounds, nodes: this.groups(), groups: this.groups(), edges: this.groupedEdges, source: 'source-ledger', counts: corpusService.counts(), layout: { cellSize: CELL, groupSize: 8, columns: 80, kind: 'persistent-grouped-map', coordinateMeaning: 'Fixed navigation grouping. Distance does not imply scientific similarity.' } };
+    }
     const documents = [...this.documents.values()];
     const bounds = { minX: Math.min(...documents.map(document => document.x)) - CELL, minY: Math.min(...documents.map(document => document.y)) - CELL, maxX: Math.max(...documents.map(document => document.x)) + CELL * 2, maxY: Math.max(...documents.map(document => document.y)) + CELL * 2 };
     return { version: 2, bounds, worldBounds: bounds, nodes: documents.map(document => this.documentNode(document)), groups: [], edges: this.groupEdges, source: 'source-ledger', counts: corpusService.counts(), layout: { cellSize: CELL, kind: 'persistent-organic-network', coordinateMeaning: 'A stable navigation layout influenced by shared dictionary terms. Proximity does not establish scientific similarity; overview links are a sparse selection of real shared-mention paths.' } };
   }
 
-  locate(id: string) {
+  locate(id: string, mode: MapMode = 'network') {
     this.initialize();
     let node: MapNode | undefined;
-    if (this.documents.has(id)) node = this.documentNode(this.documents.get(id)!);
-    else if (this.entities.has(id)) node = this.entities.get(id);
+    if (mode === 'grouped' && id.startsWith('map-group:')) node = this.groups().find(group => group.id === id);
+    else if (this.documentsFor(mode).has(id)) node = this.documentNode(this.documentsFor(mode).get(id)!);
+    else if (this.entitiesFor(mode).has(id)) node = this.entitiesFor(mode).get(id);
     else {
       const chunk = this.source!.prepare('SELECT document_id,section_id FROM chunks WHERE id=?').get(id);
-      if (chunk) node = this.childNode(id, String(chunk.document_id), String(chunk.section_id));
+      if (chunk) node = this.childNode(id, String(chunk.document_id), String(chunk.section_id), mode);
       else {
         const section = this.source!.prepare('SELECT document_id FROM sections WHERE id=?').get(id);
-        if (section) node = this.childNode(id, String(section.document_id));
+        if (section) node = this.childNode(id, String(section.document_id), undefined, mode);
       }
     }
     if (!node) throw new AppError('Source map node not found', 404, true);
     return { node, zoom: node.type === 'group' ? 0.16 : node.type === 'document' ? 1.2 : 2.5, documentId: node.documentId, sectionId: node.sectionId, chunkId: node.chunkId };
   }
 
-  async view(bounds: MapBounds, zoom: number, requestedLimit = 800) {
+  async view(bounds: MapBounds, zoom: number, requestedLimit = 800, mode: MapMode = 'network') {
     this.initialize();
     const limit = Math.max(50, Math.min(800, Math.floor(requestedLimit)));
     const level = zoom < 0.08 ? 'overview' : zoom < 0.45 ? 'documents' : 'detail';
     const inside = (node: { x: number; y: number }, margin = 0) => node.x >= bounds.minX - margin && node.x <= bounds.maxX + margin && node.y >= bounds.minY - margin && node.y <= bounds.maxY + margin;
+    if (level === 'overview' && mode === 'grouped') {
+      const nodes = this.groups().filter(node => inside(node, CELL * 4));
+      const ids = new Set(nodes.map(node => node.id));
+      return { nodes, edges: this.groupedEdges.filter(edge => ids.has(edge.source) && ids.has(edge.target)), level: 'groups', bounds, truncated: false, source: 'source-ledger', status: 'ready', note: 'Fixed document navigation groups. Links summarize shared dictionary mentions, not scientific relationships.' };
+    }
     if (level === 'overview') {
-      const nodes = [...this.documents.values()].map(document => this.documentNode(document)).filter(node => inside(node, CELL));
+      const nodes = [...this.documentsFor(mode).values()].map(document => this.documentNode(document)).filter(node => inside(node, CELL));
       const ids = new Set(nodes.map(node => node.id));
       return { nodes, edges: this.groupEdges.filter(edge => ids.has(edge.source) && ids.has(edge.target)), level, bounds, truncated: false, source: 'source-ledger', status: 'ready', note: 'An organic document network with a sparse selection of actual shared dictionary-term paths. A shared mention does not establish a scientific relationship.' };
     }
     const centerX = (bounds.minX + bounds.maxX) / 2;
     const centerY = (bounds.minY + bounds.maxY) / 2;
-    const candidates = [...this.documents.values()].filter(document => document.x <= bounds.maxX + CELL && document.x + CELL >= bounds.minX - CELL && document.y <= bounds.maxY + CELL && document.y + CELL >= bounds.minY - CELL).sort((a, b) => Math.hypot(a.x + CELL / 2 - centerX, a.y + CELL / 2 - centerY) - Math.hypot(b.x + CELL / 2 - centerX, b.y + CELL / 2 - centerY));
+    const candidates = [...this.documentsFor(mode).values()].filter(document => document.x <= bounds.maxX + CELL && document.x + CELL >= bounds.minX - CELL && document.y <= bounds.maxY + CELL && document.y + CELL >= bounds.minY - CELL).sort((a, b) => Math.hypot(a.x + CELL / 2 - centerX, a.y + CELL / 2 - centerY) - Math.hypot(b.x + CELL / 2 - centerX, b.y + CELL / 2 - centerY));
     const chosen = candidates.slice(0, level === 'detail' ? 12 : 220);
     const nodes = new Map<string, MapNode>();
     const edges = new Map<string, MapEdge>();
@@ -239,16 +313,16 @@ class MapService {
       if (level !== 'detail') continue;
       const sections = this.source!.prepare('SELECT id FROM sections WHERE document_id=? ORDER BY start_offset,id').all(document.id);
       for (const section of sections) {
-        const node = this.childNode(String(section.id), document.id);
+        const node = this.childNode(String(section.id), document.id, undefined, mode);
         if (inside(node, 90) && nodes.size < limit - 40) { nodes.set(node.id, node); addEdge(document.id, node.id, 'HAS_SECTION'); }
       }
       const chunks = this.source!.prepare('SELECT id,section_id FROM chunks WHERE document_id=? ORDER BY start_offset,id').all(document.id);
       for (const chunk of chunks) {
-        const node = this.childNode(String(chunk.id), document.id, String(chunk.section_id));
+        const node = this.childNode(String(chunk.id), document.id, String(chunk.section_id), mode);
         if (!inside(node, 90)) continue;
         if (nodes.size >= limit - 40) { truncated = true; break; }
         nodes.set(node.id, node);
-        if (!nodes.has(node.sectionId!)) { const section = this.childNode(node.sectionId!, document.id); nodes.set(section.id, section); addEdge(document.id, section.id, 'HAS_SECTION'); }
+        if (!nodes.has(node.sectionId!)) { const section = this.childNode(node.sectionId!, document.id, undefined, mode); nodes.set(section.id, section); addEdge(document.id, section.id, 'HAS_SECTION'); }
         addEdge(node.sectionId!, node.id, 'HAS_CHUNK');
       }
     }
@@ -265,7 +339,7 @@ class MapService {
           mentions.set(String(row[1]), term);
         }
         for (const [entityId, term] of [...mentions].sort((a, b) => a[1].documents.length - b[1].documents.length)) {
-          const ids = [...new Set(term.documents)].sort((a, b) => this.documents.get(a)!.slot - this.documents.get(b)!.slot);
+          const ids = [...new Set(term.documents)].sort((a, b) => this.documentsFor(mode).get(a)!.slot - this.documentsFor(mode).get(b)!.slot);
           for (let index = 1; index < ids.length; index++) {
             const sourceId = ids[index - 1];
             const targetId = ids[index];
@@ -274,7 +348,7 @@ class MapService {
             if (previous) { if (previous.viaEntityIds!.length < 6) { previous.viaEntityIds!.push(entityId); previous.labels!.push(term.label); } }
             else if (edges.size < 1000) addEdge(sourceId, targetId, 'SHARES_TERM', { derived: true, viaEntityIds: [entityId], labels: [term.label], meaning: 'Both documents contain a chunk mentioning this dictionary term. This is not a scientific claim.' });
           }
-          const entity = this.entities.get(entityId);
+          const entity = this.entitiesFor(mode).get(entityId);
           if (entity && inside(entity, 90) && nodes.size < limit) nodes.set(entity.id, entity);
         }
         if (level === 'detail') {
@@ -294,19 +368,19 @@ class MapService {
     return { nodes: [...nodes.values()], edges: [...edges.values()].slice(0, 1500), level, bounds, truncated, source, status, note };
   }
 
-  async neighborhood(id: string) {
+  async neighborhood(id: string, mode: MapMode = 'network') {
     this.initialize();
-    const focus = this.locate(id).node;
+    const focus = this.locate(id, mode).node;
     const nodes = new Map<string, MapNode>();
     const edges = new Map<string, MapEdge>();
     const paths: { sourceChunkId: string; targetChunkId: string; entityId: string; label: string; documentId: string; documentTitle: string }[] = [];
     const addEdge = (source: string, target: string, type: string) => { const edgeId = `${source}|${type}|${target}`; edges.set(edgeId, { id: edgeId, source, target, type }); };
     const addChunk = (chunkId: string) => {
-      const chunk = this.locate(chunkId).node;
+      const chunk = this.locate(chunkId, mode).node;
       if (chunk.type !== 'chunk' || !chunk.documentId || !chunk.sectionId) return;
       nodes.set(chunk.id, chunk);
-      const document = this.documentNode(this.documents.get(chunk.documentId)!);
-      const section = this.childNode(chunk.sectionId, chunk.documentId);
+      const document = this.documentNode(this.documentsFor(mode).get(chunk.documentId)!);
+      const section = this.childNode(chunk.sectionId, chunk.documentId, undefined, mode);
       nodes.set(document.id, document); nodes.set(section.id, section);
       addEdge(document.id, section.id, 'HAS_SECTION'); addEdge(section.id, chunk.id, 'HAS_CHUNK');
       return chunk;
@@ -316,19 +390,19 @@ class MapService {
     addChunk(id);
     try {
       const entityRows = await graphService.query(`MATCH (c:Chunk)-[:MENTIONS]->(e:Entity) WHERE c.id=${quote(id)} RETURN DISTINCT e.id,e.label LIMIT 50`);
-      const selected = entityRows.sort((a, b) => Number(this.entities.get(String(a[0]))?.count || 0) - Number(this.entities.get(String(b[0]))?.count || 0)).slice(0, 3);
+      const selected = entityRows.sort((a, b) => Number(this.entitiesFor(mode).get(String(a[0]))?.count || 0) - Number(this.entitiesFor(mode).get(String(b[0]))?.count || 0)).slice(0, 3);
       let truncated = entityRows.length > selected.length;
       const targetDocuments = new Set<string>();
       for (const row of selected) {
         const entityId = String(row[0]);
-        const entity = this.entities.get(entityId);
+        const entity = this.entitiesFor(mode).get(entityId);
         if (!entity) continue;
         nodes.set(entityId, entity); addEdge(id, entityId, 'MENTIONS');
         const documents = await graphService.query(`MATCH (c:Chunk)-[:MENTIONS]->(e:Entity) WHERE e.id=${quote(entityId)} AND c.documentId<>${quote(focus.documentId)} RETURN DISTINCT c.documentId LIMIT 4`);
         if (documents.length > 3) truncated = true;
         for (const documentRow of documents) {
           const documentId = String(documentRow[0]);
-          if (!this.documents.has(documentId)) continue;
+          if (!this.documentsFor(mode).has(documentId)) continue;
           if (!targetDocuments.has(documentId) && targetDocuments.size >= 3) { truncated = true; continue; }
           targetDocuments.add(documentId);
           const chunks = await graphService.query(`MATCH (c:Chunk)-[:MENTIONS]->(e:Entity) WHERE e.id=${quote(entityId)} AND c.documentId=${quote(documentId)} RETURN DISTINCT c.id LIMIT 3`);
@@ -337,7 +411,7 @@ class MapService {
             const chunk = addChunk(String(chunkRow[0]));
             if (!chunk) continue;
             addEdge(chunk.id, entityId, 'MENTIONS');
-            paths.push({ sourceChunkId: id, targetChunkId: chunk.id, entityId, label: String(row[1]), documentId, documentTitle: this.documents.get(documentId)!.title });
+            paths.push({ sourceChunkId: id, targetChunkId: chunk.id, entityId, label: String(row[1]), documentId, documentTitle: this.documentsFor(mode).get(documentId)!.title });
           }
         }
       }
@@ -350,8 +424,8 @@ class MapService {
     }
   }
 
-  async node(id: string) {
-    const location = this.locate(id);
+  async node(id: string, mode: MapMode = 'network') {
+    const location = this.locate(id, mode);
     const node = location.node;
     const descriptions = { group: 'A fixed spatial group of documents for navigation; not a topic cluster. Its links summarize terms mentioned by at least one document in each connected group, not relationships between every paper.', document: 'One parsed source article. Sections and chunks belong to this source.', section: 'A heading-delimited region of the original document.', chunk: 'A bounded text segment used for retrieval, preserving exact source offsets.', entity: 'A dictionary term actually mentioned in one or more source chunks. A shared mention is not a verified scientific relationship.' };
     let content: unknown;

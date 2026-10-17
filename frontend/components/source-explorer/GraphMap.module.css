@@ -13,6 +13,11 @@
 .tooltip { position: absolute; width: 205px; padding: 11px 13px; background: var(--background, #fff); border: 1px solid var(--border, #d8ded5); border-radius: 9px; box-shadow: 0 5px 18px #17251a15; pointer-events: none; }
 .tooltip small { display: block; margin-bottom: 4px; font-size: 10px; color: var(--muted-foreground, #5f6b60); }
 .tooltip strong { display: block; font-size: 12px; line-height: 1.5; font-weight: 500; color: var(--foreground, #26342a); }
+.tooltip p { margin-top:6px; font-size:11px; line-height:1.6; color:var(--muted-foreground, #5f6b60); }
+.edgeMeanings { margin:12px 0; }
+.edgeMeanings > div + div { margin-top:9px; }
+.edgeMeanings dt { font-weight:600; }
+.edgeMeanings dd { margin-top:2px; color:var(--muted-foreground, #5f6b60); }
 .notice, .error { position: absolute; left: 50%; top: 42%; transform: translate(-50%, -50%); display: flex; gap: 9px; align-items: center; max-width: 320px; width: max-content; padding: 14px 18px; border-radius: 10px; background: var(--background, #fff); color: var(--foreground, #344638); border: 1px solid var(--border, #d8ded5); font-size: 12px; }
 .error { flex-direction: column; text-align: center; }
 .error button { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 5px; border: 1px solid var(--border, #d8ded5); background: var(--muted, #f5f5ed); cursor: pointer; }

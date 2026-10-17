@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowUp, ArrowUpRight, ChevronDown, FileText, Loader2, MessageSquare, Moon, Network, PanelLeftClose, PanelLeftOpen, Paperclip, Plus, Settings2, Sun, Upload, X } from 'lucide-react';
+import { ArrowUp, ArrowUpRight, ChevronDown, FileText, Loader2, Maximize2, MessageSquare, Minimize2, Moon, Network, PanelLeftClose, PanelLeftOpen, Paperclip, Plus, Settings2, Sun, Upload, X } from 'lucide-react';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { Switch } from '@/components/ui/switch';
 import { CitationButton } from '@/components/CitationButton';
@@ -15,6 +15,8 @@ type Turn = { id: string; query: string; run?: SearchRun; error?: string };
 export function SourceWorkspace() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [dark, setDark] = useState(false);
+  const [mapMode, setMapMode] = useState<'network' | 'grouped'>('network');
+  const [explorerExpanded, setExplorerExpanded] = useState(false);
   const [view, setView] = useState<'graph' | 'files'>('graph');
   const [configurationOpen, setConfigurationOpen] = useState(false);
   const [uploadRequest, setUploadRequest] = useState(0);
@@ -32,9 +34,11 @@ export function SourceWorkspace() {
   const messages = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const nodeDialog = useRef<HTMLDialogElement>(null);
+  const explorerDialog = useRef<HTMLDialogElement>(null);
   const pendingChunk = useRef<string | undefined>(undefined);
 
   useEffect(() => {
+    setMapMode(localStorage.getItem('argus-map-mode') === 'grouped' ? 'grouped' : 'network');
     const value = localStorage.getItem('falkor-theme') === 'dark';
     setDark(value);
     window.document.documentElement.classList.toggle('dark', value);
@@ -58,9 +62,24 @@ export function SourceWorkspace() {
     if (!selectedNode) { setNodeDetails(null); return; }
     let active = true;
     setNodeDetails(null);
-    void api<Record<string, unknown>>(`/map/node/${encodeURIComponent(selectedNode.id)}`).then(next => { if (active) setNodeDetails(next); }).catch(() => undefined);
+    void api<Record<string, unknown>>(`/map/node/${encodeURIComponent(selectedNode.id)}?mode=${mapMode}`).then(next => { if (active) setNodeDetails(next); }).catch(() => undefined);
     return () => { active = false; };
-  }, [selectedNode]);
+  }, [selectedNode, mapMode]);
+
+  useEffect(() => {
+    const dialog = explorerDialog.current;
+    if (!dialog) return;
+    if (explorerExpanded) {
+      if (dialog.open) dialog.close();
+      dialog.showModal();
+    } else if (dialog.matches(':modal')) {
+      dialog.close();
+      dialog.show();
+    } else if (!dialog.open) dialog.show();
+    const previousOverflow = window.document.body.style.overflow;
+    if (explorerExpanded) window.document.body.style.overflow = 'hidden';
+    return () => { window.document.body.style.overflow = previousOverflow; };
+  }, [explorerExpanded]);
 
   useEffect(() => { messages.current?.scrollTo({ top: messages.current.scrollHeight, behavior: 'smooth' }); }, [turns, busy]);
   useEffect(() => {
@@ -111,7 +130,7 @@ export function SourceWorkspace() {
 
   return <div className={`ce-workspace ${sidebarOpen ? '' : 'ce-sidebar-collapsed'}`}>
     <aside className="ce-sidebar">
-      <div className="ce-brand"><img src="/cosmic-logo.png" alt="" width={29} height={29} /><strong>Falcor</strong><button className="ce-icon" onClick={() => setSidebarOpen(false)} aria-label="Collapse sidebar"><PanelLeftClose size={17} /></button></div>
+      <div className="ce-brand"><img src="/cosmic-logo.png" alt="" width={29} height={29} /><strong>Argus</strong><button className="ce-icon" onClick={() => setSidebarOpen(false)} aria-label="Collapse sidebar"><PanelLeftClose size={17} /></button></div>
       <button className="ce-new-chat" onClick={() => { setTurns([]); setQuery(''); composer.current?.focus(); }} disabled={busy}><Plus size={17} />New chat</button>
       <div className="ce-navigation-label">Your workspace</div>
       <button className="ce-session active" onClick={() => messages.current?.scrollTo({ top: 0, behavior: 'smooth' })}><MessageSquare size={16} /><span>Materials & water</span></button>
@@ -120,7 +139,7 @@ export function SourceWorkspace() {
     <main className="ce-main">
       <ResizablePanelGroup direction="horizontal" className="ce-panels">
         <ResizablePanel defaultSize={52} minSize={30} className="ce-chat-panel">
-          <div className="ce-chat-heading">{!sidebarOpen && <><button className="ce-icon" onClick={() => setSidebarOpen(true)} aria-label="Expand sidebar"><PanelLeftOpen size={18} /></button><span className="ce-mobile-brand">Falcor</span></>}<span>Chat</span><button className="ce-icon ce-mobile-theme" onClick={toggleTheme} aria-label={`Switch to ${dark ? 'light' : 'dark'} mode`}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button><button className="ce-icon ce-mobile-source" onClick={() => window.document.querySelector('.ce-explorer-panel')?.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'})} aria-label="Open Source Explorer"><Network size={17} /></button></div>
+          <div className="ce-chat-heading">{!sidebarOpen && <><button className="ce-icon" onClick={() => setSidebarOpen(true)} aria-label="Expand sidebar"><PanelLeftOpen size={18} /></button><span className="ce-mobile-brand">Argus</span></>}<span>Chat</span><button className="ce-icon ce-mobile-theme" onClick={toggleTheme} aria-label={`Switch to ${dark ? 'light' : 'dark'} mode`}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button><button className="ce-icon ce-mobile-source" onClick={() => window.document.querySelector('.ce-explorer-panel')?.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'})} aria-label="Open Source Explorer"><Network size={17} /></button></div>
           <div className="ce-messages" ref={messages}>
             {!turns.length && <div className="ce-chat-empty"><img src="/cosmic-logo.png" alt="" width={46} height={46} /><h1>Start with a question.</h1><p>Explore your sources, follow their connections,<br />and pick up right where a citation leads.</p><div className="ce-suggestions"><button onClick={() => void submit(undefined, 'adsorption regeneration water')}>Find research on water treatment<ArrowUp size={14} /></button><button onClick={() => void submit(undefined, 'metal organic framework pollutant removal')}>Explore metal–organic frameworks<ArrowUp size={14} /></button></div></div>}
             {turns.map(turn => <div className="ce-turn" key={turn.id}><div className="ce-user-message">{turn.query}</div><div className="ce-response"><div className="ce-response-name"><img src="/cosmic-logo.png" alt="" width={22} height={22} /><strong>Source search</strong></div>{turn.error ? <div className="ce-inline-error" role="alert">{turn.error}</div> : !turn.run ? <div className="ce-searching"><Loader2 size={15} className="spinning" />Searching your sources…</div> : <><p className="ce-response-summary">{turn.run.results.length ? `Found ${turn.run.results.length} source matches. Select a citation to explore its location in the graph.` : 'No source matches. Try another phrase or a more specific term.'}</p><p className="ce-retrieval-note">Retrieved excerpts · answer generation is not connected</p>{turn.run.results.map((source, index) => <article className={`ce-source-match ${selectedId === source.chunkId ? 'is-focused' : ''}`} key={source.chunkId}><h2>{source.documentTitle}</h2><p>{source.text.length > 550 ? `${source.text.slice(0, 550)}…` : source.text}</p><CitationButton citation={source} index={index + 1} onCitationClick={() => selectCitation(source)} selected={selectedId === source.chunkId} /></article>)}</>}</div></div>)}
@@ -129,9 +148,12 @@ export function SourceWorkspace() {
         </ResizablePanel>
         <ResizableHandle withHandle className="ce-resize" />
         <ResizablePanel defaultSize={48} minSize={28} className="ce-explorer-panel">
-          <div className="ce-explorer-heading"><h2>Source Explorer</h2><div className="ce-explorer-actions"><button className="ce-icon" onClick={upload} title="Upload file" aria-label="Upload file"><Upload size={17} /></button><button className={`ce-icon ${view === 'files' ? 'is-active' : ''}`} onClick={() => setView(previous => previous === 'graph' ? 'files' : 'graph')} title={view === 'graph' ? 'Open file viewer' : 'Open graph'} aria-label={view === 'graph' ? 'Open file viewer' : 'Open graph'}>{view === 'graph' ? <FileText size={18} /> : <Network size={18} />}</button><button className={`ce-configuration-button ${configurationOpen ? 'is-active' : ''}`} onClick={() => setConfigurationOpen(previous => !previous)} aria-label="Engine configuration" aria-expanded={configurationOpen} aria-controls="engine-configuration"><Settings2 size={16} /><span>Engine configuration</span><ChevronDown size={12} /></button></div></div>
+          <dialog open ref={explorerDialog} className={`ce-explorer-shell ${explorerExpanded ? 'is-expanded' : ''}`} aria-labelledby="source-explorer-title" onCancel={event => { event.preventDefault(); if (explorerExpanded) setExplorerExpanded(false); }}>
+          <div className="ce-explorer-heading"><h2 id="source-explorer-title">Source Explorer</h2><div className="ce-explorer-actions"><button className="ce-icon" onClick={() => setExplorerExpanded(previous => !previous)} title={explorerExpanded ? 'Restore Source Explorer' : 'Expand Source Explorer'} aria-label={explorerExpanded ? 'Restore Source Explorer' : 'Expand Source Explorer'}>{explorerExpanded ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button><button className="ce-icon" onClick={upload} title="Upload file" aria-label="Upload file"><Upload size={17} /></button><button className={`ce-icon ${view === 'files' ? 'is-active' : ''}`} onClick={() => setView(previous => previous === 'graph' ? 'files' : 'graph')} title={view === 'graph' ? 'Open file viewer' : 'Open graph'} aria-label={view === 'graph' ? 'Open file viewer' : 'Open graph'}>{view === 'graph' ? <FileText size={18} /> : <Network size={18} />}</button><button className={`ce-configuration-button ${configurationOpen ? 'is-active' : ''}`} onClick={() => setConfigurationOpen(previous => !previous)} aria-label="Engine configuration" aria-expanded={configurationOpen} aria-controls="engine-configuration"><Settings2 size={16} /><span>Engine configuration</span><ChevronDown size={12} /></button></div></div>
+          {view === 'graph' && <div className="ce-map-toolbar"><div className="ce-map-modes" role="group" aria-label="Graph layout"><button aria-pressed={mapMode === 'network'} onClick={() => { setMapMode('network'); localStorage.setItem('argus-map-mode', 'network'); }}>Network</button><button aria-pressed={mapMode === 'grouped'} onClick={() => { setMapMode('grouped'); localStorage.setItem('argus-map-mode', 'grouped'); }}>Trees</button></div><span>{mapMode === 'network' ? 'Connected documents' : 'Document branches'}</span></div>}
           {configurationOpen && <section id="engine-configuration" className="ce-configuration"><div><strong>Engine configuration</strong><button className="ce-icon" onClick={() => setConfigurationOpen(false)} aria-label="Close engine configuration"><X size={16} /></button></div><label><span>Graph expansion<small>Follow shared connections after search</small></span><Switch checked={options.graphExpansion} onCheckedChange={checked => updateOptions({ graphExpansion: checked })} /></label><label><span>BM25 search<small>Lexical retrieval · always on</small></span><Switch checked disabled /></label><label><span>Vector search + RRF<small>Embedding pipeline not connected</small></span><Switch checked={false} disabled /></label><p>Changes apply to your next message.</p></section>}
-          <div className="ce-explorer-content">{view === 'graph' ? <>{graphError && <div className="ce-inline-error" role="alert">{graphError}</div>}<GraphMap focus={mapFocus} onSelect={selectNode} onFocus={target => { if (target.documentId) focusSource(target.documentId, target.chunkId); }} /></> : <FileExplorer focusDocumentId={documentId} focusChunkId={selectedId || undefined} uploadRequest={uploadRequest} onDocumentFocus={(id, chunkId) => { focusSource(id, chunkId); if (chunkId) { setMapFocus({nodeId:chunkId,nonce:Date.now()}); setView('graph'); } }} />}</div>
+          <div className="ce-explorer-content">{view === 'graph' ? <>{graphError && <div className="ce-inline-error" role="alert">{graphError}</div>}<GraphMap mode={mapMode} expanded={explorerExpanded} onExpand={() => setExplorerExpanded(previous => !previous)} focus={mapFocus} onSelect={selectNode} onFocus={target => { if (target.documentId) focusSource(target.documentId, target.chunkId); }} /></> : <FileExplorer focusDocumentId={documentId} focusChunkId={selectedId || undefined} uploadRequest={uploadRequest} onDocumentFocus={(id, chunkId) => { focusSource(id, chunkId); if (chunkId) { setMapFocus({nodeId:chunkId,nonce:Date.now()}); setView('graph'); } }} />}</div>
+          </dialog>
         </ResizablePanel>
       </ResizablePanelGroup>
     </main>

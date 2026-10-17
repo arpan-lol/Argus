@@ -34,7 +34,7 @@ FalkorDB hackathon, 15–18 October 2026. The user brings existing experience bu
 
 Use Case A: materials literature source review, beginning with adsorption/remediation source and a broader catalysis discovery collection. Use Case B: standards implementation review. These are two adapters for one engine, not fallback plans. Scientific interpretation remains unvalidated without a researcher reviewer.
 
-Working name: Cosmic Source Workspace. Preserve Cosmic Engine's dashboard design language and controller/service/route organization. Open directly into a visual source-review dashboard with a full inspector, colored chunks, article section navigation, and citation-linked graph neighborhoods. Authentication and long-term memory are explicitly deferred. Production deployment remains open. Future architectural decisions require asking Arpan; the user granted creative freedom for this first implementation slice.
+Project name: Argus (two syllables), named for a character from Greek mythology. Preserve Cosmic Engine's dashboard design language and controller/service/route organization. Open directly into a visual source-review dashboard with a full inspector, colored chunks, article section navigation, and citation-linked graph neighborhoods. Authentication and long-term memory are explicitly deferred. Production deployment remains open. Future architectural decisions require asking Arpan; the user granted creative freedom for this first implementation slice.
 
 ## Source and Assets
 

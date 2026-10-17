@@ -1,6 +1,6 @@
-# Cosmic Source Workspace
+# Argus
 
-A source workspace extended from [Cosmic Engine](https://github.com/arpan-lol/cosmic-engine), with central chat and a resizable Source Explorer. Follow citations through a stable, progressively loaded graph, or switch the right panel to file and chunk readers.
+A source workspace extended from [Cosmic Engine](https://github.com/arpan-lol/cosmic-engine), with central chat and a resizable Source Explorer. Argus takes its name from Greek mythology. Follow citations through a stable, progressively loaded graph, or switch the right panel to file and chunk readers.
 
 ## Run locally
 
@@ -31,7 +31,9 @@ npm run build builds both application packages. Backend configuration is describ
 
 The graph provides a collection overview, files, headings and chunks at increasing zoom levels. Positions remain stable when selecting nodes. Drag to pan, scroll to zoom, select a node for its details, and double-click a file to explore it. Citation navigation zooms out, moves to the source, and zooms in. Only the current viewport and nearby records are loaded; the browser does not render the complete graph at once.
 
-Shared-name connections can link files across the collection. Overview groups summarize connections for navigation; grouping and distance do not imply semantic similarity or scientific validation. The inactive graph or file view is unmounted when switching modes.
+Switch between Network, an organic document network, and Trees, the earlier grouped document map. Expand Source Explorer into a near-full-screen modal while preserving the current graph or reader. The inactive graph or file view is unmounted when switching between graph and files.
+
+Every edge has a defined type: document/section containment, chunk reading order, a chunk mentioning an entity, or a derived shared-name navigation summary. Hover an edge for its meaning. Shared mentions, grouping and distance do not imply agreement, semantic similarity or scientific validation.
 
 Cosmic-derived readers support local previews for PDF, DOCX, images, spreadsheets and text. Local file previews are labeled **Preview only** and are not uploaded or indexed. Server upload ingestion is pending agreement on its standardized processing pipeline. Presentations and legacy binary Word files have explicit fallback states.
 
