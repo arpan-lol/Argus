@@ -95,7 +95,8 @@ class Providers:
             return 0
         interval = 60 / maximum
         with connection() as conn:
-            row = conn.execute("INSERT INTO ingestion_provider_limits(rate_key,next_at) VALUES(%s,clock_timestamp()+(%s * interval '1 second')) ON CONFLICT(rate_key) DO UPDATE SET next_at=greatest(ingestion_provider_limits.next_at,clock_timestamp())+(%s * interval '1 second') RETURNING greatest(0,extract(epoch FROM next_at-clock_timestamp())-%s) AS wait", (self.config["provider"] + ":" + model, interval, interval, interval)).fetchone()
+            rate_key = ":".join(filter(None, [self.config["provider"], self.config.get("llmResourceIdentity"), model]))
+            row = conn.execute("INSERT INTO ingestion_provider_limits(rate_key,next_at) VALUES(%s,clock_timestamp()+(%s * interval '1 second')) ON CONFLICT(rate_key) DO UPDATE SET next_at=greatest(ingestion_provider_limits.next_at,clock_timestamp())+(%s * interval '1 second') RETURNING greatest(0,extract(epoch FROM next_at-clock_timestamp())-%s) AS wait", (rate_key, interval, interval, interval)).fetchone()
         wait = float(row["wait"])
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline:
@@ -103,6 +104,8 @@ class Providers:
         return wait
 
     def credentials(self):
+        if self.config["provider"] == "azure":
+            return self.azure_settings("llm")[2]
         if self.config["provider"] == "google":
             key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         else:
@@ -111,23 +114,56 @@ class Providers:
             raise ConfigurationRequired(f"Configure credentials for provider '{self.config['provider']}' to continue. Completed stages are retained.")
         return key
 
+    def azure_settings(self, kind):
+        from .azure import deployment_settings, resource_identity
+        try:
+            values = deployment_settings(kind)
+            model_key = "extractionModel" if kind == "llm" else "embeddingModel"
+            identity_key = "llmResourceIdentity" if kind == "llm" else "embeddingResourceIdentity"
+            endpoint_name = "LLM2_DEPLOYMENT_URL" if kind == "llm" else "EMBEDDING_MODEL_ENDPOINT"
+            if values[0] != self.config[model_key] or resource_identity(endpoint_name) != self.config.get(identity_key):
+                raise ValueError("Azure deployment settings changed; create a new processing configuration before continuing")
+            if kind == "llm" and self.config["resolutionModel"] != values[0]:
+                raise ValueError("All ingestion LLM steps must use the configured LLM2 deployment")
+            if kind == "embedding" and self.config["embeddingDimensions"] != 3072:
+                raise ValueError("Azure text-embedding-3-large ingestion requires its native 3072 dimensions")
+            return values
+        except ValueError as error:
+            raise ConfigurationRequired(str(error)) from error
+
+    def safe_error(self, error):
+        message = str(error)
+        for name in ("LLM2_DEPLOYMENT_KEY", "EMBEDDING_MODEL_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"):
+            secret = os.getenv(name)
+            if secret:
+                message = message.replace(secret, "[redacted]")
+        return message
+
     def embed(self, texts):
-        key = self.credentials()
-        if self.config["provider"] == "google":
-            from langchain_google_genai import GoogleGenerativeAIEmbeddings
-            client = GoogleGenerativeAIEmbeddings(model=self.config["embeddingModel"], google_api_key=key, output_dimensionality=self.config["embeddingDimensions"])
-        else:
+        if self.config["provider"] == "azure":
             from langchain_openai import OpenAIEmbeddings
-            client = OpenAIEmbeddings(model=self.config["embeddingModel"], api_key=key, dimensions=self.config["embeddingDimensions"], max_retries=0)
+            model, base_url, key = self.azure_settings("embedding")
+            client = OpenAIEmbeddings(model=model, base_url=base_url, api_key=key, max_retries=0, request_timeout=self.config["modelTimeoutSeconds"])
+        elif self.config["provider"] == "google":
+            key = self.credentials()
+            from langchain_google_genai import GoogleGenerativeAIEmbeddings
+            client = GoogleGenerativeAIEmbeddings(model=self.config["embeddingModel"], google_api_key=key, output_dimensionality=self.config["embeddingDimensions"], request_options={"timeout": self.config["modelTimeoutSeconds"]})
+        else:
+            key = self.credentials()
+            from langchain_openai import OpenAIEmbeddings
+            client = OpenAIEmbeddings(model=self.config["embeddingModel"], api_key=key, dimensions=self.config["embeddingDimensions"], max_retries=0, request_timeout=self.config["modelTimeoutSeconds"])
         started = time.monotonic()
+        receipt = {"kind": "embedding", "provider": self.config["provider"], "model": self.config["embeddingModel"], "dimensions": self.config["embeddingDimensions"], "resourceIdentity": self.config.get("embeddingResourceIdentity"), "items": len(texts), "timeoutSeconds": self.config["modelTimeoutSeconds"], "maxRetries": 0, "usage": None, "cost": None}
         try:
             result = client.embed_documents(texts)
+            if len(result) != len(texts) or any(len(vector) != self.config["embeddingDimensions"] for vector in result):
+                raise ValueError("Embedding response dimensions or item count do not match the processing configuration")
+            if any(any(not math.isfinite(value) for value in vector) or not any(vector) for vector in result):
+                raise ValueError("Embeddings must contain finite values with nonzero magnitude")
         except Exception as error:
-            self.record_call({"kind": "embedding", "status": "failed", "model": self.config["embeddingModel"], "items": len(texts), "durationMs": (time.monotonic() - started) * 1000, "error": str(error), "usage": None, "cost": None})
+            self.record_call({**receipt, "status": "failed", "durationMs": (time.monotonic() - started) * 1000, "error": self.safe_error(error)})
             raise
-        if len(result) != len(texts) or any(len(vector) != self.config["embeddingDimensions"] for vector in result):
-            raise ValueError("Embedding response dimensions or item count do not match the processing configuration")
-        self.record_call({"kind": "embedding", "status": "complete", "model": self.config["embeddingModel"], "items": len(texts), "durationMs": (time.monotonic() - started) * 1000, "inputCharacters": sum(map(len, texts)), "usage": None, "cost": None})
+        self.record_call({**receipt, "status": "complete", "durationMs": (time.monotonic() - started) * 1000, "inputCharacters": sum(map(len, texts))})
         return result
 
     def embed_query(self, text):
@@ -137,8 +173,13 @@ class Providers:
             if not isinstance(text, str) or not text.strip():
                 raise ValueError("Query embedding requires nonempty text")
             receipt["inputCharacters"] = len(text)
-            key = self.credentials()
-            if self.config["provider"] == "google":
+            if self.config["provider"] == "azure":
+                from langchain_openai import OpenAIEmbeddings
+                model, base_url, key = self.azure_settings("embedding")
+                client = OpenAIEmbeddings(model=model, base_url=base_url, api_key=key, max_retries=0, request_timeout=20)
+                result = client.embed_query(text)
+            elif self.config["provider"] == "google":
+                key = self.credentials()
                 from google.genai import Client
                 from google.genai.types import EmbedContentConfig, HttpOptions, HttpRetryOptions
                 with Client(api_key=key, http_options=HttpOptions(timeout=20000, retry_options=HttpRetryOptions(attempts=1))) as client:
@@ -150,6 +191,7 @@ class Providers:
                 if usage is not None:
                     receipt["usage"] = usage.model_dump(mode="json")
             elif self.config["provider"] == "openai":
+                key = self.credentials()
                 from langchain_openai import OpenAIEmbeddings
                 client = OpenAIEmbeddings(model=self.config["embeddingModel"], api_key=key, dimensions=self.config["embeddingDimensions"], max_retries=0, request_timeout=20)
                 result = client.embed_query(text)
@@ -161,7 +203,7 @@ class Providers:
             if any(not math.isfinite(value) for value in vector) or not any(value != 0 for value in vector):
                 raise ValueError("Query embedding must contain finite values with nonzero magnitude")
         except Exception as error:
-            self.record_call({**receipt, "status": "failed", "durationMs": (time.monotonic() - started) * 1000, "error": str(error)})
+            self.record_call({**receipt, "status": "failed", "durationMs": (time.monotonic() - started) * 1000, "error": self.safe_error(error)})
             raise
         self.record_call({**receipt, "status": "complete", "durationMs": (time.monotonic() - started) * 1000})
         return vector
@@ -171,7 +213,11 @@ class Providers:
         model = self.config["resolutionModel"] if judge else self.config["extractionModel"]
         parameters = {"maxOutputTokens": self.config["maxOutputTokens"], "timeoutSeconds": self.config["modelTimeoutSeconds"], "thinkingBudget": self.config["resolutionThinkingBudget"] if judge else self.config["extractionThinkingBudget"], "temperature": 0}
         parameters["rateWaitSeconds"] = self.wait_for_capacity(model)
-        if self.config["provider"] == "google":
+        if self.config["provider"] == "azure":
+            from langchain_openai import ChatOpenAI
+            deployment, base_url, key = self.azure_settings("llm")
+            client = ChatOpenAI(model=deployment, base_url=base_url, api_key=key, temperature=0, max_retries=0, timeout=parameters["timeoutSeconds"], max_tokens=parameters["maxOutputTokens"], use_responses_api=True)
+        elif self.config["provider"] == "google":
             from langchain_google_genai import ChatGoogleGenerativeAI
             client = ChatGoogleGenerativeAI(model=model, google_api_key=key, temperature=0, max_retries=0, timeout=parameters["timeoutSeconds"], max_output_tokens=parameters["maxOutputTokens"], thinking_budget=parameters["thinkingBudget"])
         else:
@@ -181,7 +227,7 @@ class Providers:
         try:
             result = client.with_structured_output(schema, include_raw=True, method="json_schema").invoke([("system", prompt), ("human", json.dumps(payload, ensure_ascii=False))])
         except Exception as error:
-            self.record_call({"kind": "llm", "status": "failed", "model": model, "durationMs": (time.monotonic() - started) * 1000, "usage": None, "cost": None, "error": str(error), "parameters": parameters, "promptVersion": self.config["promptVersion"]})
+            self.record_call({"kind": "llm", "status": "failed", "model": model, "durationMs": (time.monotonic() - started) * 1000, "usage": None, "cost": None, "error": self.safe_error(error), "parameters": parameters, "promptVersion": self.config["promptVersion"]})
             if "GenerateRequestsPerDay" in str(error):
                 raise ConfigurationRequired(f"Daily generation quota exhausted for {model}. Completed outputs are retained; resume when this model's quota is available.") from error
             raise
