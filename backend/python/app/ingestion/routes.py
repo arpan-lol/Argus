@@ -197,6 +197,8 @@ def job_original(job_id: str):
 
 def document_for_job(record):
     source_id = record["source_id"]
+    with connection() as conn:
+        publication = conn.execute("SELECT published_at FROM ingestion_publications WHERE job_id=%s", (record["id"],)).fetchone()
     normalized = pipeline.artifact(record["id"], "normalize")
     if not normalized:
         raise HTTPException(409, "Source text is not parsed yet")
@@ -210,7 +212,7 @@ def document_for_job(record):
     for chunk in chunks["chunks"]:
         primary, related = chunk_sections(chunk, sections)
         enriched_chunks.append({**chunk, "documentId": source_id, "sectionId": primary["id"], "sectionIds": [section["id"] for section in related], "sectionTitle": primary["title"], "sourceUrl": source_url, "locationKind": "source"})
-    return {**normalized["metadata"], "id": source_id, "title": title, "processingWarnings": processing_warnings, "extractionQuality": extraction.get("quality"), "filename": record["filename"], "text": normalized["text"], "textLength": len(normalized["text"]), "chunks": enriched_chunks, "sections": sections, "entities": [], "offsetUnit": "unicode_codepoint", "textNormalization": normalized["normalization"], "extractionBoundary": "Inspect the ingestion job for extraction/validation readiness; parsed text does not imply indexed semantic assertions.", "blocks": normalized["blocks"], "metadata": normalized["metadata"], "status": record["status"], "jobId": record["id"], "revision": record["revision"], "processingVersion": record["processing_version"], "sourceUrl": source_url, "capabilities": {"original": True, "parsedText": True, "chunks": bool(chunks["chunks"]), "indexed": record["status"] == "complete"}}
+    return {**normalized["metadata"], "id": source_id, "title": title, "processingWarnings": processing_warnings, "indexedAt": publication["published_at"].isoformat() if publication else None, "extractionQuality": extraction.get("quality"), "filename": record["filename"], "text": normalized["text"], "textLength": len(normalized["text"]), "chunks": enriched_chunks, "sections": sections, "entities": [], "offsetUnit": "unicode_codepoint", "textNormalization": normalized["normalization"], "extractionBoundary": "Inspect the ingestion job for extraction/validation readiness; parsed text does not imply indexed semantic assertions.", "blocks": normalized["blocks"], "metadata": normalized["metadata"], "status": record["status"], "jobId": record["id"], "revision": record["revision"], "processingVersion": record["processing_version"], "sourceUrl": source_url, "capabilities": {"original": True, "parsedText": True, "chunks": bool(chunks["chunks"]), "indexed": record["status"] == "complete"}}
 
 
 @router.get("/documents/{source_id}/download")

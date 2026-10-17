@@ -73,9 +73,13 @@ def assertion_rows(session, entity_id, direction="both", predicates=None, polari
     rows = session.cypher("MATCH (s:Entity)<-[:SUBJECT]-(a:Assertion)-[:OBJECT]->(o:Entity),(a)-[:SUPPORTED_BY]->(c:Chunk) WHERE a.active=true AND c.active=true AND a.jobId IN $jobs AND c.jobId=a.jobId AND (($direction='outgoing' AND s.id=$entity) OR ($direction='incoming' AND o.id=$entity) OR ($direction='both' AND (s.id=$entity OR o.id=$entity))) AND (size($predicates)=0 OR a.predicate IN $predicates) AND ($polarity IS NULL OR a.polarity=$polarity) RETURN a.id,a.jobId,a.predicate,a.polarity,a.conditions,a.quote,a.startOffset,a.endOffset,c.id,s.id,s.label,o.id,o.label ORDER BY a.id LIMIT $limit", {"entity": entity_id, "direction": direction, "predicates": predicates or [], "polarity": polarity, "limit": limit + 1}, "assertion adjacency")
     if len(rows) > limit:
         session.truncate("Assertion fanout/result limit reached; traversal is incomplete")
-    support = session.chunks([row[8] for row in rows[:limit]])
+    return supported_assertions(session, rows[:limit])
+
+
+def supported_assertions(session, rows):
+    support = session.chunks([row[8] for row in rows])
     assertions = []
-    for row in rows[:limit]:
+    for row in rows:
         chunk = support.get(row[8])
         if not chunk or chunk["job_id"] != row[1]:
             continue
@@ -165,3 +169,6 @@ def expand_connections(session, args):
 
 def find_paths(session, args):
     return traverse(session, [args.source_entity_id], args.max_depth, args.direction, args.predicates, 100, args.target_entity_id, args.limit)
+
+
+from .research import rank_entities, recent_source_updates, source_authors
