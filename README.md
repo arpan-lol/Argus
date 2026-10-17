@@ -77,7 +77,7 @@ The dashboard labels the earlier dictionary-based map and catalog **Legacy graph
 
 ## Published retrieval tools
 
-`GET /api/retrieval/tools` lists six typed tools: `search_sources`, `find_entities`, `read_chunks`, `inspect_assertions`, `expand_connections`, and `find_paths`. Invoke one with `POST /api/retrieval/tools/{name}` and body `{"arguments": {...}}`. The agent receives these contracts rather than schema access or arbitrary Cypher. `app.retrieval.bindings.get_tools()` returns LangChain StructuredTools for typed retrieval integrations. The dashboard investigation uses these same bounded contracts; no MCP transport is enabled.
+`GET /api/retrieval/tools` lists nine typed tools. The original six are: `search_sources`, `find_entities`, `read_chunks`, `inspect_assertions`, `expand_connections`, and `find_paths`. The research extensions are `source_authors`, `recent_source_updates`, and `rank_entities`. Invoke one with `POST /api/retrieval/tools/{name}` and body `{"arguments": {...}}`. The agent receives these contracts rather than schema access or arbitrary Cypher. `app.retrieval.bindings.get_tools()` returns LangChain StructuredTools for typed retrieval integrations. The dashboard investigation uses these same bounded contracts; the same catalogue is exposed by the optional local MCP server.
 
 `POST /api/retrieval/search` accepts `{"query":"your question","mode":"hybrid","limit":10}`. Modes are lexical, vector and hybrid. Search combines published Postgres BM25 with native FalkorDB chunk ANN using reciprocal-rank fusion, constant 60. Query embeddings use explicit retrieval-query semantics, matching the publication's provider/model/dimensions, with a persistent profile-keyed cache. Hybrid channel failure is explicitly reported as partial, never silently disguised as hybrid success.
 
@@ -104,3 +104,30 @@ Postgres stores run events, tool receipts, budgets, and LangGraph checkpoints. `
 Each run admits at most eight model calls and eight retrieval calls, with 10,000 estimated context tokens, 2,048 maximum output tokens per call, and 64,000 reserved tokens overall. Two concurrent workers are allowed. A 180-second admission deadline and individual model request timeouts bound execution; in-flight work can exceed the admission deadline. Token reservations are estimates; reported usage is displayed separately. The optional $0.25 reservation limit applies only when both `ARGUS_CHAT_INPUT_USD_PER_MILLION` and `ARGUS_CHAT_OUTPUT_USD_PER_MILLION` are configured with deployment prices. No dollar cost is invented when prices are absent. Budget environment overrides in `.env.example` may lower these limits.
 
 Run recovery preserves previous budget reservations. Completed tool results replay from their receipts; a crash after a paid model call but before its checkpoint can cause that call to repeat on resume. Citation validation checks source identity and quotation offsets; it does not prove every generated interpretation. Available publication counts are shown in the chat and engine configuration.
+
+## Article-inspired research tools
+
+The six capabilities in [How to Build an Agent That Reasons Over a Graph](https://www.wemakedevs.org/blogs/how-to-build-an-agent-that-reasons-over-a-graph) are adapted to research sources:
+
+| Article tool | Argus tool | Research meaning |
+| --- | --- | --- |
+| `blast_radius` | `expand_connections` | Follow recorded assertions with bounded hops and citations; no causal impact is inferred. |
+| `who_to_wake` | `source_authors` | Read credited authors from a source's parsed metadata; no on-call or contact recommendations. |
+| `recent_changes` | `recent_source_updates` | Current source publications indexed in the last 1–168 hours. Indexing time is separate from paper publication dates. |
+| `path_between` | `find_paths` | Return shortest discovered assertion paths within the configured bounds and support each hop. |
+| `load_bearing` | `rank_entities` | Rank connectivity in a bounded projection of current affirmed assertions. |
+| `recall` | Disabled | Long-term findings memory is off by explicit user choice. Direct API requests return `capability_disabled`. |
+
+The tool catalogue includes this mapping and availability. The chat can select the five active capabilities; it has no raw Cypher or schema tool. Disabling graph expansion also hides the ranking tool. Unknown document/entity IDs stop before dependent searches. Empty bounded results do not prove absence.
+
+Ranking computes PageRank over at most 200 source-validated assertions and 100 entities, with a 0.85 damping factor and 50-iteration cap. An optional entity ID restricts discovery to its bounded neighborhood. Duplicate directed entity pairs count as one edge; negated and uncertain assertions are excluded from ranking. Sampling, convergence and truncations are returned explicitly. This is connectivity in the sampled graph, not scientific importance, confidence, truth or causal influence. FalkorDB's whole-label PageRank procedure cannot filter the current publication snapshot, so ranking runs in process over fixed read-only FalkorDB queries instead of ranking retired graph records.
+
+Author and indexing-event citations are revalidated against the active publication, original normalized author metadata, or recorded indexing timestamp. They open the pinned processing job's reader, where authors and indexing time are displayed. Metadata citations do not establish scientific findings. Existing passage citations retain exact quotation/offset validation. All tools keep the existing per-call database, time, output, and publication-consistency limits.
+
+Start the optional MCP stdio server from the repository root:
+
+```sh
+node scripts/python.mjs mcp
+```
+
+It uses the same typed schemas and execution layer as HTTP and LangGraph, exposes nine read-only research tools, limits concurrent executions to two, and provides structured results plus backward-compatible text. The server speaks on stdin/stdout and opens no additional listening port. Install the Python requirements and initialize the local databases through the normal setup first. No external MCP-client configuration is changed automatically.
