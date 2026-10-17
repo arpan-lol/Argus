@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Expand, HelpCircle, Loader2, Minus, Plus, RotateCcw } from 'lucide-react';
 import styles from './GraphMap.module.css';
+import { ConnectionPaths, type ConnectionPath } from './ConnectionPaths';
 
 export type MapNode = {
   id: string; type: 'group' | 'document' | 'section' | 'chunk' | 'entity';
@@ -14,6 +15,7 @@ type Bounds = { minX: number; minY: number; maxX: number; maxY: number };
 type MapEdge = { id: string; source: string; target: string; type: string; derived?: boolean; [key: string]: unknown };
 type MapView = { nodes: MapNode[]; edges: MapEdge[]; level: string; truncated?: boolean; source?: string; status?: string };
 type Camera = { x: number; y: number; zoom: number };
+type Neighborhood = { nodes: MapNode[]; edges: MapEdge[]; paths: ConnectionPath[]; truncated?: boolean; status?: string; note?: string };
 type Props = {
   focus?: { nodeId: string; nonce: number } | null;
   onSelect: (node: MapNode) => void;
@@ -22,7 +24,7 @@ type Props = {
 
 const names = { group: 'Source group', document: 'File', section: 'Heading', chunk: 'Chunk', entity: 'Shared name' };
 const colors = { group: '#b99540', document: '#c6a34f', section: '#869ab2', chunk: '#5b9b88', entity: '#a187b5' };
-const empty: MapView = { nodes: [], edges: [], level: 'groups' };
+const empty: MapView = { nodes: [], edges: [], level: 'overview' };
 const clip = (text: string, size = 34) => text.length > size ? `${text.slice(0, size - 1)}…` : text;
 const scale = (zoom: number) => Math.max(.003, Math.min(7, zoom));
 
@@ -38,8 +40,11 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
   const camera = useRef<Camera>({ x: 0, y: 0, zoom: .015 });
   const dimensions = useRef({ width: 800, height: 700 });
   const world = useRef<Bounds | null>(null);
-  const groups = useRef<MapNode[]>([]);
-  const groupEdges = useRef<MapEdge[]>([]);
+  const overview = useRef<MapView>(empty);
+  const neighborhood = useRef<Neighborhood | null>(null);
+  const activePath = useRef<ConnectionPath | null>(null);
+  const neighborhoodRequest = useRef<AbortController | null>(null);
+  const navigationSequence = useRef(0);
   const fitted = useRef(false);
   const current = useRef<MapView>(empty);
   const screenNodes = useRef<{ node: MapNode; x: number; y: number; radius: number }[]>([]);
@@ -58,6 +63,11 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
   const [reload, setReload] = useState(0);
   const [truncated, setTruncated] = useState(false);
   const [accessible, setAccessible] = useState<MapNode[]>([]);
+  const [connections, setConnections] = useState<Neighborhood | null>(null);
+  const [connectionsLoading, setConnectionsLoading] = useState(false);
+  const [connectionsError, setConnectionsError] = useState<string | null>(null);
+  const [connectionsOpen, setConnectionsOpen] = useState(false);
+  const [activeConnection, setActiveConnection] = useState<ConnectionPath | null>(null);
 
   const draw = useCallback(() => {
     const surface = canvas.current;
@@ -75,19 +85,25 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
     for (let x = ((-c.x * c.zoom) % step + step) % step; x < width; x += step) {
       for (let y = ((-c.y * c.zoom) % step + step) % step; y < height; y += step) context.fillRect(x, y, 1, 1);
     }
-    const desired = c.zoom < .08 ? 'groups' : c.zoom < .45 ? 'documents' : 'detail';
-    const view = current.current;
-    const nodes = desired === 'groups' ? groups.current : view.nodes;
+    const desired = c.zoom < .08 ? 'overview' : c.zoom < .45 ? 'documents' : 'detail';
+    const view = desired === 'overview' ? overview.current : current.current;
+    const linked = neighborhood.current;
+    const nodes = [...new Map([...view.nodes, ...(linked?.nodes || [])].map(node => [node.id, node])).values()];
+    const linkIds = new Set(linked?.nodes.map(node => node.id) || []);
+    const path = activePath.current;
+    const pathIds = new Set(path ? [path.sourceChunkId, path.entityId, path.targetChunkId] : []);
     const projected = new Map(nodes.map(node => [node.id, { node, x: (node.x - c.x) * c.zoom + width / 2, y: (node.y - c.y) * c.zoom + height / 2 }]));
     context.lineCap = 'round';
-    for (const edge of desired === 'groups' ? groupEdges.current : view.edges) {
+    for (const edge of new Map([...view.edges, ...(linked?.edges || [])].map(edge => [edge.id, edge])).values()) {
       const a = projected.get(edge.source), b = projected.get(edge.target);
       if (!a || !b) continue;
       if ((a.x < -30 && b.x < -30) || (a.x > width + 30 && b.x > width + 30) || (a.y < -30 && b.y < -30) || (a.y > height + 30 && b.y > height + 30)) continue;
-      const active = [selected.current, hovered.current].some(id => id && (edge.source === id || edge.target === id));
+      const pathEdge = edge.type === 'MENTIONS' && (path ? pathIds.has(edge.source) && pathIds.has(edge.target) : linkIds.has(edge.source) && linkIds.has(edge.target));
+      const active = pathEdge || [path ? null : selected.current, hovered.current].some(id => id && (edge.source === id || edge.target === id));
       const branch = edge.type === 'HAS_SECTION' || edge.type === 'HAS_CHUNK';
       context.strokeStyle = active ? (dark ? '#dfc374' : '#88702c') : branch ? (dark ? '#80968a' : '#7c9284') : (dark ? '#64796b' : '#92a497');
-      context.lineWidth = active ? 1.9 : branch ? 1.25 : 1;
+      context.lineWidth = pathEdge ? 2.3 : active ? 1.9 : desired === 'overview' ? .6 : branch ? 1.25 : 1;
+      context.globalAlpha = desired === 'overview' && !active ? .32 : 1;
       context.setLineDash(edge.derived || edge.type === 'SHARES_TERM' || edge.type === 'SHARED_MENTION' ? [3, 4] : []);
       context.beginPath(); context.moveTo(a.x, a.y);
       if (branch) {
@@ -99,24 +115,28 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
       } else context.lineTo(b.x, b.y);
       context.stroke();
     }
+    context.globalAlpha = 1;
     context.setLineDash([]);
     screenNodes.current = [];
     for (const point of projected.values()) {
       const { node, x, y } = point;
       if (x < -100 || y < -70 || x > width + 100 || y > height + 70) continue;
-      const active = node.id === selected.current || node.id === hovered.current;
-      const radius = node.type === 'group' ? Math.max(7, Math.min(17, c.zoom * 4096 * .33)) : node.type === 'document' ? 7 : node.type === 'entity' ? 6 : 4.5;
-      screenNodes.current.push({ node, x, y, radius: radius + (node.type === 'group' ? 3 : 7) });
+      const active = node.id === selected.current || node.id === hovered.current || pathIds.has(node.id);
+      const coarse = desired === 'overview' && !(path ? pathIds.has(node.id) : linkIds.has(node.id)) && !active;
+      const radius = coarse ? 1 : node.type === 'document' ? 7 : node.type === 'entity' ? 6 : 4.5;
+      screenNodes.current.push({ node, x, y, radius: radius + (coarse ? 2 : 7) });
+      if (coarse) {
+        context.beginPath(); context.arc(x, y, radius, 0, Math.PI * 2);
+        context.fillStyle = dark ? '#829082' : '#7d8c7e'; context.fill();
+        continue;
+      }
       context.beginPath(); context.arc(x, y, radius + (active ? 4 : 0), 0, Math.PI * 2);
       context.fillStyle = active ? (dark ? '#655a39' : '#f0e8c9') : (dark ? '#202723' : '#fff'); context.fill();
       context.strokeStyle = colors[node.type]; context.lineWidth = active ? 2 : 1.2; context.stroke();
-      if (node.type === 'group') {
-        context.font = `600 ${radius < 12 ? 9 : 11}px sans-serif`; context.textAlign = 'center'; context.textBaseline = 'middle';
-        context.fillStyle = dark ? '#e8d49e' : '#725d26'; context.fillText(String(node.count || ''), x, y);
-      } else {
+      if (!coarse) {
         context.beginPath(); context.arc(x, y, Math.max(2, radius - 3), 0, Math.PI * 2); context.fillStyle = colors[node.type]; context.fill();
       }
-      const showLabel = active || (node.type === 'group' && projected.size < 30) || (node.type === 'document' && (c.zoom > .12 || projected.size < 30)) || (node.type === 'entity' && projected.size < 100);
+      const showLabel = path ? pathIds.has(node.id) || node.id === hovered.current : active || (linkIds.has(node.id) && node.type !== 'section') || (node.type === 'document' && (c.zoom > .12 || projected.size < 30)) || (node.type === 'entity' && projected.size < 100);
       if (showLabel) {
         const label = clip(node.label || node.preview || names[node.type], node.type === 'group' ? 20 : node.type === 'document' && c.zoom < .28 ? 14 : 31);
         context.font = `${active ? 600 : 400} 11px sans-serif`;
@@ -144,14 +164,8 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
     fitted.current = true;
   }, [move]);
 
-  const fly = useCallback(async (nodeId: string) => {
-    try {
-      const destination = await request<{ node: MapNode; zoom: number; documentId?: string; sectionId?: string; chunkId?: string }>(`/locate/${encodeURIComponent(nodeId)}`);
-      if (disposed.current) return;
-      const node = destination.node;
-      callbacks.current.onFocus?.({ documentId: destination.documentId || node.documentId, sectionId: destination.sectionId || node.sectionId, chunkId: destination.chunkId || node.chunkId });
-      selected.current = node.id;
-      const from = { ...camera.current }, target = { x: node.x, y: node.y, zoom: destination.zoom };
+  const travel = useCallback((target: Camera) => {
+      const from = { ...camera.current };
       cancelAnimationFrame(animation.current);
       if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { move(target); return; }
       const distance = Math.hypot(target.x - from.x, target.y - from.y);
@@ -172,8 +186,69 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
         if (elapsed < duration) animation.current = requestAnimationFrame(frame);
       };
       animation.current = requestAnimationFrame(frame);
-    } catch (failure) { if (!disposed.current) setError(failure instanceof Error ? failure.message : 'Unable to find this source.'); }
   }, [move]);
+
+  const clearConnections = useCallback(() => {
+    neighborhoodRequest.current?.abort();
+    neighborhood.current = null; activePath.current = null;
+    setActiveConnection(null);
+    setConnections(null); setConnectionsOpen(false); setConnectionsLoading(false);
+    draw();
+  }, [draw]);
+
+  const loadConnections = useCallback(async (nodeId: string) => {
+    neighborhoodRequest.current?.abort();
+    const controller = new AbortController(); neighborhoodRequest.current = controller;
+    neighborhood.current = null; activePath.current = null;
+    setActiveConnection(null);
+    setConnections(null); setConnectionsError(null); setConnectionsOpen(true); setConnectionsLoading(true);
+    try {
+      const result = await request<Neighborhood>(`/neighborhood/${encodeURIComponent(nodeId)}`, controller.signal);
+      if (disposed.current || controller.signal.aborted) return;
+      neighborhood.current = result; setConnections(result);
+      if (result.status && result.status !== 'ready') setConnectionsError(result.note || 'Connections are unavailable.');
+      draw();
+    } catch (failure) {
+      if (!controller.signal.aborted && !disposed.current) setConnectionsError(failure instanceof Error ? failure.message : 'Connections are unavailable.');
+    } finally { if (!controller.signal.aborted && !disposed.current) setConnectionsLoading(false); }
+  }, [draw]);
+
+  const fly = useCallback(async (nodeId: string) => {
+    const sequence = ++navigationSequence.current;
+    try {
+      const destination = await request<{ node: MapNode; zoom: number; documentId?: string; sectionId?: string; chunkId?: string }>(`/locate/${encodeURIComponent(nodeId)}`);
+      if (disposed.current || sequence !== navigationSequence.current) return;
+      const node = destination.node;
+      callbacks.current.onFocus?.({ documentId: destination.documentId || node.documentId, sectionId: destination.sectionId || node.sectionId, chunkId: destination.chunkId || node.chunkId });
+      selected.current = node.id;
+      if (node.type === 'chunk') void loadConnections(node.id); else clearConnections();
+      travel({ x: node.x, y: node.y, zoom: destination.zoom });
+    } catch (failure) { if (!disposed.current) setError(failure instanceof Error ? failure.message : 'Unable to find this source.'); }
+  }, [travel, loadConnections, clearConnections]);
+
+  const connectionCamera = useCallback((path: ConnectionPath): Camera | null => {
+    const ids = new Set([path.sourceChunkId, path.entityId, path.targetChunkId]);
+    const nodes = neighborhood.current?.nodes.filter(node => ids.has(node.id)) || [];
+    if (nodes.length < 3) return null;
+    const xs = nodes.map(node => node.x), ys = nodes.map(node => node.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+    const { width, height } = dimensions.current;
+    const zoom = scale(Math.min(width * .68 / Math.max(200, maxX - minX), height * .48 / Math.max(180, maxY - minY), .9));
+    return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 + height * .12 / zoom, zoom };
+  }, []);
+
+  const followConnection = (path: ConnectionPath) => {
+    activePath.current = path; setActiveConnection(path);
+    const target = connectionCamera(path);
+    if (target) travel(target);
+  };
+
+  const activate = (node: MapNode) => {
+    if (node.type === 'document' && camera.current.zoom < .45) { void fly(node.id); return; }
+    selected.current = node.id;
+    if (node.type === 'chunk') void loadConnections(node.id);
+    callbacks.current.onSelect(node); draw();
+  };
 
   useEffect(() => {
     disposed.current = false;
@@ -190,17 +265,21 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
         canvas.current.width = width * ratio; canvas.current.height = height * ratio;
         canvas.current.getContext('2d')?.setTransform(ratio, 0, 0, ratio, 0, 0);
       }
-      if (fitted.current) fit(); else draw();
+      if (fitted.current) fit();
+      else if (activePath.current) {
+        const target = connectionCamera(activePath.current);
+        if (target) { cancelAnimationFrame(animation.current); move(target); } else draw();
+      } else draw();
     });
     resize.observe(element);
     const theme = new MutationObserver(draw); theme.observe(window.document.documentElement, { attributes: true, attributeFilter: ['class'] });
-    request<{ bounds: Bounds; groups?: MapNode[]; edges?: MapEdge[] }>('/overview').then(result => {
+    request<{ bounds: Bounds; nodes?: MapNode[]; edges?: MapEdge[] }>('/overview').then(result => {
       if (!active) return;
-      world.current = result.bounds; groups.current = result.groups || []; groupEdges.current = result.edges || [];
+      world.current = result.bounds; overview.current = { nodes: result.nodes || [], edges: result.edges || [], level: 'overview' };
       fit(); setLoading(false);
     }).catch(failure => { if (active) { setError(failure.message); setLoading(false); } });
-    return () => { active = false; disposed.current = true; resize.disconnect(); theme.disconnect(); cancelAnimationFrame(animation.current); };
-  }, [draw, fit, reload]);
+    return () => { active = false; disposed.current = true; neighborhoodRequest.current?.abort(); resize.disconnect(); theme.disconnect(); cancelAnimationFrame(animation.current); };
+  }, [draw, fit, move, connectionCamera, reload]);
 
   useEffect(() => {
     let active = true, controller: AbortController | null = null, previous = '', sequence = 0, pending = false;
@@ -210,11 +289,16 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
       const bounds = { minX: Math.floor(c.x - width * .65 / c.zoom), maxX: Math.ceil(c.x + width * .65 / c.zoom), minY: Math.floor(c.y - height * .65 / c.zoom), maxY: Math.ceil(c.y + height * .65 / c.zoom) };
       const query = new URLSearchParams({ ...Object.fromEntries(Object.entries(bounds).map(([key, value]) => [key, String(value)])), zoom: String(c.zoom), limit: '800' }).toString();
       if (query === previous) return;
+      if (c.zoom < .08) {
+        previous = query; current.current = overview.current; setTruncated(false);
+        const nearest = overview.current.nodes.filter(node => node.x >= bounds.minX && node.x <= bounds.maxX && node.y >= bounds.minY && node.y <= bounds.maxY).sort((a, b) => Math.hypot(a.x - c.x, a.y - c.y) - Math.hypot(b.x - c.x, b.y - c.y));
+        setAccessible(nearest.slice(0, 100)); draw(); return;
+      }
       previous = query; controller = new AbortController(); pending = true;
       const requestNumber = ++sequence;
       request<MapView>(`/view?${query}`, controller.signal).then(view => {
         if (!active || sequence !== requestNumber) return;
-        current.current = view; setTruncated(!!view.truncated); setAccessible(view.nodes); setError(null); setLoading(false); draw();
+        current.current = view; setTruncated(!!view.truncated); setAccessible(view.nodes.slice(0, 200)); setError(null); setLoading(false); draw();
       }).catch(failure => { if (active && failure.name !== 'AbortError') { setError(failure.message); previous = ''; } }).finally(() => { pending = false; });
     };
     const interval = window.setInterval(load, 180); load();
@@ -254,7 +338,7 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
         event.currentTarget.style.cursor = 'grab';
         if (!drag?.moved) {
           const rect = event.currentTarget.getBoundingClientRect(), node = hit(event.clientX - rect.left, event.clientY - rect.top);
-          if (node) { selected.current = node.id; draw(); if (node.type === 'group') void fly(node.id); else callbacks.current.onSelect(node); }
+          if (node) activate(node);
         }
       }}
       onPointerCancel={() => { dragging.current = null; }}
@@ -270,15 +354,16 @@ export function GraphMap({ focus, onSelect, onFocus }: Props) {
         if (event.key === '+' || event.key === '=') zoomBy(1.5);
         if (event.key === '-') zoomBy(1 / 1.5);
         if (event.key === 'Home') fit();
-        if (event.key === 'Enter') { const node = current.current.nodes.find(item => item.id === selected.current); if (node) callbacks.current.onSelect(node); }
+        if (event.key === 'Enter') { const node = [...current.current.nodes, ...(neighborhood.current?.nodes || [])].find(item => item.id === selected.current); if (node) activate(node); }
       }} />
     <div className={styles.legend}><span className={styles.level}>{zoomLabel}</span><span><i style={{ background: colors.document }} />Files</span><span><i style={{ background: colors.chunk }} />Chunks</span><span><i style={{ background: colors.entity }} />Shared names</span></div>
     {tooltip && <div className={styles.tooltip} style={{ left: tooltip.x, top: tooltip.y }}><small>{names[tooltip.node.type]}</small><strong>{clip(tooltip.node.preview || tooltip.node.label, 100)}</strong></div>}
     {loading && <div className={styles.notice} role="status"><Loader2 size={15} className={styles.spin} />Opening source map…</div>}
     {error && <div className={styles.error} role="alert"><span>{error}</span><button onClick={() => { setError(null); setReload(value => value + 1); }}><RotateCcw size={13} />Retry</button></div>}
-    {truncated && !error && <div className={styles.limit}>Zoom in to reveal more sources</div>}
+    {truncated && !error && !connectionsOpen && <div className={styles.limit}>Zoom in to reveal more sources</div>}
+    {connectionsOpen && <ConnectionPaths paths={connections?.paths || []} loading={connectionsLoading} error={connectionsError} truncated={connections?.truncated} activeTargetChunkId={activeConnection?.targetChunkId} onFollow={followConnection} onClose={clearConnections} />}
     <div className={styles.controls}><button aria-label="Zoom in" onClick={() => zoomBy(1.7)}><Plus size={16} /></button><button aria-label="Zoom out" onClick={() => zoomBy(1 / 1.7)}><Minus size={16} /></button><button aria-label="Show whole source map" onClick={fit}><Expand size={15} /></button><button aria-label="About the source map" aria-expanded={help} onClick={() => setHelp(value => !value)}><HelpCircle size={16} /></button></div>
-    {help && <div className={styles.help}><strong>Your sources, connected</strong><p>Zoom into a group to reveal files, then their headings and chunks. Shared names connect mentions across files.</p><p>Drag to move. Scroll to zoom. Double-click a file to explore it. A citation flies to its source.</p><p>Locations stay fixed for navigation. Distance does not measure similarity. Connections show recorded structure or shared mentions.</p></div>}
-    <div className={styles.keyboard}><label htmlFor="map-node-keyboard">Navigate visible sources</label><select id="map-node-keyboard" value="" onChange={event => { const node = current.current.nodes.find(item => item.id === event.target.value); if (node) { if (node.type === 'group') void fly(node.id); else { selected.current = node.id; callbacks.current.onSelect(node); draw(); } } }}><option value="">Choose a visible source</option>{accessible.map(node => <option key={node.id} value={node.id}>{names[node.type]}: {clip(node.label, 70)}</option>)}</select></div>
+    {help && <div className={styles.help}><strong>Your sources, connected</strong><p>Each point is a document. Their arrangement follows shared names; it is not a topic classification. Zoom in for headings and chunks.</p><p>Select a chunk or citation to find connected chunks in other documents. Show a connection to frame both passages and their shared name.</p><p>Drag to move. Scroll to zoom. Locations stay fixed. Shared mentions do not establish a scientific relationship.</p></div>}
+    <div className={styles.keyboard}><label htmlFor="map-node-keyboard">Navigate visible sources</label><select id="map-node-keyboard" value="" onChange={event => { const node = [...current.current.nodes, ...(neighborhood.current?.nodes || [])].find(item => item.id === event.target.value); if (node) activate(node); }}><option value="">Choose a visible source</option>{[...new Map([...accessible, ...(connections?.nodes || [])].map(node => [node.id, node])).values()].map(node => <option key={node.id} value={node.id}>{names[node.type]}: {clip(node.label, 70)}</option>)}</select></div>
   </div>;
 }

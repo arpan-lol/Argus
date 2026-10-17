@@ -14,4 +14,5 @@ export const mapController = {
   },
   locate(req: Request, res: Response) { res.json(mapService.locate(String(req.params.id))); },
   async node(req: Request, res: Response) { res.json(await mapService.node(String(req.params.id))); },
+  async neighborhood(req: Request, res: Response) { res.json(await mapService.neighborhood(String(req.params.id))); },
 };

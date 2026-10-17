@@ -8,6 +8,7 @@ router.get('/map/overview', mapController.overview);
 router.get('/map/view', asyncHandler(mapController.view));
 router.get('/map/locate/:id', mapController.locate);
 router.get('/map/node/:id', asyncHandler(mapController.node));
+router.get('/map/neighborhood/:id', asyncHandler(mapController.neighborhood));
 router.get('/health', evidenceController.health);
 router.get('/corpus', evidenceController.corpus);
 router.get('/documents', evidenceController.documents);

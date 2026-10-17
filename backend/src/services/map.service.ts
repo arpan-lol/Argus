@@ -10,8 +10,7 @@ import type { Chunk, Entity } from '../types/evidence.types.js';
 import { logger } from '../utils/logger.util.js';
 
 const CELL = 512;
-const COLUMNS = 80;
-const GROUP = 8;
+const hash = (value: string) => { let result = 2166136261; for (const char of value) result = Math.imul(result ^ char.charCodeAt(0), 16777619); return result >>> 0; };
 const quote = (value: unknown) => JSON.stringify(value);
 const short = (value: string, length = 70) => value.length > length ? `${value.slice(0, length).trim()}…` : value;
 type LayoutDocument = { id: string; title: string; slot: number; x: number; y: number };
@@ -31,82 +30,122 @@ class MapService {
     if (!fs.existsSync(target)) throw new AppError('Source collection is not available yet', 503, true);
     this.source ||= new DatabaseSync(target, { readOnly: true });
     this.layout ||= new DatabaseSync(path.join(config.dataDir, 'graph-layout.sqlite'));
-    this.layout.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS document_positions(id TEXT PRIMARY KEY,slot INTEGER UNIQUE,x REAL,y REAL); CREATE TABLE IF NOT EXISTS entity_positions(id TEXT PRIMARY KEY,label TEXT,kind TEXT,x REAL,y REAL);');
-    const existing = this.layout.prepare('SELECT id,slot,x,y FROM document_positions').all();
-    const positions = new Map(existing.map(row => [String(row.id), row]));
-    let nextSlot = existing.reduce((max, row) => Math.max(max, Number(row.slot) + 1), 0);
-    const insert = this.layout.prepare('INSERT INTO document_positions(id,slot,x,y) VALUES(?,?,?,?)');
-    const entityHomes = new Map<string, { label: string; type: string; x: number; y: number; count: number; groups: Map<string, number> }>();
-    this.documents.clear();
-    this.entities.clear();
-    this.childPositions.clear();
+    this.layout.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS network_document_positions(id TEXT PRIMARY KEY,slot INTEGER UNIQUE,x REAL,y REAL); CREATE TABLE IF NOT EXISTS network_entity_positions(id TEXT PRIMARY KEY,label TEXT,kind TEXT,x REAL,y REAL);');
+    const rows = this.source.prepare(`SELECT d.id,d.title,(SELECT json_group_array(json_object('id',json_extract(e.value,'$.id'),'label',json_extract(e.value,'$.label'),'type',json_extract(e.value,'$.type'))) FROM json_each(d.metadata_json,'$.entities') e) AS entities_json FROM documents d ORDER BY d.id`).all();
+    const existing = new Map(this.layout.prepare('SELECT id,slot,x,y FROM network_document_positions').all().map(row => [String(row.id), row]));
+    const terms = new Map<string, { label: string; type: string; members: number[] }>();
+    const memberships = rows.map((row, index) => {
+      const entities = JSON.parse(String(row.entities_json || '[]')) as Pick<Entity, 'id' | 'label' | 'type'>[];
+      for (const entity of entities) {
+        const term = terms.get(entity.id) || { label: entity.label, type: entity.type, members: [] };
+        term.members.push(index); terms.set(entity.id, term);
+      }
+      return entities.map(entity => entity.id);
+    });
+    const links = new Map<string, MapEdge>();
+    for (const [entityId, term] of terms) {
+      const ordered = [...term.members].sort((a, b) => hash(String(rows[a].id) + entityId) - hash(String(rows[b].id) + entityId));
+      for (let i = 1; i < ordered.length; i++) {
+        const pair = [String(rows[ordered[i - 1]].id), String(rows[ordered[i]].id)].sort();
+        const id = `${pair[0]}|SHARES_TERM|${pair[1]}`;
+        const previous = links.get(id);
+        if (previous) { previous.viaEntityIds!.push(entityId); previous.labels!.push(term.label); previous.count = Number(previous.count) + 1; }
+        else links.set(id, { id, source: pair[0], target: pair[1], type: 'SHARES_TERM', derived: true, viaEntityIds: [entityId], labels: [term.label], count: 1, meaning: 'Both documents contain chunks mentioning this dictionary term. This sparse navigation link is not a scientific relationship.', membershipSource: 'source-ledger' });
+      }
+    }
+    const anchors = new Map([...terms].sort((a, b) => a[0].localeCompare(b[0])).map(([id], index) => {
+      const angle = index * 2.399963229728653;
+      const radius = Math.sqrt(index + 1) * 2300;
+      return [id, { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius }];
+    }));
+    const points = rows.map((row, index) => {
+      const saved = existing.get(String(row.id));
+      if (saved) return { x: Number(saved.x), y: Number(saved.y), fixed: true };
+      const ids = memberships[index];
+      let x = 0, y = 0, weight = 0;
+      for (const id of ids) {
+        const importance = 1 / Math.sqrt(terms.get(id)!.members.length);
+        x += anchors.get(id)!.x * importance; y += anchors.get(id)!.y * importance; weight += importance;
+      }
+      const angle = hash(String(row.id)) / 4294967296 * Math.PI * 2;
+      const radius = 1600 + (hash(String(row.id) + ':radius') % 4200);
+      return { x: (weight ? x / weight : 0) + Math.cos(angle) * radius, y: (weight ? y / weight : 0) + Math.sin(angle) * radius, fixed: false };
+    });
+    if (points.some(point => !point.fixed)) {
+      const indexById = new Map(rows.map((row, index) => [String(row.id), index]));
+      const springs = [...links.values()].filter(edge => edge.viaEntityIds!.some(id => terms.get(id)!.members.length < rows.length * 0.3)).map(edge => ({ a: indexById.get(edge.source)!, b: indexById.get(edge.target)!, weight: edge.viaEntityIds!.reduce((sum, id) => sum + 1 / Math.sqrt(terms.get(id)!.members.length), 0) }));
+      for (let iteration = 0; iteration < 100; iteration++) {
+        const forces = points.map(() => ({ x: 0, y: 0 }));
+        for (const spring of springs) {
+          const a = points[spring.a], b = points[spring.b];
+          const dx = b.x - a.x, dy = b.y - a.y, distance = Math.max(1, Math.hypot(dx, dy));
+          const force = Math.min(100, (distance - 950) * spring.weight * 0.12);
+          forces[spring.a].x += dx / distance * force; forces[spring.a].y += dy / distance * force;
+          forces[spring.b].x -= dx / distance * force; forces[spring.b].y -= dy / distance * force;
+        }
+        const cells = new Map<string, number[]>();
+        points.forEach((point, index) => { const key = `${Math.floor(point.x / 620)},${Math.floor(point.y / 620)}`; const cell = cells.get(key) || []; cell.push(index); cells.set(key, cell); });
+        points.forEach((point, index) => {
+          if (point.fixed) return;
+          const cx = Math.floor(point.x / 620), cy = Math.floor(point.y / 620);
+          for (let x = cx - 1; x <= cx + 1; x++) for (let y = cy - 1; y <= cy + 1; y++) for (const other of cells.get(`${x},${y}`) || []) {
+            if (other === index) continue;
+            let dx = point.x - points[other].x, dy = point.y - points[other].y;
+            let distance = Math.hypot(dx, dy);
+            if (distance < 1) { dx = Math.cos(index); dy = Math.sin(index); distance = 1; }
+            if (distance < 620) { const force = (620 - distance) * 0.48; forces[index].x += dx / distance * force; forces[index].y += dy / distance * force; }
+          }
+          const force = forces[index]; const length = Math.max(1, Math.hypot(force.x, force.y)); const cap = Math.min(180, length);
+          point.x += force.x / length * cap; point.y += force.y / length * cap;
+        });
+      }
+    }
+    this.documents.clear(); this.entities.clear(); this.childPositions.clear();
+    const insert = this.layout.prepare('INSERT OR IGNORE INTO network_document_positions(id,slot,x,y) VALUES(?,?,?,?)');
     this.layout.exec('BEGIN');
     try {
-      const rows = this.source.prepare(`SELECT d.id,d.title,(SELECT json_group_array(json_object('id',json_extract(e.value,'$.id'),'label',json_extract(e.value,'$.label'),'type',json_extract(e.value,'$.type'))) FROM json_each(d.metadata_json,'$.entities') e) AS entities_json FROM documents d ORDER BY d.id`).all();
-      for (const row of rows) {
-        const id = String(row.id);
-        let position = positions.get(id);
-        if (!position) {
-          const slot = nextSlot++;
-          position = { id, slot, x: (slot % COLUMNS) * CELL, y: Math.floor(slot / COLUMNS) * CELL };
-          insert.run(id, slot, Number(position.x), Number(position.y));
-        }
-        const document = { id, title: String(row.title), slot: Number(position.slot), x: Number(position.x), y: Number(position.y) };
-        this.documents.set(id, document);
-        const terms = JSON.parse(String(row.entities_json || '[]')) as Pick<Entity, 'id' | 'label' | 'type'>[];
-        for (const entity of terms) {
-          const home = entityHomes.get(entity.id) || { label: entity.label, type: entity.type, x: 0, y: 0, count: 0, groups: new Map<string, number>() };
-          home.x += document.x + CELL / 2;
-          home.y += document.y + CELL / 2;
-          home.count++;
-          const groupId = this.groupId(document);
-          home.groups.set(groupId, (home.groups.get(groupId) || 0) + 1);
-          entityHomes.set(entity.id, home);
-        }
-      }
-      const entityInsert = this.layout.prepare('INSERT OR IGNORE INTO entity_positions(id,label,kind,x,y) VALUES(?,?,?,?,?)');
-      let index = 0;
-      for (const [id, entity] of entityHomes) {
-        const angle = index++ * 2.399963;
-        entityInsert.run(id, entity.label, entity.type, entity.x / entity.count + Math.cos(angle) * 80, entity.y / entity.count + Math.sin(angle) * 80);
+      let nextSlot = Math.max(0, ...[...existing.values()].map(row => Number(row.slot) + 1));
+      rows.forEach((row, index) => {
+        const id = String(row.id), saved = existing.get(id), point = points[index];
+        const document = { id, title: String(row.title), slot: saved ? Number(saved.slot) : nextSlot++, x: point.x, y: point.y };
+        insert.run(id, document.slot, document.x, document.y); this.documents.set(id, document);
+      });
+      const entityInsert = this.layout.prepare('INSERT OR IGNORE INTO network_entity_positions(id,label,kind,x,y) VALUES(?,?,?,?,?)');
+      for (const [id, term] of terms) {
+        const x = term.members.reduce((sum, index) => sum + points[index].x + CELL / 2, 0) / term.members.length;
+        const y = term.members.reduce((sum, index) => sum + points[index].y + 280, 0) / term.members.length;
+        entityInsert.run(id, term.label, term.type, x, y);
       }
       this.layout.exec('COMMIT');
-      for (const row of this.layout.prepare('SELECT * FROM entity_positions').all()) {
-        this.entities.set(String(row.id), { id: String(row.id), type: 'entity', label: String(row.label), entityType: String(row.kind), x: Number(row.x), y: Number(row.y), radius: 8, count: entityHomes.get(String(row.id))?.count || 0 });
-      }
-      const groupEdges = new Map<string, MapEdge>();
-      for (const [entityId, term] of [...entityHomes].sort((a, b) => b[1].groups.size - a[1].groups.size)) {
-        const groups = [...term.groups.keys()].sort((a, b) => {
-          const [, ax, ay] = a.split(':').map(Number);
-          const [, bx, by] = b.split(':').map(Number);
-          return ay * COLUMNS + ax - (by * COLUMNS + bx);
-        });
-        for (let index = 1; index < groups.length; index++) {
-          const source = groups[index - 1];
-          const target = groups[index];
-          const id = `${source}|SHARES_TERM|${target}`;
-          const previous = groupEdges.get(id);
-          if (previous) {
-            previous.count = Number(previous.count) + 1;
-            previous.sharedTermCount = previous.count;
-            if (previous.viaEntityIds!.length < 6) { previous.viaEntityIds!.push(entityId); previous.labels!.push(term.label); }
-          } else if (groupEdges.size < 200) {
-            groupEdges.set(id, { id, source, target, type: 'SHARES_TERM', derived: true, viaEntityIds: [entityId], labels: [term.label], count: 1, sharedTermCount: 1, meaning: 'At least one source in each neighborhood mentions the same dictionary term. This aggregated link does not connect every document or assert a scientific relationship.', membershipSource: 'source-ledger' });
-          }
-        }
-      }
-      this.groupEdges = [...groupEdges.values()];
-      this.initialized = true;
-      logger.info('MapService', 'Stable source map initialized', { documents: this.documents.size, entities: this.entities.size });
     } catch (error) { this.layout.exec('ROLLBACK'); throw error; }
+    for (const row of this.layout.prepare('SELECT * FROM network_entity_positions').all()) this.entities.set(String(row.id), { id: String(row.id), type: 'entity', label: String(row.label), entityType: String(row.kind), x: Number(row.x), y: Number(row.y), radius: 8, count: terms.get(String(row.id))?.members.length || 0 });
+    const nearbyLinks = new Map<string, MapEdge>();
+    for (const [entityId, term] of terms) {
+      const members = term.members.map(index => this.documents.get(String(rows[index].id))!).sort((a, b) => a.x - b.x || a.y - b.y);
+      members.forEach((document, index) => {
+        const nearby = members.slice(Math.max(0, index - 18), Math.min(members.length, index + 19)).filter(other => other.id !== document.id).sort((a, b) => Math.hypot(a.x - document.x, a.y - document.y) - Math.hypot(b.x - document.x, b.y - document.y)).slice(0, 2);
+        for (const other of nearby) {
+          const pair = [document.id, other.id].sort(), id = `${pair[0]}|SHARES_TERM|${pair[1]}`;
+          const previous = nearbyLinks.get(id);
+          if (previous) { if (!previous.viaEntityIds!.includes(entityId)) { previous.viaEntityIds!.push(entityId); previous.labels!.push(term.label); previous.count = Number(previous.count) + 1; } }
+          else nearbyLinks.set(id, { id, source: pair[0], target: pair[1], type: 'SHARES_TERM', derived: true, viaEntityIds: [entityId], labels: [term.label], count: 1, meaning: 'Both documents contain chunks mentioning this dictionary term. This sparse navigation link is not a scientific relationship.', membershipSource: 'source-ledger' });
+        }
+      });
+    }
+    const length = (edge: MapEdge) => { const a = this.documents.get(edge.source)!, b = this.documents.get(edge.target)!; return Math.hypot(a.x - b.x, a.y - b.y); };
+    const orderedEdges = [...nearbyLinks.values()].sort((a, b) => length(a) - length(b) || Number(b.count) - Number(a.count));
+    const degree = new Map<string, number>();
+    this.groupEdges = orderedEdges.filter(edge => {
+      const a = degree.get(edge.source) || 0, b = degree.get(edge.target) || 0;
+      if (a >= 3 || b >= 3) return false;
+      degree.set(edge.source, a + 1); degree.set(edge.target, b + 1); return true;
+    }).slice(0, 9000);
+    this.initialized = true;
+    logger.info('MapService', 'Persistent organic source network initialized', { documents: this.documents.size, entities: this.entities.size, overviewLinks: this.groupEdges.length });
   }
 
   private documentNode(document: LayoutDocument): MapNode {
     return { id: document.id, type: 'document', label: short(document.title), preview: document.title, documentId: document.id, x: document.x + CELL / 2, y: document.y + 38, radius: 12 };
-  }
-
-  private groupId(document: LayoutDocument) {
-    return `map-group:${Math.floor((document.slot % COLUMNS) / GROUP)}:${Math.floor(Math.floor(document.slot / COLUMNS) / GROUP)}`;
   }
 
   private childNode(id: string, documentId: string, sectionId?: string): MapNode {
@@ -152,32 +191,17 @@ class MapService {
     return positions.get(id) || { x: document.x + CELL / 2, y: document.y + 206 };
   }
 
-  private groups(): MapNode[] {
-    const groups = new Map<string, MapNode>();
-    for (const document of this.documents.values()) {
-      const gx = Math.floor((document.slot % COLUMNS) / GROUP);
-      const gy = Math.floor(Math.floor(document.slot / COLUMNS) / GROUP);
-      const id = this.groupId(document);
-      const group = groups.get(id) || { id, type: 'group', label: 'Source neighborhood', preview: 'A fixed navigation grouping of documents, not a scientific topic cluster.', x: gx * CELL * GROUP + CELL * GROUP / 2, y: gy * CELL * GROUP + CELL * GROUP / 2, count: 0, radius: 28 };
-      group.count = Number(group.count) + 1;
-      group.label = `${group.count} documents`;
-      groups.set(id, group);
-    }
-    return [...groups.values()];
-  }
-
   overview() {
     this.initialize();
-    const rows = Math.ceil(Math.max(1, ...[...this.documents.values()].map(document => document.slot + 1)) / COLUMNS);
-    const bounds = { minX: 0, minY: 0, maxX: COLUMNS * CELL, maxY: rows * CELL };
-    return { version: 1, bounds, worldBounds: bounds, groups: this.groups(), edges: this.groupEdges, source: 'source-ledger', counts: corpusService.counts(), layout: { cellSize: CELL, groupSize: GROUP, columns: COLUMNS, coordinateMeaning: 'Fixed navigation grouping. Distance does not imply scientific similarity.' } };
+    const documents = [...this.documents.values()];
+    const bounds = { minX: Math.min(...documents.map(document => document.x)) - CELL, minY: Math.min(...documents.map(document => document.y)) - CELL, maxX: Math.max(...documents.map(document => document.x)) + CELL * 2, maxY: Math.max(...documents.map(document => document.y)) + CELL * 2 };
+    return { version: 2, bounds, worldBounds: bounds, nodes: documents.map(document => this.documentNode(document)), groups: [], edges: this.groupEdges, source: 'source-ledger', counts: corpusService.counts(), layout: { cellSize: CELL, kind: 'persistent-organic-network', coordinateMeaning: 'A stable navigation layout influenced by shared dictionary terms. Proximity does not establish scientific similarity; overview links are a sparse selection of real shared-mention paths.' } };
   }
 
   locate(id: string) {
     this.initialize();
     let node: MapNode | undefined;
-    if (id.startsWith('map-group:')) node = this.groups().find(group => group.id === id);
-    else if (this.documents.has(id)) node = this.documentNode(this.documents.get(id)!);
+    if (this.documents.has(id)) node = this.documentNode(this.documents.get(id)!);
     else if (this.entities.has(id)) node = this.entities.get(id);
     else {
       const chunk = this.source!.prepare('SELECT document_id,section_id FROM chunks WHERE id=?').get(id);
@@ -194,12 +218,12 @@ class MapService {
   async view(bounds: MapBounds, zoom: number, requestedLimit = 800) {
     this.initialize();
     const limit = Math.max(50, Math.min(800, Math.floor(requestedLimit)));
-    const level = zoom < 0.08 ? 'groups' : zoom < 0.45 ? 'documents' : 'detail';
+    const level = zoom < 0.08 ? 'overview' : zoom < 0.45 ? 'documents' : 'detail';
     const inside = (node: { x: number; y: number }, margin = 0) => node.x >= bounds.minX - margin && node.x <= bounds.maxX + margin && node.y >= bounds.minY - margin && node.y <= bounds.maxY + margin;
-    if (level === 'groups') {
-      const nodes = this.groups().filter(node => inside(node, CELL * GROUP / 2));
+    if (level === 'overview') {
+      const nodes = [...this.documents.values()].map(document => this.documentNode(document)).filter(node => inside(node, CELL));
       const ids = new Set(nodes.map(node => node.id));
-      return { nodes, edges: this.groupEdges.filter(edge => ids.has(edge.source) && ids.has(edge.target)), level, bounds, truncated: false, source: 'source-ledger', status: 'ready', note: 'Neighborhood links summarize actual dictionary-term memberships from the source ledger. A link does not imply that every document is connected or scientifically related.' };
+      return { nodes, edges: this.groupEdges.filter(edge => ids.has(edge.source) && ids.has(edge.target)), level, bounds, truncated: false, source: 'source-ledger', status: 'ready', note: 'An organic document network with a sparse selection of actual shared dictionary-term paths. A shared mention does not establish a scientific relationship.' };
     }
     const centerX = (bounds.minX + bounds.maxX) / 2;
     const centerY = (bounds.minY + bounds.maxY) / 2;
@@ -270,15 +294,67 @@ class MapService {
     return { nodes: [...nodes.values()], edges: [...edges.values()].slice(0, 1500), level, bounds, truncated, source, status, note };
   }
 
+  async neighborhood(id: string) {
+    this.initialize();
+    const focus = this.locate(id).node;
+    const nodes = new Map<string, MapNode>();
+    const edges = new Map<string, MapEdge>();
+    const paths: { sourceChunkId: string; targetChunkId: string; entityId: string; label: string; documentId: string; documentTitle: string }[] = [];
+    const addEdge = (source: string, target: string, type: string) => { const edgeId = `${source}|${type}|${target}`; edges.set(edgeId, { id: edgeId, source, target, type }); };
+    const addChunk = (chunkId: string) => {
+      const chunk = this.locate(chunkId).node;
+      if (chunk.type !== 'chunk' || !chunk.documentId || !chunk.sectionId) return;
+      nodes.set(chunk.id, chunk);
+      const document = this.documentNode(this.documents.get(chunk.documentId)!);
+      const section = this.childNode(chunk.sectionId, chunk.documentId);
+      nodes.set(document.id, document); nodes.set(section.id, section);
+      addEdge(document.id, section.id, 'HAS_SECTION'); addEdge(section.id, chunk.id, 'HAS_CHUNK');
+      return chunk;
+    };
+    nodes.set(focus.id, focus);
+    if (focus.type !== 'chunk') return { nodes: [...nodes.values()], edges: [], paths, truncated: false, note: 'Select a chunk to follow its shared mentions into other source documents.', source: 'source-ledger', status: 'ready', focusId: id };
+    addChunk(id);
+    try {
+      const entityRows = await graphService.query(`MATCH (c:Chunk)-[:MENTIONS]->(e:Entity) WHERE c.id=${quote(id)} RETURN DISTINCT e.id,e.label LIMIT 50`);
+      const selected = entityRows.sort((a, b) => Number(this.entities.get(String(a[0]))?.count || 0) - Number(this.entities.get(String(b[0]))?.count || 0)).slice(0, 3);
+      let truncated = entityRows.length > selected.length;
+      const targetDocuments = new Set<string>();
+      for (const row of selected) {
+        const entityId = String(row[0]);
+        const entity = this.entities.get(entityId);
+        if (!entity) continue;
+        nodes.set(entityId, entity); addEdge(id, entityId, 'MENTIONS');
+        const documents = await graphService.query(`MATCH (c:Chunk)-[:MENTIONS]->(e:Entity) WHERE e.id=${quote(entityId)} AND c.documentId<>${quote(focus.documentId)} RETURN DISTINCT c.documentId LIMIT 4`);
+        if (documents.length > 3) truncated = true;
+        for (const documentRow of documents) {
+          const documentId = String(documentRow[0]);
+          if (!this.documents.has(documentId)) continue;
+          if (!targetDocuments.has(documentId) && targetDocuments.size >= 3) { truncated = true; continue; }
+          targetDocuments.add(documentId);
+          const chunks = await graphService.query(`MATCH (c:Chunk)-[:MENTIONS]->(e:Entity) WHERE e.id=${quote(entityId)} AND c.documentId=${quote(documentId)} RETURN DISTINCT c.id LIMIT 3`);
+          if (chunks.length > 2) truncated = true;
+          for (const chunkRow of chunks.slice(0, 2)) {
+            const chunk = addChunk(String(chunkRow[0]));
+            if (!chunk) continue;
+            addEdge(chunk.id, entityId, 'MENTIONS');
+            paths.push({ sourceChunkId: id, targetChunkId: chunk.id, entityId, label: String(row[1]), documentId, documentTitle: this.documents.get(documentId)!.title });
+          }
+        }
+      }
+      const adjacent = await graphService.query(`MATCH (a:Chunk)-[r:NEXT_CHUNK]-(b:Chunk) WHERE a.id=${quote(id)} RETURN DISTINCT b.id,startNode(r).id,endNode(r).id LIMIT 4`);
+      for (const row of adjacent) { addChunk(String(row[0])); addEdge(String(row[1]), String(row[2]), 'NEXT_CHUNK'); }
+      return { nodes: [...nodes.values()], edges: [...edges.values()], paths, truncated, note: 'Shared-mention paths connect real source passages through the same dictionary term. They do not establish agreement, contradiction, or a scientific relationship. Showing up to three terms, three other documents, and two chunks per document per term; positions remain fixed.', source: 'falkordb', status: 'ready', focusId: id };
+    } catch (error) {
+      logger.warn('MapService', 'Chunk neighborhood unavailable', { error: String(error) });
+      return { nodes: [...nodes.values()], edges: [], paths: [], truncated: true, note: 'FalkorDB connection paths are unavailable. No cross-document connections have been inferred.', source: 'source-ledger', status: 'graph unavailable', focusId: id };
+    }
+  }
+
   async node(id: string) {
     const location = this.locate(id);
     const node = location.node;
     const descriptions = { group: 'A fixed spatial group of documents for navigation; not a topic cluster. Its links summarize terms mentioned by at least one document in each connected group, not relationships between every paper.', document: 'One parsed source article. Sections and chunks belong to this source.', section: 'A heading-delimited region of the original document.', chunk: 'A bounded text segment used for retrieval, preserving exact source offsets.', entity: 'A dictionary term actually mentioned in one or more source chunks. A shared mention is not a verified scientific relationship.' };
     let content: unknown;
-    if (node.type === 'group') {
-      const connections = this.groupEdges.filter(edge => edge.source === id || edge.target === id);
-      content = { documentCount: node.count, linkedGroupCount: connections.length, sampleSharedTerms: [...new Set(connections.flatMap(edge => edge.labels || []))].slice(0, 12), source: 'source-ledger', connectionMeaning: 'At least one document on each side mentions a shared dictionary term. Not every paper is linked, and no scientific claim is asserted.' };
-    }
     if (node.type === 'chunk') content = corpusService.chunk(id)?.chunk;
     if (node.type === 'document') {
       const row = this.source!.prepare('SELECT metadata_json FROM documents WHERE id=?').get(id);
