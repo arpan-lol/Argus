@@ -37,7 +37,7 @@ def execute(name, arguments):
 
 @router.get("/retrieval/tools")
 def tool_catalog():
-    return {"tools": catalog(), "scope": "Published semantic sources only", "rawCypher": False, "schemaAccess": False, "agentLoop": False, "langgraphBinding": "app.retrieval.bindings.get_tools"}
+    return {"tools": catalog(), "scope": "Published semantic sources only", "rawCypher": False, "schemaAccess": False, "agentLoop": True, "chatEndpoint": "/api/chat", "langgraphBinding": "app.retrieval.bindings.get_tools"}
 
 
 @router.post("/retrieval/tools/{name}")

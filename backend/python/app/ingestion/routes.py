@@ -175,6 +175,28 @@ def latest_document_job(source_id):
 @router.get("/documents/{source_id}")
 def document(source_id: str):
     record = latest_document_job(source_id)
+    return document_for_job(record)
+
+
+@router.get("/jobs/{job_id}/document")
+def job_document(job_id: str):
+    try:
+        return document_for_job(pipeline.job_row(job_id))
+    except KeyError:
+        raise HTTPException(404, "Source job not found")
+
+
+@router.get("/jobs/{job_id}/original")
+def job_original(job_id: str):
+    try:
+        record = pipeline.job_row(job_id)
+    except KeyError:
+        raise HTTPException(404, "Source job not found")
+    return FileResponse(record["original_path"], filename=record["filename"])
+
+
+def document_for_job(record):
+    source_id = record["source_id"]
     normalized = pipeline.artifact(record["id"], "normalize")
     if not normalized:
         raise HTTPException(409, "Source text is not parsed yet")
