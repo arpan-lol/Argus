@@ -2,6 +2,7 @@ langgraph>=1.0,<2
 langgraph-checkpoint-postgres>=3,<4
 langchain-openai>=1.0,<2
 langchain-google-genai>=3,<5
+google-genai>=2,<3
 gliner>=0.2.21,<0.3
 protobuf>=5,<7
 tiktoken>=0.9,<1

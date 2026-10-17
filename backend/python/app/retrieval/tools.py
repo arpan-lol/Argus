@@ -30,6 +30,8 @@ def search_sources(session, args):
                 raise
             failures.append("Vector retrieval unavailable; hybrid ranking contains lexical results only")
     fused = {}
+    if not ranked:
+        raise RuntimeError("No requested retrieval channel is available")
     for channel, rows in ranked.items():
         for rank, (chunk_id, score) in enumerate(rows, 1):
             item = fused.setdefault(chunk_id, {"id": chunk_id, "score": 0, "signals": []})
@@ -120,17 +122,17 @@ def traverse(session, roots, depth, direction, predicates, edge_limit, target=No
             assertions = assertion_rows(session, current, direction, predicates, limit=session.limits["fanout"])
             adjacency[current] = []
             for assertion in assertions:
+                neighbor = assertion["object"]["id"] if assertion["subject"]["id"] == current else assertion["subject"]["id"]
+                if neighbor not in distance and len(distance) >= session.limits["frontier"]:
+                    session.truncate("Traversal entity budget reached")
+                    continue
                 if assertion["id"] not in edges and len(edges) >= edge_limit:
                     session.truncate("Traversal assertion budget reached")
                     break
                 edges[assertion["id"]] = assertion
-                neighbor = assertion["object"]["id"] if assertion["subject"]["id"] == current else assertion["subject"]["id"]
                 hop = {"from": current, "to": neighbor, "assertionId": assertion["id"], "traversedForward": assertion["subject"]["id"] == current}
                 adjacency[current].append(hop)
                 if neighbor not in distance:
-                    if len(distance) >= session.limits["frontier"]:
-                        session.truncate("Traversal entity budget reached")
-                        continue
                     distance[neighbor] = level + 1
                     queue.append((neighbor, level + 1))
                     tree.append(hop)

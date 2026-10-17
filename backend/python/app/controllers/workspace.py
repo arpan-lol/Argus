@@ -19,7 +19,7 @@ def compact(value):
 
 def health(request:Request):
     workers=getattr(request.app.state,"ingestion_workers",None)
-    return {"status":"ok","service":"argus-python","storage":"postgres","corpus":corpus.counts(),"graph":graph.status(),"workers":workers.status() if workers else {"configuredWorkers":0},"capabilities":{"lexical":True,"vector":False,"generation":False}}
+    return {"status":"ok","service":"argus-python","storage":"postgres","corpus":corpus.counts(),"graph":graph.status(),"workers":workers.status() if workers else {"configuredWorkers":0},"capabilities":{"lexical":True,"vector":False,"generation":False},"retrievalTools":{"scope":"published semantic sources","catalog":"/api/retrieval/tools","search":"/api/retrieval/search","agentLoop":False}}
 
 
 def collection():

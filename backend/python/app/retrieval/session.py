@@ -5,11 +5,13 @@ import time
 import uuid
 
 from psycopg.types.json import Jsonb
+from falkordb import FalkorDB
 
+from app.config import settings
 from app.database import connection
 from app.ingestion.config import fingerprint, processing_config
 from app.ingestion.providers import Providers
-from app.ingestion.publication import graph_connection, semantic_graph_name
+from app.ingestion.publication import semantic_graph_name
 
 
 logger = logging.getLogger("argus.retrieval")
@@ -27,7 +29,7 @@ class Session:
         self.started = time.monotonic()
         self.config = processing_config()
         self.graph_name = semantic_graph_name(self.config)
-        self.graph = graph_connection(self.config)
+        self.graph = FalkorDB(host=settings.falkor_host, port=settings.falkor_port, socket_connect_timeout=2, socket_timeout=3).select_graph(self.graph_name)
         self.trace = []
         self.warnings = []
         self.truncations = []
