@@ -166,7 +166,7 @@ class Investigation:
         name, endpoint, version = provider.llm_profile()
         if name not in ("azure_inference", "azure_openai"):
             raise ConfigurationRequired("Configure the chat model with an Azure LLM provider")
-        key = provider.credentials(name)
+        key = provider.credentials(name, self.config.get("chatCredentialEnv"))
         remaining = max(1, (self.limits["elapsedMs"] - self.elapsed()) / 1000)
         options = {"max_tokens" if name == "azure_inference" else "max_completion_tokens": self.limits["outputTokens"]}
         if name == "azure_inference":

@@ -17,6 +17,9 @@ class CheckResult(BaseModel):
 
 class AzureProvidersTest(TestCase):
     def setUp(self):
+        environment = mock.patch.dict(os.environ, {key: "" for key in ("LLM1_DEPLOYMENT_NAME", "LLM1_DEPLOYMENT_URL", "LLM2_DEPLOYMENT_NAME", "LLM2_DEPLOYMENT_URL", "AZURE_API_KEY")})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.config = {
             "provider": "google", "semanticGraph": "sources", "embeddingModel": "embedding-model", "embeddingDimensions": 2,
             "llmProvider": "azure_inference", "resolutionProvider": "azure_openai",

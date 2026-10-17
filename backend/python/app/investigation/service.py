@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 from app.config import settings
 from app.database import connection
 from app.ingestion.config import processing_config
+from app.ingestion.deployments import deployment
 from app.ingestion.publication import semantic_graph_name
 from .contracts import Report, report_references
 from .runtime import Investigation, validate_sources
@@ -32,6 +33,9 @@ def configuration():
     config["chatApi"] = os.getenv("ARGUS_CHAT_API", "chat_completions")
     if config["chatApi"] not in ("chat_completions", "responses"):
         raise HTTPException(400, "Unknown chat API protocol")
+    primary = deployment("LLM1")
+    if primary:
+        config.update(chatModel=primary["model"], chatProvider="azure_openai", chatBaseUrl=primary["baseUrl"], chatApiVersion=None, chatApi=primary["api"], chatCredentialEnv=primary["credentialEnv"])
     config["chatLimits"] = {"modelCalls": 8, "toolCalls": 8, "totalTokens": 64000, "contextTokens": 10000, "outputTokens": 2048, "elapsedMs": 180000, "costUsd": 0.25}
     for field, environment in (("modelCalls", "ARGUS_CHAT_MODEL_CALLS"), ("toolCalls", "ARGUS_CHAT_TOOL_CALLS"), ("totalTokens", "ARGUS_CHAT_TOTAL_TOKENS"), ("contextTokens", "ARGUS_CHAT_CONTEXT_TOKENS"), ("outputTokens", "ARGUS_CHAT_OUTPUT_TOKENS"), ("elapsedMs", "ARGUS_CHAT_ELAPSED_MS")):
         value = int(os.getenv(environment, config["chatLimits"][field]))

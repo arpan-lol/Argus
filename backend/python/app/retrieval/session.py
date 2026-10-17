@@ -94,6 +94,8 @@ class Session:
 
     def query_vector(self, query):
         profile = {key: self.config[key] for key in ("provider", "embeddingModel", "embeddingDimensions")}
+        if self.config.get("embeddingBaseUrl"):
+            profile["embeddingBaseUrl"] = self.config["embeddingBaseUrl"]
         profile["task"] = "retrieval_query"
         key = fingerprint([profile, query])
         cached = self.sql("SELECT vector,receipt FROM retrieval_query_embeddings WHERE id=%s AND profile=%s", (key, Jsonb(profile)), "query embedding cache")

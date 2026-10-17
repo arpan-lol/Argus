@@ -104,14 +104,16 @@ class Providers:
             time.sleep(min(30, max(0, deadline - time.monotonic())))
         return wait
 
-    def credentials(self, provider=None):
+    def credentials(self, provider=None, credential_env=None):
         provider = provider or self.config["provider"]
+        if credential_env and os.getenv(credential_env):
+            return os.environ[credential_env]
         if provider == "google":
             key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         elif provider == "openai":
             key = os.getenv("OPENAI_API_KEY")
         elif provider == "azure_openai":
-            key = os.getenv("AZURE_OPENAI_API_KEY")
+            key = os.getenv("AZURE_API_KEY") or os.getenv("AZURE_OPENAI_API_KEY")
         elif provider == "azure_inference":
             key = os.getenv("AZURE_INFERENCE_API_KEY")
         else:
@@ -138,10 +140,12 @@ class Providers:
         return provider, endpoint, version
 
     def embed(self, texts):
-        key = self.credentials()
+        key = self.credentials(credential_env=self.config.get("embeddingCredentialEnv"))
         if self.config["provider"] == "google":
             from langchain_google_genai import GoogleGenerativeAIEmbeddings
             client = GoogleGenerativeAIEmbeddings(model=self.config["embeddingModel"], google_api_key=key, output_dimensionality=self.config["embeddingDimensions"])
+        elif self.config["provider"] == "azure_openai":
+            return self.azure_embeddings(texts, query=False)
         else:
             from langchain_openai import OpenAIEmbeddings
             client = OpenAIEmbeddings(model=self.config["embeddingModel"], api_key=key, dimensions=self.config["embeddingDimensions"], max_retries=0)
@@ -163,7 +167,7 @@ class Providers:
             if not isinstance(text, str) or not text.strip():
                 raise ValueError("Query embedding requires nonempty text")
             receipt["inputCharacters"] = len(text)
-            key = self.credentials()
+            key = self.credentials(credential_env=self.config.get("embeddingCredentialEnv"))
             if self.config["provider"] == "google":
                 from google.genai import Client
                 from google.genai.types import EmbedContentConfig, HttpOptions, HttpRetryOptions
@@ -175,6 +179,8 @@ class Providers:
                 usage = getattr(response, "usage_metadata", None)
                 if usage is not None:
                     receipt["usage"] = usage.model_dump(mode="json")
+            elif self.config["provider"] == "azure_openai":
+                result = self.azure_embeddings([text], query=True)[0]
             elif self.config["provider"] == "openai":
                 from langchain_openai import OpenAIEmbeddings
                 client = OpenAIEmbeddings(model=self.config["embeddingModel"], api_key=key, dimensions=self.config["embeddingDimensions"], max_retries=0, request_timeout=20)
@@ -192,9 +198,31 @@ class Providers:
         self.record_call({**receipt, "status": "complete", "durationMs": (time.monotonic() - started) * 1000})
         return vector
 
+    def azure_embeddings(self, texts, query=False):
+        from openai import OpenAI
+        key = self.credentials("azure_openai", self.config.get("embeddingCredentialEnv"))
+        endpoint = self.config["embeddingBaseUrl"]
+        version = self.config.get("embeddingApiVersion")
+        started = time.monotonic()
+        receipt = {"kind": "embedding", "provider": "azure_openai", "model": self.config["embeddingModel"], "baseUrl": endpoint, "items": len(texts), "cost": None}
+        try:
+            with OpenAI(api_key=key, base_url=endpoint + "/", default_headers={"api-key": key}, default_query={"api-version": version} if version else {}, timeout=20 if query else self.config["modelTimeoutSeconds"], max_retries=0) as client:
+                response = client.embeddings.create(model=self.config["embeddingModel"], input=texts, dimensions=self.config["embeddingDimensions"])
+            rows = sorted(response.data, key=lambda item: item.index)
+            if [row.index for row in rows] != list(range(len(texts))):
+                raise ValueError("Embedding response item indexes do not match the requested inputs")
+            vectors = [row.embedding for row in rows]
+            if any(len(vector) != self.config["embeddingDimensions"] or any(not math.isfinite(value) for value in vector) or not any(value != 0 for value in vector) for vector in vectors):
+                raise ValueError("Embedding response dimensions or values do not match the processing configuration")
+        except Exception as error:
+            self.record_call({**receipt, "status": "failed", "durationMs": (time.monotonic() - started) * 1000, "usage": None, "error": str(error)})
+            raise
+        self.record_call({**receipt, "status": "complete", "durationMs": (time.monotonic() - started) * 1000, "usage": response.usage.model_dump(mode="json") if response.usage else None})
+        return vectors
+
     def structured(self, schema, prompt, payload, judge=False):
         provider, endpoint, version = self.llm_profile(judge)
-        key = self.credentials(provider)
+        key = self.credentials(provider, self.config.get("resolutionCredentialEnv" if judge else "llmCredentialEnv"))
         model = self.config["resolutionModel"] if judge else self.config["extractionModel"]
         parameters = {"maxOutputTokens": self.config["maxOutputTokens"], "timeoutSeconds": self.config["modelTimeoutSeconds"], "temperature": None if provider == "azure_openai" else 0}
         if provider == "google":
@@ -219,14 +247,25 @@ class Providers:
                     options["temperature"] = parameters["temperature"]
                 parameters["tokenParameter"] = token_parameter
                 with OpenAI(api_key=key, base_url=endpoint + "/", default_headers={"api-key": key}, default_query={"api-version": version} if version else {}, timeout=parameters["timeoutSeconds"], max_retries=0) as azure:
-                    response = azure.chat.completions.parse(model=model, messages=[{"role": "system", "content": prompt}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], response_format=schema, **options)
-                if len(response.choices) != 1:
-                    raise ValueError("Structured LLM response must contain one choice")
-                message = response.choices[0].message
-                parsed = message.parsed
-                parsing_error = "Model refused the structured request" if message.refusal else None
-                usage = response.usage.model_dump(mode="json") if response.usage else None
-                receipt["responseModel"] = response.model
+                    protocol = self.config.get("resolutionApi" if judge else "llmApi", "chat_completions")
+                    parameters["api"] = protocol
+                    if protocol == "responses":
+                        parameters["tokenParameter"] = "max_output_tokens"
+                        response_options = {"reasoning": {"effort": "minimal"}} if model.startswith("gpt-5") else {}
+                        response = azure.responses.parse(model=model, input=[{"role": "system", "content": prompt}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], text_format=schema, max_output_tokens=parameters["maxOutputTokens"], store=False, **response_options)
+                        if response.status != "completed":
+                            raise ValueError("Structured LLM response did not complete")
+                        parsed = response.output_parsed
+                        parsing_error = None if parsed is not None else "No structured response was returned"
+                    else:
+                        response = azure.chat.completions.parse(model=model, messages=[{"role": "system", "content": prompt}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], response_format=schema, **options)
+                        if len(response.choices) != 1:
+                            raise ValueError("Structured LLM response must contain one choice")
+                        message = response.choices[0].message
+                        parsed = message.parsed
+                        parsing_error = "Model refused the structured request" if message.refusal else None
+                    usage = response.usage.model_dump(mode="json") if response.usage else None
+                    receipt["responseModel"] = response.model
             else:
                 result = client.with_structured_output(schema, include_raw=True, method="json_schema").invoke([("system", prompt), ("human", json.dumps(payload, ensure_ascii=False))])
                 parsed, parsing_error = result.get("parsed"), result.get("parsing_error")

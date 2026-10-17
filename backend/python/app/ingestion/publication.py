@@ -14,7 +14,10 @@ from .structure import sections_for, chunk_sections
 
 
 def semantic_graph_name(config):
-    return config["semanticGraph"] + "_" + fingerprint([config["provider"], config["embeddingModel"], config["embeddingDimensions"]])[:10]
+    space = [config["provider"], config["embeddingModel"], config["embeddingDimensions"]]
+    if config.get("embeddingBaseUrl"):
+        space.append(config["embeddingBaseUrl"])
+    return config["semanticGraph"] + "_" + fingerprint(space)[:10]
 
 
 def graph_connection(config):

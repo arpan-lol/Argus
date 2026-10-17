@@ -5,11 +5,13 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from .deployments import base_url, deployment
+
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 
 def processing_config():
-    provider = os.getenv("ARGUS_MODEL_PROVIDER", "google" if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") else "openai")
+    provider = os.getenv("ARGUS_MODEL_PROVIDER", "azure_openai" if os.getenv("EMBEDDING_MODEL_NAME") else "google" if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") else "openai")
     config = {
         "contract": "argus-ingestion-2",
         "semanticGraph": os.getenv("ARGUS_SEMANTIC_GRAPH", "argus_sources_v2"),
@@ -63,6 +65,17 @@ def processing_config():
             "llmApiVersion": os.getenv("ARGUS_LLM_API_VERSION") or versions.get(llm_provider),
             "resolutionApiVersion": os.getenv("ARGUS_RESOLUTION_API_VERSION") or versions.get(resolution_provider),
         })
+    primary = deployment("LLM1")
+    secondary = deployment("LLM2") or primary
+    for profile, label, model_field in ((primary, "llm", "extractionModel"), (secondary, "resolution", "resolutionModel")):
+        if profile:
+            config.update({model_field: profile["model"], label + "Provider": "azure_openai", label + "BaseUrl": profile["baseUrl"], label + "ApiVersion": None, label + "Api": profile["api"], label + "CredentialEnv": profile["credentialEnv"]})
+    if provider == "azure_openai":
+        model = os.getenv("EMBEDDING_MODEL_NAME") or config["embeddingModel"]
+        endpoint = os.getenv("EMBEDDING_MODEL_ENDPOINT") or os.getenv("AZURE_OPENAI_ENDPOINT") or os.getenv("AZURE_OPENAI_BASE_URL")
+        if not endpoint:
+            raise ValueError("Configure EMBEDDING_MODEL_ENDPOINT for Azure embeddings")
+        config.update(embeddingModel=model, embeddingBaseUrl=base_url(endpoint), embeddingApiVersion="2024-05-01-preview" if base_url(endpoint).endswith("/models") else None, embeddingCredentialEnv="EMBEDDING_MODEL_KEY", embeddingDimensions=int(os.getenv("ARGUS_EMBEDDING_DIMENSIONS", "3072" if model == "text-embedding-3-large" else "1536")))
     return config
 
 
