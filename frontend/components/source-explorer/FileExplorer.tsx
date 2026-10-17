@@ -5,6 +5,7 @@ import { ArrowLeft, ChevronLeft, ChevronRight, Download, ExternalLink, FileText,
 import { api, chunkColor, type DocumentSummary, type EvidenceResult } from '@/lib/evidence-types';
 import FileViewer from '@/components/viewers/FileViewer';
 import { IngestionJobs } from './IngestionJobs';
+import { IngestionUpload } from './IngestionUpload';
 import { normalizeSourceDocument, statusLabel, type IngestedDocument, type IngestionJob, type UploadedDocument } from '@/lib/ingestion-types';
 import './FileExplorer.css';
 
@@ -42,10 +43,12 @@ export function FileExplorer({ focusDocumentId, focusChunkId, focusCollection = 
   const [uploadedSelection, setUploadedSelection] = useState(focusCollection === 'pipeline');
   const [pinnedJobId, setPinnedJobId] = useState(focusJobId);
   const [jobsExpanded, setJobsExpanded] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [pipelineLoading, setPipelineLoading] = useState(true);
+  const [refreshVersion, setRefreshVersion] = useState(0);
   const [busyJob, setBusyJob] = useState<string>();
   const [page, setPage] = useState(1);
-  const fileInput = useRef<HTMLInputElement>(null);
   const chunkRefs = useRef<Map<string, HTMLElement>>(new Map());
   const limit = 24;
   const selectedJobVersion = uploadedSelection ? jobs.filter(job => job.documentId === articleId).map(job => `${job.status}:${job.currentStage}`).join('|') : '';
@@ -67,7 +70,8 @@ export function FileExplorer({ focusDocumentId, focusChunkId, focusCollection = 
     let active = true;
     api<{ documents: DocumentSummary[]; total: number }>(`/documents?offset=${offset}&limit=${limit}`)
       .then(result => { if (active) { setDocuments(result.documents); setTotal(result.total); } })
-      .catch(reason => { if (active) setError(reason.message); });
+      .catch(reason => { if (active) setError(reason.message); })
+      .finally(() => { if (active) setCatalogLoading(false); });
     return () => { active = false; };
   }, [offset]);
 
@@ -95,7 +99,7 @@ export function FileExplorer({ focusDocumentId, focusChunkId, focusCollection = 
   }, [article, selectedChunkId, mode]);
 
   useEffect(() => {
-    if (uploadRequest > consumedUploadRequest) { consumedUploadRequest = uploadRequest; fileInput.current?.click(); }
+    if (uploadRequest > consumedUploadRequest) { consumedUploadRequest = uploadRequest; setUploadOpen(true); }
   }, [uploadRequest]);
 
   useEffect(() => {
@@ -108,11 +112,12 @@ export function FileExplorer({ focusDocumentId, focusChunkId, focusCollection = 
         ]);
         if (active) { setJobs(jobResult.jobs); setJobTotal(jobResult.total); setUploaded(documentResult.documents); setUploadedTotal(documentResult.total); }
       } catch (reason) { if (active) setError(reason instanceof Error ? reason.message : 'File processing could not be loaded.'); }
+      finally { if (active) setPipelineLoading(false); }
     };
     void refresh();
     const timer = window.setInterval(() => { if (!window.document.hidden) void refresh(); }, 4000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [jobOffset, uploadedOffset]);
+  }, [jobOffset, uploadedOffset, refreshVersion]);
 
   function openArticle(id: string, isUploaded = false) {
     setPinnedJobId(undefined);
@@ -122,21 +127,15 @@ export function FileExplorer({ focusDocumentId, focusChunkId, focusCollection = 
     if (!isUploaded) onDocumentFocus?.(id);
   }
 
-  async function uploadFile(file?: File) {
-    if (!file) return;
+  function uploadedFile(job: IngestionJob) {
     setError('');
-    setUploading(true);
     setJobsExpanded(true);
-    const form = new FormData();
-    form.append('file', file);
-    try {
-      const job = await api<IngestionJob>('/ingestion/jobs', { method: 'POST', body: form });
-      setJobs(current => [job, ...current.filter(item => item.id !== job.id)]);
-      setJobOffset(0);
-      setUploadedOffset(0);
-      setArticleId(undefined);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Upload failed. Please retry.'); }
-    finally { setUploading(false); }
+    setJobs(current => [job, ...current.filter(item => item.id !== job.id)]);
+    setRefreshVersion(current => current + 1);
+    setJobOffset(0);
+    setUploadedOffset(0);
+    setArticleId(undefined);
+    setUploadOpen(false);
   }
 
   async function retryJob(id: string) {
@@ -150,13 +149,13 @@ export function FileExplorer({ focusDocumentId, focusChunkId, focusCollection = 
   }
 
   return <div className="ce-file-explorer">
-    <input ref={fileInput} type="file" hidden disabled={uploading} onChange={event => { void uploadFile(event.target.files?.[0]); event.target.value = ''; }} />
     <div className="ce-file-toolbar">
       {articleId ? <button className="ce-file-back" onClick={() => { setArticleId(undefined); setError(''); }}><ArrowLeft size={15} /> All files</button> : <span className="ce-file-count">{total.toLocaleString()} legacy · {uploadedTotal.toLocaleString()} processing</span>}
-      <button className="ce-file-preview-button" disabled={uploading} onClick={() => fileInput.current?.click()}>{uploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}{uploading ? 'Uploading…' : 'Upload file'}</button>
+      <button className="ce-file-preview-button" aria-expanded={uploadOpen} onClick={() => setUploadOpen(true)}><Upload size={14} />Upload file</button>
     </div>
+    {uploadOpen && <IngestionUpload onClose={() => setUploadOpen(false)} onUploaded={uploadedFile} />}
     {error && <div className="ce-file-error" role="alert">{error}<button aria-label="Dismiss error" onClick={() => setError('')}><X size={14} /></button></div>}
-    {jobs.length > 0 && <IngestionJobs jobs={jobs} total={jobTotal} offset={jobOffset} onPage={setJobOffset} expanded={jobsExpanded} busyJob={busyJob} onToggle={() => setJobsExpanded(value => !value)} onRetry={id => void retryJob(id)} onOpen={id => openArticle(id, true)} />}
+    {jobs.length > 0 && <IngestionJobs jobs={jobs} total={jobTotal} offset={jobOffset} onPage={setJobOffset} expanded={jobsExpanded} busyJob={busyJob} onToggle={() => setJobsExpanded(value => !value)} onRetry={id => void retryJob(id)} onOpen={(id, jobId) => { openArticle(id, true); setPinnedJobId(jobId); }} />}
     {articleId ? <>
       {loading ? <div className="ce-file-empty"><Loader2 className="animate-spin" size={22} /> Opening source…</div> : article ? <>
         <div className="ce-file-document-heading"><span>{uploadedSelection ? statusLabel(article.status || 'processing') : article.journal || 'Research article'}{article.year ? ` · ${article.year}` : ''}</span><h2>{article.title}</h2><div className="ce-file-document-actions"><div className="ce-file-mode" role="group" aria-label="Document view"><button aria-pressed={mode === 'reader'} onClick={() => setMode('reader')}><FileText size={14} /> Read</button><button aria-pressed={mode === 'chunks'} onClick={() => setMode('chunks')}><Layers3 size={14} /> Chunks</button>{uploadedSelection && <button aria-pressed={mode === 'original'} onClick={() => { setMode('original'); setPage(1); }}>Original</button>}</div>{uploadedSelection ? <a href={pinnedJobId ? `/api/ingestion/jobs/${encodeURIComponent(pinnedJobId)}/original` : `/api/ingestion/documents/${encodeURIComponent(article.id)}/download`} download={article.filename} aria-label="Download original file"><Download size={15} /></a> : article.sourceUrl && <a href={article.sourceUrl} target="_blank" rel="noreferrer" aria-label="Open original source"><ExternalLink size={15} /></a>}</div></div>
@@ -167,7 +166,7 @@ export function FileExplorer({ focusDocumentId, focusChunkId, focusCollection = 
       </> : !error && <div className="ce-file-empty">No document found.</div>}
     </> : <>
       <div className="ce-file-list-heading"><h2>Your sources</h2><p>Read original files, inspect chunks, and follow processing.</p></div>
-      <div className="ce-file-list">{uploadedTotal > 0 && <h3 className="ce-file-collection-name">Processing pipeline</h3>}{uploaded.map(document => <button key={document.id} className="ce-file-row" onClick={() => openArticle(document.id, true)}><span className="ce-file-row-icon"><FileText size={19} /></span><span><strong>{document.title || document.filename}</strong><small>{statusLabel(document.status)} · {document.chunkCount} chunks</small></span><ChevronRight size={15} /></button>)}{uploadedTotal > limit && <div className="ce-file-pagination"><button aria-label="Previous processed files" disabled={uploadedOffset === 0} onClick={() => setUploadedOffset(Math.max(0, uploadedOffset - limit))}><ChevronLeft size={16} /></button><span>{uploadedOffset + 1}–{Math.min(uploadedOffset + limit, uploadedTotal)} of {uploadedTotal.toLocaleString()}</span><button aria-label="Next processed files" disabled={uploadedOffset + limit >= uploadedTotal} onClick={() => setUploadedOffset(uploadedOffset + limit)}><ChevronRight size={16} /></button></div>}{total > 0 && <div className="ce-file-collection-heading"><h3 className="ce-file-collection-name">Legacy corpus</h3><p>Original parsed files. Entity links use the earlier dictionary extraction.</p></div>}{documents.map(document => <button key={document.id} className="ce-file-row" onClick={() => openArticle(document.id)}><span className="ce-file-row-icon"><FileText size={19} /></span><span><strong>{document.title}</strong><small>{document.year || 'Research article'} · {document.chunkCount} chunks</small></span><ChevronRight size={15} /></button>)}{!documents.length && !uploaded.length && !error && <div className="ce-file-empty"><Loader2 className="animate-spin" size={20} /> Loading files…</div>}</div>
+      <div className="ce-file-list">{uploadedTotal > 0 && <h3 className="ce-file-collection-name">Processing pipeline</h3>}{uploaded.map(document => <button key={document.id} className="ce-file-row" onClick={() => openArticle(document.id, true)}><span className="ce-file-row-icon"><FileText size={19} /></span><span><strong>{document.title || document.filename}</strong><small>{statusLabel(document.status)} · {document.chunkCount} chunks</small></span><ChevronRight size={15} /></button>)}{uploadedTotal > limit && <div className="ce-file-pagination"><button aria-label="Previous processed files" disabled={uploadedOffset === 0} onClick={() => setUploadedOffset(Math.max(0, uploadedOffset - limit))}><ChevronLeft size={16} /></button><span>{uploadedOffset + 1}–{Math.min(uploadedOffset + limit, uploadedTotal)} of {uploadedTotal.toLocaleString()}</span><button aria-label="Next processed files" disabled={uploadedOffset + limit >= uploadedTotal} onClick={() => setUploadedOffset(uploadedOffset + limit)}><ChevronRight size={16} /></button></div>}{total > 0 && <div className="ce-file-collection-heading"><h3 className="ce-file-collection-name">Legacy corpus</h3><p>Original parsed files. Entity links use the earlier dictionary extraction.</p></div>}{documents.map(document => <button key={document.id} className="ce-file-row" onClick={() => openArticle(document.id)}><span className="ce-file-row-icon"><FileText size={19} /></span><span><strong>{document.title}</strong><small>{document.year || 'Research article'} · {document.chunkCount} chunks</small></span><ChevronRight size={15} /></button>)}{!documents.length && !uploaded.length && !error && <div className="ce-file-empty">{catalogLoading || pipelineLoading ? <><Loader2 className="animate-spin" size={20} /> Loading files…</> : <p>No sources yet. Upload a file to start processing.</p>}</div>}</div>
       <div className="ce-file-pagination"><button aria-label="Previous files" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}><ChevronLeft size={16} /></button><span>{Math.min(offset + 1, total)}–{Math.min(offset + limit, total)} of {total.toLocaleString()}</span><button aria-label="Next files" disabled={offset + limit >= total} onClick={() => setOffset(offset + limit)}><ChevronRight size={16} /></button></div>
     </>}
   </div>;

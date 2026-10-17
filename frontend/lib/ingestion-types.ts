@@ -18,7 +18,7 @@ export interface IngestionStage {
   completedAt?: string | null;
   durationMs?: number | null;
   history?: IngestionAttempt[];
-  metadata?: { summary?: string[]; fallbackChunks?: number; limitedSource?: boolean; deferredMentions?: number };
+  metadata?: { summary?: string[]; fallbackChunks?: number; limitedSource?: boolean; deferredMentions?: number; profileId?: string };
 }
 
 export interface IngestionJob {
@@ -30,6 +30,7 @@ export interface IngestionJob {
   documentId?: string | null;
   createdAt: string;
   error?: string | null;
+  configuration?: { corpusProfileId?: string | null };
 }
 
 export interface UploadedDocument {

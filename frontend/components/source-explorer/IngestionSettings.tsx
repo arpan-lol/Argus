@@ -1,0 +1,66 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import { api } from '@/lib/evidence-types';
+import type { IngestionJob } from '@/lib/ingestion-types';
+import './IngestionSetup.css';
+
+interface Settings {
+  entityTypes: string[];
+  relationshipTypes: string[];
+  extractionInstructions: string;
+  rationale?: string;
+  sampling?: { sampledDocuments?: number; availableDocuments?: number; excluded?: unknown[] };
+}
+
+interface Profile {
+  prompt?: string;
+  status?: string;
+  settings?: Settings | null;
+  sampling?: Settings['sampling'];
+}
+
+export function IngestionSettings({ job }: { job: IngestionJob }) {
+  const [open, setOpen] = useState(false);
+  const [profile, setProfile] = useState<Profile>();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [refresh, setRefresh] = useState(0);
+  const stage = job.stages.find(stage => stage.name === 'configure');
+  const profileId = job.configuration?.corpusProfileId || stage?.metadata?.profileId;
+  const ready = ['complete', 'completed', 'succeeded'].includes(stage?.status || '');
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    setError('');
+    if (!profileId && !ready) {
+      setProfile(undefined);
+      return;
+    }
+    setLoading(true);
+    const request = profileId
+      ? api<Profile>(`/ingestion/profiles/${encodeURIComponent(profileId)}`)
+      : api<Settings>(`/ingestion/jobs/${encodeURIComponent(job.id)}/artifacts/configure`).then(settings => ({ settings }));
+    request.then(result => { if (active) setProfile(result); })
+      .catch(reason => { if (active) setError(reason instanceof Error ? reason.message : 'Could not load settings. Try again.'); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [open, job.id, profileId, ready, refresh]);
+
+  const settings = profile?.settings;
+  const sampling = profile?.sampling || settings?.sampling;
+  return <details className="ce-ingestion-settings" onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary>Extraction settings</summary>
+    {open && <div className="ce-ingestion-settings-content" aria-busy={loading}>
+      {loading ? <p role="status">Loading settings…</p> : error ? <><p role="alert">{error}</p><button onClick={() => setRefresh(value => value + 1)}>Try again</button></> : <>
+        {profile?.prompt && <><strong>Your instructions</strong><p>{profile.prompt}</p></>}
+        {settings ? <>
+          <dl><div><dt>Things to find</dt><dd>{settings.entityTypes.join(', ')}</dd></div><div><dt>Connections to find</dt><dd>{settings.relationshipTypes.length ? settings.relationshipTypes.join(', ') : 'Connections explicitly stated in the source'}</dd></div><div><dt>Processing instructions</dt><dd>{settings.extractionInstructions}</dd></div></dl>
+          {settings.rationale && <><strong>Why these settings</strong><p>{settings.rationale}</p></>}
+          {sampling?.sampledDocuments != null && <p>Based on {sampling.sampledDocuments.toLocaleString()} sampled {sampling.sampledDocuments === 1 ? 'file' : 'files'}{sampling.availableDocuments != null ? ` from ${sampling.availableDocuments.toLocaleString()}` : ''}.{sampling.excluded?.length ? ` ${sampling.excluded.length.toLocaleString()} could not be sampled.` : ''} These settings apply automatically.</p>}
+        </> : <p>Argus chooses settings after reading and splitting the source. No approval step is needed.</p>}
+      </>}
+    </div>}
+  </details>;
+}
