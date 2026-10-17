@@ -13,7 +13,7 @@ Copy-Item backend/python/.env.example backend/python/.env
 npm run dev
 ```
 
-Configure a Google or OpenAI credential in the ignored Python environment file before model processing. `npm run setup` creates the local Python virtual environment when missing. The first local GLiNER run downloads model weights. All services bind to localhost; authentication remains outside this implementation pass.
+Configure Google, OpenAI, or Azure credentials in the ignored Python environment file before model processing. `npm run setup` creates the local Python virtual environment when missing. The first local GLiNER run downloads model weights. All services bind to localhost; authentication remains outside this implementation pass.
 
 - Dashboard: http://localhost:3001/dashboard
 - Python API and OpenAPI: http://localhost:4000/docs
@@ -44,6 +44,16 @@ Chunking adapts the published FalkorDB SDK v1.4.0 sentence/token algorithm: 512 
 GLiNER supplies windowed candidate mentions. The configured LLM verifies entities and relationships against exact source quotes. An explicitly configured type vocabulary is optional; otherwise a recorded LLM step infers types from the document. Entity resolution uses FalkorDB vector candidates, exact-name candidates, two order-reversed batched judgments, and constraints against contradictory merges. Similarity alone never merges entities. Invalid model output retries with recorded validation feedback; there is no entity-only fallback.
 
 Assertions preserve their source quotes, offsets, polarity, and conditions. Chunk, entity, and assertion vectors are indexed in FalkorDB. Semantic graphs use an embedding-space namespace such as `argus_sources_v2_<hash>`; model spaces are not mixed. Source replacements retire older graph records logically. Postgres and FalkorDB are separate transaction domains; interrupted publication requires an idempotent retry.
+
+## Azure LLM configuration
+
+Extraction and identity judgments can use Azure while embeddings keep their existing provider/model/dimensions. Set `ARGUS_LLM_PROVIDER` to `azure_openai` or `azure_inference`; `ARGUS_RESOLUTION_PROVIDER` optionally selects a separate judge provider. `ARGUS_EXTRACTION_MODEL` and `ARGUS_RESOLUTION_MODEL` identify the deployed models. Without an explicit LLM provider, existing Google/OpenAI profiles retain their original routing.
+
+For Azure OpenAI v1, configure `AZURE_OPENAI_BASE_URL=https://YOUR-RESOURCE.openai.azure.com/openai/v1` and `AZURE_OPENAI_API_KEY`. Model names must match your deployment names; catalog listings do not establish that a model is deployed.
+
+For the Azure AI model inference API, configure `AZURE_INFERENCE_ENDPOINT=https://YOUR-RESOURCE.services.ai.azure.com/models`, `AZURE_INFERENCE_API_VERSION=2024-05-01-preview`, and `AZURE_INFERENCE_API_KEY`. GPT-OSS-120B was exercised with strict structured output through this interface. Keep `/chat/completions` and the version query out of the base URL.
+
+Optional `ARGUS_LLM_BASE_URL`/`ARGUS_RESOLUTION_BASE_URL` and corresponding `ARGUS_LLM_API_VERSION`/`ARGUS_RESOLUTION_API_VERSION` override the endpoints per role. Endpoints and models are recorded in the processing version; keys remain in the environment. Azure calls use schema-validated structured output, the configured timeout, and no SDK retries. The pipeline's bounded retry policy still applies. Provider changes never silently retry a different model or rewrite an existing job's configuration. `ARGUS_MODEL_PROVIDER` continues to identify the embedding provider when LLM routing is overridden, preserving embedding caches and graph namespaces.
 
 ## Legacy corpus and current boundaries
 
