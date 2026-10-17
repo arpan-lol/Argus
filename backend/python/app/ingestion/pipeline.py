@@ -9,14 +9,16 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import TypedDict
+from typing import Annotated, TypedDict
+from operator import or_
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.types import Overwrite
 from psycopg.types.json import Jsonb
 
 from app.config import settings
-from app.database import connection
+from app.database import connection, migrate
 
 from .chunking import chunk_document
 from .config import fingerprint, processing_config
@@ -26,17 +28,18 @@ from .providers import relationship_repair_schema, extraction_schema
 from .schema import ensure_schema
 
 
-STAGES = ("register", "parse", "normalize", "chunk", "embed", "extract", "resolve", "validate", "publish")
+STAGES = ("register", "parse", "normalize", "chunk", "configure", "embed", "extract", "resolve", "prepare", "validate", "publish")
 logger = logging.getLogger("argus.ingestion")
 
 
 class PipelineState(TypedDict):
     job_id: str
     through: str
-    stopped: bool
+    stopped: Annotated[bool, or_]
 
 
 def initialize():
+    migrate()
     with connection() as conn:
         ensure_schema(conn)
         running = conn.execute("SELECT id FROM ingestion_jobs WHERE status='running'").fetchall()
@@ -62,28 +65,42 @@ class IngestionPipeline:
         for stage in STAGES:
             builder.add_node(stage, self.node(stage))
         builder.add_edge(START, STAGES[0])
-        for index, stage in enumerate(STAGES):
-            next_stage = STAGES[index + 1] if index + 1 < len(STAGES) else END
-            builder.add_conditional_edges(stage, lambda state, s=stage: "stop" if state["stopped"] or state["through"] == s else "next", {"stop": END, "next": next_stage})
+        for first, second in (("register", "parse"), ("parse", "normalize"), ("normalize", "chunk"), ("chunk", "configure"), ("configure", "embed"), ("configure", "extract"), ("extract", "resolve"), ("resolve", "prepare"), ("validate", "publish")):
+            builder.add_edge(first, second)
+        builder.add_edge(["embed", "prepare"], "validate")
+        builder.add_edge("publish", END)
         self.builder = builder
 
-    def register_file(self, path, source_id=None, source_url=None, filename=None):
+    def describe_source(self, path, source_id=None, source_url=None, filename=None):
         path = Path(path).resolve()
         config = processing_config()
         if path.stat().st_size > config["maxUploadBytes"]:
             raise ValueError(f"File exceeds configured {config['maxUploadBytes']} byte input limit")
         raw_digest = hashlib.sha256(path.read_bytes()).hexdigest()
         source_id = source_id or "source:" + fingerprint(str(path))
-        version = fingerprint(config)
-        job_id = "job:" + fingerprint([source_id, raw_digest, version])
         directory = Path(settings.data_dir) / "originals" / raw_digest[:2]
         directory.mkdir(parents=True, exist_ok=True)
         original = directory / (raw_digest + "-" + Path(filename or path.name).name)
         if original != path and not original.exists():
             shutil.copyfile(path, original)
+        return {"sourceId": source_id, "revision": raw_digest, "originalPath": str(original), "filename": filename or path.name, "sourceUrl": source_url}
+
+    def register_file(self, path, source_id=None, source_url=None, filename=None, profile_id=None, prompt=None):
+        from .profiles import create_profile, get_profile
+        if profile_id and prompt:
+            raise ValueError("Supply either a corpus profile or a new prompt")
+        source = self.describe_source(path, source_id, source_url, filename)
+        config = processing_config()
+        if prompt:
+            profile_id = create_profile(prompt, [source], config)["id"]
+        if profile_id:
+            get_profile(profile_id)
+            config["corpusProfileId"] = profile_id
+        version = fingerprint(config)
+        job_id = "job:" + fingerprint([source["sourceId"], source["revision"], version])
         with connection() as conn:
-            conn.execute("INSERT INTO ingestion_sources(id,filename,original_path,source_url,media_type) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET filename=excluded.filename,original_path=excluded.original_path,source_url=COALESCE(excluded.source_url,ingestion_sources.source_url)", (source_id, filename or path.name, str(original), source_url, mimetypes.guess_type(filename or path.name)[0]))
-            conn.execute("INSERT INTO ingestion_jobs(id,source_id,revision,processing_version,configuration,original_path) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", (job_id, source_id, raw_digest, version, Jsonb(config), str(original)))
+            conn.execute("INSERT INTO ingestion_sources(id,filename,original_path,source_url,media_type) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET filename=excluded.filename,original_path=excluded.original_path,source_url=COALESCE(excluded.source_url,ingestion_sources.source_url)", (source["sourceId"], source["filename"], source["originalPath"], source_url, mimetypes.guess_type(source["filename"])[0]))
+            conn.execute("INSERT INTO ingestion_jobs(id,source_id,revision,processing_version,configuration,original_path) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", (job_id, source["sourceId"], source["revision"], version, Jsonb(config), source["originalPath"]))
         return self.get_job(job_id)
 
     def job_row(self, job_id):
@@ -147,8 +164,8 @@ class IngestionPipeline:
     def node(self, stage):
         def execute(state):
             job = self.job_row(state["job_id"])
-            if self.artifact(job["id"], stage) is not None:
-                return state
+            if state["stopped"] or STAGES.index(stage) > STAGES.index(state["through"]) or self.artifact(job["id"], stage) is not None:
+                return {}
             with connection() as conn:
                 attempt = conn.execute("SELECT COALESCE(max(attempt),0)+1 AS n FROM ingestion_attempts WHERE job_id=%s AND stage=%s", (job["id"], stage)).fetchone()["n"]
                 attempt_id = conn.execute("INSERT INTO ingestion_attempts(job_id,stage,attempt,status) VALUES(%s,%s,%s,'running') RETURNING id", (job["id"], stage, attempt)).fetchone()["id"]
@@ -157,27 +174,40 @@ class IngestionPipeline:
             try:
                 result = getattr(self, "stage_" + stage)(job)
                 self.save_artifact(job["id"], stage, result)
+                receipt = {"artifactDigest": fingerprint(result)}
+                for key in ("quality", "fallbackChunks", "profileId", "entityTypes", "deferredMentions"):
+                    if key in result:
+                        receipt[key] = result[key]
+                summaries = []
+                if result.get("fallbackChunks"):
+                    summaries.append(f"{result['fallbackChunks']} chunks kept local mentions after two failed LLM attempts; no connections extracted for those chunks.")
+                if result.get("deferredMentions"):
+                    summaries.append(f"{result['deferredMentions']} mentions kept separate; duplicate checks deferred.")
+                coverage = result.get("metadata", {}).get("sourceCoverage", {})
+                if coverage.get("limitedSource"):
+                    receipt["limitedSource"] = True
+                    summaries.append("Only available source text was retained; the full article body was not supplied.")
+                receipt["summary"] = summaries
                 with connection() as conn:
-                    conn.execute("UPDATE ingestion_attempts SET status='complete',finished_at=now(),duration_ms=%s,metadata=%s WHERE id=%s", ((time.monotonic() - started) * 1000, Jsonb({"artifactDigest": fingerprint(result)}), attempt_id))
+                    conn.execute("UPDATE ingestion_attempts SET status='complete',finished_at=now(),duration_ms=%s,metadata=%s WHERE id=%s", ((time.monotonic() - started) * 1000, Jsonb(receipt), attempt_id))
                     if stage == "publish":
                         conn.execute("UPDATE ingestion_jobs SET status='complete',updated_at=now() WHERE id=%s", (job["id"],))
-                    elif state["through"] == stage:
-                        conn.execute("UPDATE ingestion_jobs SET status='paused',updated_at=now() WHERE id=%s", (job["id"],))
-                return state
+                return {}
             except Exception as error:
                 status = "waiting_configuration" if isinstance(error, ConfigurationRequired) else "failed"
                 logger.exception("ingestion stage failed: %s %s", job["id"], stage)
                 with connection() as conn:
                     conn.execute("UPDATE ingestion_attempts SET status=%s,finished_at=now(),duration_ms=%s,error=%s WHERE id=%s", (status, (time.monotonic() - started) * 1000, str(error), attempt_id))
                     conn.execute("UPDATE ingestion_jobs SET status=%s,error=%s,updated_at=now() WHERE id=%s", (status, str(error), job["id"]))
-                return {**state, "stopped": True}
+                return {"stopped": True}
         return execute
 
-    def retry_call(self, job, stage, key, operation):
+    def retry_call(self, job, stage, key, operation, max_attempts=None):
         previous = self.item(job["id"], stage, key)
         if previous is not None:
             return previous
-        for attempt in range(job["configuration"]["retries"]):
+        attempts = job["configuration"]["retries"] if max_attempts is None else max_attempts
+        for attempt in range(attempts):
             try:
                 if stage not in {"embed", "entity_embed", "entity_embed_batch", "assertion_embed"}:
                     self.budget(job)
@@ -188,7 +218,7 @@ class IngestionPipeline:
                 raise
             except Exception as error:
                 self.save_item(job["id"], "retry_history", str(uuid.uuid4()), {"stage": stage, "itemId": key, "attempt": attempt + 1, "error": str(error)})
-                if attempt + 1 >= job["configuration"]["retries"]:
+                if attempt + 1 >= attempts:
                     raise
                 provider_delay = re.search(r"retry in\s+([\d.]+)\s*s", str(error), re.IGNORECASE)
                 delay = max(job["configuration"]["retryBaseSeconds"] * (2 ** attempt), float(provider_delay.group(1)) + 1 if provider_delay else 0)
@@ -215,6 +245,7 @@ class IngestionPipeline:
             acquired = lease.execute("SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS acquired", (job_id,)).fetchone()["acquired"]
             if not acquired:
                 return self.get_job(job_id)
+            lease.commit()
             try:
                 with connection() as conn:
                     if queued_only:
@@ -226,10 +257,16 @@ class IngestionPipeline:
                         conn.execute("UPDATE ingestion_jobs SET status='running',error=NULL,queued_through=%s,updated_at=now() WHERE id=%s", (through, job_id))
                 with PostgresSaver.from_conn_string(settings.database_url) as saver:
                     graph = self.builder.compile(checkpointer=saver)
-                    result = graph.invoke({"job_id": job_id, "through": through, "stopped": False}, {"recursion_limit": len(STAGES) + 5, "configurable": {"thread_id": job_id}})
+                    result = graph.invoke({"job_id": job_id, "through": through, "stopped": Overwrite(False)}, {"recursion_limit": len(STAGES) + 5, "configurable": {"thread_id": job_id}})
                 if not result["stopped"]:
+                    complete = self.artifact(job_id, "publish") is not None
                     with connection() as conn:
-                        conn.execute("UPDATE ingestion_jobs SET status=%s,updated_at=now() WHERE id=%s", ("complete" if self.artifact(job_id, "publish") else "paused", job_id))
+                        conn.execute("UPDATE ingestion_jobs SET status=%s,updated_at=now() WHERE id=%s", ("complete" if complete else "paused", job_id))
+                else:
+                    with connection() as conn:
+                        failure = conn.execute("SELECT stage,status,error FROM ingestion_attempts WHERE job_id=%s AND status IN ('failed','waiting_configuration') ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+                        if failure:
+                            conn.execute("UPDATE ingestion_jobs SET status=%s,current_stage=%s,error=%s,updated_at=now() WHERE id=%s", (failure["status"], failure["stage"], failure["error"], job_id))
             finally:
                 lease.execute("SELECT pg_advisory_unlock(hashtextextended(%s,0))", (job_id,))
         return self.get_job(job_id)
@@ -247,7 +284,8 @@ class IngestionPipeline:
         return result
 
     def stage_normalize(self, job):
-        result = normalize(self.artifact(job["id"], "parse"))
+        from .profiles import source_quality
+        result = source_quality(normalize(self.artifact(job["id"], "parse")))
         for block in result["blocks"]:
             block["id"] = "block:" + fingerprint([job["id"], block["ordinal"]])
         return result
@@ -262,55 +300,30 @@ class IngestionPipeline:
             self.retry_call(job, "embed", chunk["id"], lambda c=chunk: {"vector": provider.embed([c["text"]])[0], "model": job["configuration"]["embeddingModel"]})
         return {"chunks": len(chunks), "model": job["configuration"]["embeddingModel"], "dimensions": job["configuration"]["embeddingDimensions"], "storage": "Durable PostgreSQL staging; FalkorDB vector properties/index published only after validation"}
 
+    def stage_configure(self, job):
+        from .profiles import create_profile, prepare_profile
+        config = job["configuration"]
+        if config["entityTypes"] and not config.get("corpusProfileId"):
+            return {"entityTypes": config["entityTypes"], "relationshipTypes": [], "extractionInstructions": "Extract explicitly supported things and connections, retaining source attribution and uncertainty.", "profileOrigin": "fixed_configuration"}
+        profile_id = config.get("corpusProfileId")
+        if not profile_id:
+            prompt = "Extract the explicitly stated things and their connections from this document, retaining attribution, negation and conditions."
+            source = {"sourceId": job["source_id"], "revision": job["revision"], "filename": job["filename"], "originalPath": job["original_path"]}
+            profile_id = create_profile(prompt, [source], config)["id"]
+        return prepare_profile(self, job, profile_id)
+
     def stage_extract(self, job):
+        from .extraction import extract_document
+        return extract_document(self, job)
+
+    def stage_prepare(self, job):
         provider = Providers(job["configuration"], self.call_recorder(job["id"]))
-        document = self.artifact(job["id"], "normalize")
-        chunks = self.artifact(job["id"], "chunk")["chunks"]
-        types = job["configuration"]["entityTypes"]
-        if not types:
-            profile = self.retry_call(job, "profile", "document", lambda: provider.structured(Profile, PROFILE_PROMPT, {"title": document["metadata"].get("title", job["filename"]), "source": chunks[0]["text"]}))
-            types = profile["entity_types"]
-            if not types or any(not isinstance(value, str) or not value.strip() for value in types):
-                raise ValueError("LLM inferred an invalid entity type profile")
-        entities = relationships = 0
-        for chunk in chunks:
-            if self.item(job["id"], "extract", chunk["id"]):
-                result = self.item(job["id"], "extract", chunk["id"])
-            else:
-                candidates = self.retry_call(job, "gliner", chunk["id"], lambda c=chunk: provider.gliner(c["text"], types))
-                feedback = {}
-                with connection() as conn:
-                    rejected = conn.execute("SELECT payload FROM ingestion_items WHERE job_id=%s AND stage='rejected_extraction' AND payload->>'chunkId'=%s ORDER BY created_at DESC LIMIT 1", (job["id"], chunk["id"])).fetchone()
-                if rejected:
-                    prior = rejected["payload"]["output"]
-                    try:
-                        self.validate_extraction(chunk, prior)
-                    except ValueError as error:
-                        feedback.update({"error": str(error), "previous_output": prior, "instruction": "Repair this rejected output using exact case-sensitive substrings of the original source. Omit unsupported records."})
-                def extract(c=chunk, mentions=candidates):
-                    prior_entities = feedback.get("previous_output", {}).get("entities", [])
-                    keys = [entity["key"] for entity in prior_entities]
-                    repair = bool(keys) and len(keys) == len(set(keys)) and all(entity["name"].strip() and entity["quote"] and entity["quote"] in c["text"] and entity["entity_type"] in types for entity in prior_entities)
-                    payload = {"entity_types": types, "gliner_candidates": mentions["mentions"], "source": c["text"], "validation_feedback": feedback}
-                    if repair:
-                        payload["fixed_entities"] = prior_entities
-                        fixed = provider.structured(relationship_repair_schema(keys), EXTRACTION_PROMPT + " Repair relationships for the fixed_entities only. Endpoints must be keys from that list. Record literal values as conditions when supported, never as invented entity keys. Return only the repaired relationships.", payload)
-                        result = {"entities": prior_entities, "relationships": fixed["relationships"]}
-                    else:
-                        result = provider.structured(extraction_schema(types), EXTRACTION_PROMPT, payload)
-                    try:
-                        self.validate_extraction(c, result)
-                        if any(entity["entity_type"] not in types for entity in result["entities"]):
-                            raise ValueError("Entity type must belong to the recorded extraction vocabulary")
-                    except ValueError as error:
-                        feedback.update({"error": str(error), "previous_output": result, "instruction": "Repair the output using the original source. Keep exact quotes and omit unsupported conditions."})
-                        self.save_item(job["id"], "rejected_extraction", str(uuid.uuid4()), {"chunkId": c["id"], "error": str(error), "output": result})
-                        raise
-                    return result
-                result = self.retry_call(job, "extract", chunk["id"], extract)
-            entities += len(result["entities"])
-            relationships += len(result["relationships"])
-        return {"entities": entities, "relationships": relationships, "entityTypes": types, "profileOrigin": "configuration" if job["configuration"]["entityTypes"] else "llm_document_inferred", "promptVersion": job["configuration"]["promptVersion"]}
+        count = 0
+        for chunk in self.artifact(job["id"], "chunk")["chunks"]:
+            facts = self.item(job["id"], "extract", chunk["id"])["relationships"]
+            self.retry_call(job, "assertion_embed", chunk["id"], lambda rows=facts: {"vectors": provider.embed([row["predicate"] + "\n" + row["polarity"] + "\n" + row["quote"] for row in rows]) if rows else []})
+            count += len(facts)
+        return {"connectionVectors": count, "providerCallsAfterValidation": False}
 
     def validate_extraction(self, chunk, extraction):
         entities = {entity["key"] for entity in extraction["entities"]}
@@ -345,11 +358,15 @@ class IngestionPipeline:
             if document["text"][chunk["startOffset"]:chunk["endOffset"]] != chunk["text"]:
                 raise ValueError("Chunk source offset mismatch")
             embedded = self.item(job["id"], "embed", chunk["id"])
-            if not embedded or len(embedded["vector"]) != job["configuration"]["embeddingDimensions"] or any(not math.isfinite(value) for value in embedded["vector"]):
+            if not embedded or len(embedded["vector"]) != job["configuration"]["embeddingDimensions"] or not any(embedded["vector"]) or any(not math.isfinite(value) for value in embedded["vector"]):
                 raise ValueError("Chunk embedding missing, nonfinite or wrong dimensionality")
             extraction = self.item(job["id"], "extract", chunk["id"])
             self.validate_extraction(chunk, extraction)
-            assertions += len(extraction["relationships"])
+            facts = extraction["relationships"]
+            vectors = self.item(job["id"], "assertion_embed", chunk["id"])
+            if vectors is None or len(vectors["vectors"]) != len(facts) or any(len(vector) != job["configuration"]["embeddingDimensions"] or not any(vector) or any(not math.isfinite(value) for value in vector) for vector in vectors["vectors"]):
+                raise ValueError("Connection embeddings missing, invalid or wrong dimensionality")
+            assertions += len(facts)
             for entity in extraction["entities"]:
                 mention_id = "mention:" + fingerprint([chunk["id"], entity["key"]])
                 if not self.item(job["id"], "resolve", mention_id):

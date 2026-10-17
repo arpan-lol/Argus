@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from psycopg.types.json import Jsonb
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.database import connection
 
@@ -32,9 +33,19 @@ def job(job_id: str):
 
 
 @router.post("/jobs", status_code=202)
-async def upload(file: UploadFile = File(...), source_id: str | None = Form(None), through: str = Form("publish")):
+async def upload(file: UploadFile = File(...), source_id: str | None = Form(None), through: str = Form("publish"), profile_id: str | None = Form(None), prompt: str | None = Form(None)):
     if through not in STAGES:
         raise HTTPException(400, "Unknown ingestion stage")
+    if profile_id and prompt:
+        raise HTTPException(400, "Supply either a saved corpus profile or a new prompt")
+    if prompt is not None and (not prompt.strip() or len(prompt) > 12000):
+        raise HTTPException(400, "Prompt must contain 1–12000 characters")
+    if profile_id:
+        from .profiles import get_profile
+        try:
+            get_profile(profile_id)
+        except KeyError:
+            raise HTTPException(404, "Corpus profile not found")
     filename = Path(file.filename or "uploaded-source.txt").name
     maximum = processing_config()["maxUploadBytes"]
     temporary = None
@@ -54,7 +65,7 @@ async def upload(file: UploadFile = File(...), source_id: str | None = Form(None
                 existing = conn.execute("SELECT id FROM ingestion_sources WHERE id=%s", (source_id,)).fetchone()
             if not existing:
                 raise HTTPException(404, "Explicit replacement source was not found")
-        result = pipeline.register_file(temporary, source_id=source_id or "upload:" + digest.hexdigest(), filename=filename)
+        result = pipeline.register_file(temporary, source_id=source_id or "upload:" + digest.hexdigest(), filename=filename, profile_id=profile_id, prompt=prompt)
         try:
             return pipeline.enqueue(result["id"], through)
         except RuntimeError:
@@ -68,7 +79,7 @@ async def upload(file: UploadFile = File(...), source_id: str | None = Form(None
 @router.post("/jobs/{job_id}/retry", status_code=202)
 def retry(job_id: str, through: str = "publish"):
     result = job(job_id)
-    if through not in {"register", "parse", "normalize", "chunk", "embed", "extract", "resolve", "validate", "publish"}:
+    if through not in STAGES:
         raise HTTPException(400, "Unknown ingestion stage")
     try:
         return pipeline.enqueue(job_id, through)
@@ -91,6 +102,37 @@ def artifact(job_id: str, stage: str):
     if result is None:
         raise HTTPException(404, "Stage has no completed artifact")
     return result
+
+
+class CorpusPrompt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    prompt: str = Field(min_length=1, max_length=12000)
+    source_ids: list[str] = Field(min_length=1, max_length=10000)
+
+
+@router.post("/profiles", status_code=201)
+def corpus_profile(body: CorpusPrompt):
+    from .profiles import create_profile
+    sources = []
+    with connection() as conn:
+        rows = conn.execute("SELECT DISTINCT ON (j.source_id) j.source_id,j.revision,j.original_path,s.filename FROM ingestion_jobs j JOIN ingestion_sources s ON s.id=j.source_id WHERE j.source_id=ANY(%s) ORDER BY j.source_id,j.created_at DESC", (body.source_ids,)).fetchall()
+        for row in rows:
+            sources.append({"sourceId": row["source_id"], "revision": row["revision"], "originalPath": row["original_path"], "filename": row["filename"]})
+    if len(sources) != len(set(body.source_ids)):
+        raise HTTPException(404, "One or more source files are not registered")
+    try:
+        return create_profile(body.prompt, sources)
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+
+
+@router.get("/profiles/{profile_id}")
+def profile(profile_id: str):
+    from .profiles import get_profile, public_profile
+    try:
+        return public_profile(get_profile(profile_id))
+    except KeyError:
+        raise HTTPException(404, "Corpus profile not found")
 
 
 @router.get("/jobs/{job_id}/resolutions")
