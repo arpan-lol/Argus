@@ -18,6 +18,7 @@ export interface IngestionStage {
   completedAt?: string | null;
   durationMs?: number | null;
   history?: IngestionAttempt[];
+  metadata?: { summary?: string[]; fallbackChunks?: number; limitedSource?: boolean; deferredMentions?: number };
 }
 
 export interface IngestionJob {
@@ -46,6 +47,8 @@ export interface IngestedDocument extends EvidenceDocument {
 }
 
 export function statusLabel(status: string) {
+  const stages: Record<string, string> = { register: 'Preserve original', parse: 'Read file', normalize: 'Prepare source text', chunk: 'Split into chunks', configure: 'Choose extraction settings', embed: 'Embed source text', extract: 'Find things and connections', resolve: 'Check repeated names', prepare: 'Embed connections', validate: 'Check results', publish: 'Make searchable' };
+  if (stages[status]) return stages[status];
   if (status === 'waiting_configuration') return 'Configuration needed';
   if (['complete', 'completed', 'published', 'succeeded'].includes(status)) return 'Complete';
   return status.replaceAll('_', ' ').replace(/^./, character => character.toUpperCase());

@@ -74,14 +74,14 @@ class Session:
     def chunks(self, ids):
         missing = list(set(ids) - self.cache.keys())
         if missing:
-            rows = self.sql("SELECT c.id,c.document_id,c.payload,c.document_title,j.id AS job_id FROM published_chunks c JOIN ingestion_publications p ON p.source_id=c.document_id AND p.active JOIN ingestion_jobs j ON j.id=p.job_id WHERE c.id=ANY(%s) AND j.id=ANY(%s) AND c.payload->>'revisionId'=j.revision AND c.payload->>'processingVersion'=j.processing_version", (missing, self.jobs), "source support")
+            rows = self.sql("SELECT c.id,c.document_id,c.payload,c.document_title,j.id AS job_id,d.metadata->'sourceCoverage' AS source_coverage FROM published_chunks c JOIN published_documents d ON d.id=c.document_id JOIN ingestion_publications p ON p.source_id=c.document_id AND p.active JOIN ingestion_jobs j ON j.id=p.job_id WHERE c.id=ANY(%s) AND j.id=ANY(%s) AND c.payload->>'revisionId'=j.revision AND c.payload->>'processingVersion'=j.processing_version", (missing, self.jobs), "source support")
             for row in rows:
                 self.cache[row["id"]] = row
         return {key: self.cache[key] for key in ids if key in self.cache}
 
     def citation(self, row, start=None, end=None):
         chunk = row["payload"]
-        return {"chunkId": row["id"], "documentId": row["document_id"], "documentTitle": row["document_title"], "jobId": row["job_id"], "revisionId": chunk["revisionId"], "processingVersion": chunk["processingVersion"], "sectionId": chunk["sectionId"], "sectionTitle": chunk.get("sectionTitle", ""), "sourceUrl": chunk.get("sourceUrl"), "startOffset": chunk["startOffset"] if start is None else start, "endOffset": chunk["endOffset"] if end is None else end, "offsetUnit": "unicode_codepoint"}
+        return {"chunkId": row["id"], "documentId": row["document_id"], "documentTitle": row["document_title"], "jobId": row["job_id"], "revisionId": chunk["revisionId"], "processingVersion": chunk["processingVersion"], "sectionId": chunk["sectionId"], "sectionTitle": chunk.get("sectionTitle", ""), "sourceUrl": chunk.get("sourceUrl"), "startOffset": chunk["startOffset"] if start is None else start, "endOffset": chunk["endOffset"] if end is None else end, "offsetUnit": "unicode_codepoint", "processing": chunk.get("extractionMetadata", {}), "sourceCoverage": row.get("source_coverage")}
 
     def excerpt(self, row):
         chunk = row["payload"]
