@@ -19,8 +19,8 @@ def base_url(value, default_path="/openai/v1"):
 
 
 def deployment(prefix):
-    name = os.getenv(prefix + "_DEPLOYMENT_NAME")
-    url = os.getenv(prefix + "_DEPLOYMENT_URL")
+    name = os.getenv(prefix + "_DEPLOYMENT_NAME", "").strip()
+    url = os.getenv(prefix + "_DEPLOYMENT_URL", "").strip()
     if not name and not url:
         return None
     if not name or not url:

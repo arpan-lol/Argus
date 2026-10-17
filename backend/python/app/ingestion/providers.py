@@ -108,8 +108,8 @@ class Providers:
         if credential_env is None and provider is None and self.config.get("ingestionLlmRole") == "LLM2":
             credential_env = "LLM2_DEPLOYMENT_KEY"
         provider = provider or self.config["provider"]
-        if credential_env and os.getenv(credential_env):
-            return os.environ[credential_env]
+        if credential_env and os.getenv(credential_env, "").strip():
+            return os.environ[credential_env].strip()
         if credential_env in {"LLM2_DEPLOYMENT_KEY", "EMBEDDING_MODEL_KEY"}:
             raise ConfigurationRequired(f"Configure {credential_env}; ingestion cannot fall back to another model credential")
         if provider == "google":
@@ -215,7 +215,7 @@ class Providers:
         return vector
 
     def azure_embeddings(self, texts, query=False):
-        from .ingestion_roles import validate_ingestion_embeddings
+        from .ingestion_roles import ingestion_configuration_failure, validate_ingestion_embeddings
         try:
             validate_ingestion_embeddings(self.config)
         except ValueError as error:
@@ -237,12 +237,14 @@ class Providers:
                 raise ValueError("Embedding response dimensions or values do not match the processing configuration")
         except Exception as error:
             self.record_call({**receipt, "status": "failed", "durationMs": (time.monotonic() - started) * 1000, "usage": None, "error": self.safe_error(error)})
+            if ingestion_configuration_failure(self.config, error):
+                raise ConfigurationRequired("Embedding access, deployment or account quota must be corrected before processing can continue") from error
             raise
         self.record_call({**receipt, "status": "complete", "durationMs": (time.monotonic() - started) * 1000, "usage": response.usage.model_dump(mode="json") if response.usage else None})
         return vectors
 
     def structured(self, schema, prompt, payload, judge=False):
-        from .ingestion_roles import validate_ingestion_llm
+        from .ingestion_roles import ingestion_configuration_failure, validate_ingestion_llm
         try:
             validate_ingestion_llm(self.config, judge)
         except ValueError as error:
@@ -298,6 +300,8 @@ class Providers:
                 usage = result["raw"].usage_metadata
         except Exception as error:
             self.record_call({**receipt, "status": "failed", "durationMs": (time.monotonic() - started) * 1000, "usage": None, "error": self.safe_error(error)})
+            if ingestion_configuration_failure(self.config, error):
+                raise ConfigurationRequired("LLM2 access, deployment or account quota must be corrected before processing can continue") from error
             if "GenerateRequestsPerDay" in str(error):
                 raise ConfigurationRequired(f"Daily generation quota exhausted for {model}. Completed outputs are retained; resume when this model's quota is available.") from error
             raise

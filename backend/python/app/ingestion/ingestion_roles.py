@@ -4,6 +4,16 @@ import os
 from .deployments import base_url, deployment
 
 
+def ingestion_configuration_failure(config, error):
+    if config.get("ingestionLlmRole") != "LLM2":
+        return False
+    if getattr(error, "status_code", None) in (401, 403, 404):
+        return True
+    body = getattr(error, "body", None)
+    detail = str(body if body is not None else error).casefold()
+    return any(code in detail for code in ("insufficient_quota", "billing_hard_limit_reached", "billing_not_active", "invalid_api_key", "deploymentnotfound", "deployment_not_found", "invalidapiversionparameter", "unsupportedapiversion"))
+
+
 def validate_ingestion_llm(config, judge=False):
     if config.get("ingestionLlmRole") != "LLM2":
         return

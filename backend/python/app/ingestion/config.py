@@ -12,16 +12,14 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 
 def processing_config():
-    configured = os.getenv("ARGUS_MODEL_PROVIDER", "")
-    azure = configured in {"azure", "azure_openai"} or any(os.getenv(name) for name in ("LLM2_DEPLOYMENT_NAME", "LLM2_DEPLOYMENT_URL", "LLM2_DEPLOYMENT_KEY", "EMBEDDING_MODEL_NAME"))
-    provider = "azure_openai" if azure else configured or ("google" if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") else "openai")
-    extraction_model = os.getenv("LLM2_DEPLOYMENT_NAME", "") if azure else os.getenv("ARGUS_EXTRACTION_MODEL", "gemini-2.5-flash" if provider == "google" else "gpt-4o-mini")
-    embedding_model = os.getenv("EMBEDDING_MODEL_NAME", "") if azure else os.getenv("ARGUS_EMBEDDING_MODEL", "models/gemini-embedding-001" if provider == "google" else "text-embedding-3-small")
+    provider = "azure_openai"
+    extraction_model = os.getenv("LLM2_DEPLOYMENT_NAME", "").strip()
+    embedding_model = os.getenv("EMBEDDING_MODEL_NAME", "").strip()
     secondary = deployment("LLM2")
     if secondary and secondary["model"].lower().startswith("gpt-5"):
         raise ValueError("GPT-5 is reserved for the agent; configure LLM2 with GPT-4.1-mini for ingestion")
     llm_endpoint = secondary["baseUrl"] if secondary else None
-    embedding_endpoint = base_url(os.getenv("EMBEDDING_MODEL_ENDPOINT")) if azure and os.getenv("EMBEDDING_MODEL_ENDPOINT") else None
+    embedding_endpoint = base_url(os.getenv("EMBEDDING_MODEL_ENDPOINT")) if os.getenv("EMBEDDING_MODEL_ENDPOINT") else None
     resource_hash = lambda value: hashlib.sha256((value.rstrip("/") + "/").encode()).hexdigest() if value else None
     config = {
         "contract": "argus-ingestion-3-parallel",
@@ -34,13 +32,13 @@ def processing_config():
         "tokenEncoding": "cl100k_base",
         "provider": provider,
         "extractionModel": extraction_model,
-        "resolutionModel": extraction_model if azure else os.getenv("ARGUS_RESOLUTION_MODEL", extraction_model),
+        "resolutionModel": extraction_model,
         "embeddingModel": embedding_model,
         "embeddingProvider": provider,
-        "embeddingDimensions": 3072 if azure else int(os.getenv("ARGUS_EMBEDDING_DIMENSIONS", "768" if provider == "google" else "1536")),
+        "embeddingDimensions": 3072,
         "llmResourceIdentity": resource_hash(llm_endpoint),
         "embeddingResourceIdentity": resource_hash(embedding_endpoint),
-        "providerProfile": "azure-v1-llm2-4.1-mini-embedding3large-native-1" if azure else "legacy-provider-1",
+        "providerProfile": "azure-v1-llm2-4.1-mini-embedding3large-native-2",
         "glinerModel": os.getenv("ARGUS_GLINER_MODEL", "urchade/gliner_small-v2.1"),
         "glinerThreshold": float(os.getenv("ARGUS_GLINER_THRESHOLD", "0.5")),
         "glinerWindowing": "model-word-cap-offsets-1",
@@ -70,37 +68,22 @@ def processing_config():
         "maxExtractedTextCharacters": int(os.getenv("ARGUS_MAX_EXTRACTED_TEXT_CHARACTERS", "20971520")),
         "maxArchiveMembers": int(os.getenv("ARGUS_MAX_ARCHIVE_MEMBERS", "10000")),
     }
-    if azure:
-        config.update({
-            "ingestionLlmRole": "LLM2",
-            "llmProvider": "azure_openai",
-            "resolutionProvider": "azure_openai",
-            "llmBaseUrl": llm_endpoint,
-            "resolutionBaseUrl": llm_endpoint,
-            "llmApiVersion": None,
-            "resolutionApiVersion": None,
-            "llmApi": secondary["api"] if secondary else "responses",
-            "resolutionApi": secondary["api"] if secondary else "responses",
-            "llmCredentialEnv": "LLM2_DEPLOYMENT_KEY",
-            "resolutionCredentialEnv": "LLM2_DEPLOYMENT_KEY",
-            "embeddingBaseUrl": embedding_endpoint,
-            "embeddingApiVersion": "2024-05-01-preview" if embedding_endpoint and embedding_endpoint.endswith("/models") else None,
-            "embeddingCredentialEnv": "EMBEDDING_MODEL_KEY",
-        })
-    else:
-        llm_provider = os.getenv("ARGUS_LLM_PROVIDER")
-        if llm_provider:
-            resolution_provider = os.getenv("ARGUS_RESOLUTION_PROVIDER") or llm_provider
-            endpoints = {"azure_openai": os.getenv("AZURE_OPENAI_BASE_URL"), "azure_inference": os.getenv("AZURE_INFERENCE_ENDPOINT")}
-            versions = {"azure_inference": os.getenv("AZURE_INFERENCE_API_VERSION", "2024-05-01-preview")}
-            config.update({
-                "llmProvider": llm_provider,
-                "resolutionProvider": resolution_provider,
-                "llmBaseUrl": os.getenv("ARGUS_LLM_BASE_URL") or endpoints.get(llm_provider),
-                "resolutionBaseUrl": os.getenv("ARGUS_RESOLUTION_BASE_URL") or endpoints.get(resolution_provider),
-                "llmApiVersion": os.getenv("ARGUS_LLM_API_VERSION") or versions.get(llm_provider),
-                "resolutionApiVersion": os.getenv("ARGUS_RESOLUTION_API_VERSION") or versions.get(resolution_provider),
-            })
+    config.update({
+        "ingestionLlmRole": "LLM2",
+        "llmProvider": "azure_openai",
+        "resolutionProvider": "azure_openai",
+        "llmBaseUrl": llm_endpoint,
+        "resolutionBaseUrl": llm_endpoint,
+        "llmApiVersion": None,
+        "resolutionApiVersion": None,
+        "llmApi": secondary["api"] if secondary else "responses",
+        "resolutionApi": secondary["api"] if secondary else "responses",
+        "llmCredentialEnv": "LLM2_DEPLOYMENT_KEY",
+        "resolutionCredentialEnv": "LLM2_DEPLOYMENT_KEY",
+        "embeddingBaseUrl": embedding_endpoint,
+        "embeddingApiVersion": "2024-05-01-preview" if embedding_endpoint and embedding_endpoint.endswith("/models") else None,
+        "embeddingCredentialEnv": "EMBEDDING_MODEL_KEY",
+    })
     return config
 
 
