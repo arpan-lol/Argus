@@ -11,3 +11,4 @@ dist/
 !.env.example
 *.log
 data/
+.gstack/

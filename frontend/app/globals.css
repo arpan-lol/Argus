@@ -275,3 +275,25 @@ button:disabled { cursor:not-allowed; }
 .ce-map-modes button:hover { color:var(--ce-text); background:var(--ce-hover); }
 .ce-map-modes button[aria-pressed=true] { color:var(--ce-text); background:var(--ce-bg); box-shadow:0 1px 3px #00000014; font-weight:550; }
 @media(max-width:680px) { .ce-explorer-shell.is-expanded { inset:8px; width:calc(100vw - 16px); height:calc(100dvh - 16px); border-radius:10px; } .ce-explorer-shell.is-expanded .ce-explorer-heading { padding:12px; height:61px; } .ce-map-toolbar { padding:9px 13px; } .ce-explorer-heading .ce-configuration-button > span { display:none; } .ce-map-modes button { min-height:32px; padding:6px 13px; } }
+
+.ce-model-label { font-size: 10px; letter-spacing: .06em; color: var(--ce-muted); margin-left: auto; }
+.ce-chat-activity { margin: 12px 0 20px; color: var(--ce-muted); font-size: 12px; }
+.ce-chat-activity summary { display: flex; align-items: center; gap: 8px; cursor: pointer; width: fit-content; }
+.ce-chat-activity ol { padding: 8px 0 0 22px; }
+.ce-chat-activity li { padding: 5px 0; }
+.ce-chat-activity li small { display: block; margin-top: 3px; }
+.ce-answer-paragraph { margin: 18px 0; }
+.ce-answer-paragraph p { margin: 0; white-space: pre-wrap; line-height: 1.75; overflow-wrap: anywhere; }
+.ce-answer-citations { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+.ce-answer-gaps { margin-top: 24px; font-size: 13px; line-height: 1.7; }
+.ce-answer-gaps ul { padding-left: 20px; }
+.ce-answer-sources { margin-top: 20px; font-size: 12px; }
+.ce-answer-sources summary { cursor: pointer; padding: 8px 0; }
+.ce-answer-sources button { display: flex; gap: 10px; width: 100%; padding: 10px 0; text-align: left; background: transparent; border: 0; cursor: pointer; color: inherit; }
+.ce-answer-sources button small { display: block; color: var(--ce-muted); margin-top: 4px; }
+.ce-answer-sources button:hover strong { text-decoration: underline; }
+.ce-answer-meta { font-size: 11px; color: var(--ce-muted); margin-top: 20px; }
+.ce-comparison-scroll { max-width: 100%; overflow-x: auto; margin-top: 20px; }
+.ce-comparison-scroll table { border-collapse: collapse; font-size: 12px; min-width: 480px; }
+.ce-comparison-scroll td, .ce-comparison-scroll th { text-align: left; vertical-align: top; padding: 10px; border-bottom: 1px solid var(--ce-line); }
+.ce-chat-resume { display: flex; gap: 6px; align-items: center; padding: 8px 10px; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 6px; cursor: pointer; }
