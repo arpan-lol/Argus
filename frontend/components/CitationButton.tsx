@@ -2,7 +2,7 @@ import { FileText } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface CitationButtonProps {
-  citation: { chunkId: string; documentTitle: string; sectionTitle: string };
+  citation: { chunkId?: string; documentTitle: string; sectionTitle: string };
   index: number;
   onCitationClick: () => void;
   selected?: boolean;
