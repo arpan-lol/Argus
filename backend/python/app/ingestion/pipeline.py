@@ -207,6 +207,8 @@ class IngestionPipeline:
         if previous is not None:
             return previous
         attempts = job["configuration"]["retries"] if max_attempts is None else max_attempts
+        if attempts < 1:
+            raise ConfigurationRequired("Provider attempts must be positive")
         for attempt in range(attempts):
             try:
                 if stage not in {"embed", "entity_embed", "entity_embed_batch", "assertion_embed"}:
@@ -374,7 +376,8 @@ class IngestionPipeline:
                 mention_id = "mention:" + fingerprint([chunk["id"], entity["key"]])
                 if not self.item(job["id"], "resolve", mention_id):
                     raise ValueError("Entity resolution artifact missing")
-        return {"chunks": len(chunks), "assertions": assertions, "offsets": "exact_match", "semanticValidation": "LLM source grounding plus structural validation; scientific correctness not independently established"}
+        fallback_count = (self.artifact(job["id"], "extract") or {}).get("fallbackChunks", 0)
+        return {"chunks": len(chunks), "assertions": assertions, "offsets": "exact_match", "fallbackChunks": fallback_count, "semanticValidation": "Exact source locations and prepared vectors checked. Fallback chunks contain local mentions without connections; scientific correctness is not independently established." if fallback_count else "LLM source grounding plus structural validation; scientific correctness not independently established"}
 
     def stage_publish(self, job):
         from .publication import publish
