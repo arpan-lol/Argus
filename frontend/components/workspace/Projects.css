@@ -2,7 +2,7 @@
 .dark .argus-projects{--project-bg:#171918;--project-surface:#202421;--project-text:#edf0e9;--project-muted:#afb8aa;--project-line:#3c443b;--project-accent:#a2c3a6}
 .argus-projects button,.argus-projects a{cursor:pointer}
 .argus-projects button:disabled{cursor:wait;opacity:.55}
-.argus-projects :is(button,input):focus-visible{outline:2px solid var(--project-accent);outline-offset:4px}
+.argus-projects :is(button,input,textarea):focus-visible{outline:2px solid var(--project-accent);outline-offset:4px}
 .argus-projects ::selection{background:var(--project-accent);color:var(--project-bg)}
 .argus-projects-brand{display:flex;align-items:center;gap:10px;font-size:19px;font-weight:550}
 .argus-projects-content{max-width:1120px;margin:72px auto 40px}
@@ -19,15 +19,48 @@
 .argus-project-card-bottom{display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;font-size:11px;color:var(--project-muted);font-variant-numeric:tabular-nums}
 .argus-project-add{align-items:center;justify-content:center;gap:14px;background:transparent;border-style:dashed;color:var(--project-muted);font-size:14px}
 .argus-project-add:hover{background:var(--project-surface);color:var(--project-text)}
-.argus-project-create-heading{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:20px}
-.argus-project-create-heading h2{margin:0;font-size:16px}
-.argus-project-create-heading button{display:flex;padding:4px;background:transparent;border:0;color:var(--project-muted)}
-.argus-project-create label{font-size:11px;margin-bottom:7px}
-.argus-project-create input{min-width:0;width:100%;border:1px solid var(--project-line);border-radius:6px;padding:9px 10px;background:var(--project-bg);color:var(--project-text);font:inherit;font-size:12px;caret-color:var(--project-accent)}
-.argus-project-create input::placeholder{color:var(--project-muted)}
-.argus-project-create-submit{display:flex;align-items:center;justify-content:center;gap:6px;margin-top:auto;padding:10px;border:0;border-radius:6px;background:var(--project-accent);color:#252523;font-size:12px}
+.argus-project-modal{width:min(640px,calc(100vw - 32px));max-height:min(92dvh,900px);margin:auto;padding:0;border:1px solid var(--project-line);border-radius:16px;background:var(--project-bg);color:var(--project-text);box-shadow:0 24px 90px #0d171833;overflow:auto;scrollbar-width:thin;scrollbar-color:var(--project-muted) transparent}
+.argus-project-modal::backdrop{background:#111a18a6;backdrop-filter:blur(3px)}
+.argus-project-modal form{padding:30px}
+.argus-project-modal-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+.argus-project-modal-symbol{display:grid;place-items:center;width:42px;height:42px;border:1px solid var(--project-line);border-radius:11px;background:var(--project-surface);color:var(--project-accent)}
+.argus-project-modal-close{display:grid;place-items:center;width:36px;height:36px;border:0;border-radius:7px;background:transparent;color:var(--project-muted)}
+.argus-project-modal-close:hover,.argus-project-modal-file-list button:hover{background:var(--project-surface);color:var(--project-text)}
+.argus-project-modal-heading{margin-bottom:26px}
+.argus-project-modal-heading h2{margin:0 0 5px;font-size:25px;font-weight:550;letter-spacing:-.03em}
+.argus-project-modal-heading p{margin:0;font-size:13px;color:var(--project-muted);line-height:1.6}
+.argus-project-modal-field{margin-bottom:23px}
+.argus-project-modal-field label,.argus-project-modal-section-heading h3{display:block;margin:0 0 9px;font-size:12px;font-weight:600}
+.argus-project-modal-field label span,.argus-project-modal-section-heading h3 span{margin-left:5px;font-size:11px;font-weight:400;color:var(--project-muted)}
+.argus-project-modal-field input,.argus-project-modal-field textarea{box-sizing:border-box;display:block;width:100%;padding:11px 12px;border:1px solid var(--project-line);border-radius:8px;background:var(--project-surface);color:var(--project-text);font:inherit;font-size:13px;line-height:1.6;caret-color:var(--project-accent)}
+.argus-project-modal-field textarea{resize:vertical;min-height:88px}
+.argus-project-modal-field :is(input,textarea)::placeholder{color:var(--project-muted)}
+.argus-project-modal-field p{margin:0 0 11px;font-size:11px;line-height:1.6;color:var(--project-muted)}
+.argus-project-modal-section-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.argus-project-modal-section-heading>span{font-size:11px;color:var(--project-muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.argus-project-modal-pickers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.argus-project-modal-pickers button{display:flex;align-items:center;gap:12px;min-width:0;min-height:75px;padding:13px;border:1px dashed var(--project-line);border-radius:9px;background:var(--project-surface);color:var(--project-text);text-align:left}
+.argus-project-modal-pickers button:hover{border-color:var(--project-accent);background:var(--project-bg)}
+.argus-project-modal-pickers button>svg{flex:none;color:var(--project-accent)}
+.argus-project-modal-pickers button span{display:grid;gap:3px;min-width:0}
+.argus-project-modal-pickers strong{font-size:12px;font-weight:550}
+.argus-project-modal-pickers small{font-size:10px;color:var(--project-muted)}
+.argus-project-modal-file-list{list-style:none;padding:0;margin:12px 0 0;max-height:156px;overflow:auto}
+.argus-project-modal-file-list li{display:flex;align-items:center;gap:10px;min-height:34px;border-bottom:1px solid var(--project-line);font-size:11px}
+.argus-project-modal-file-list li>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.argus-project-modal-file-list small{font-size:10px;color:var(--project-muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.argus-project-modal-file-list button{display:grid;place-items:center;width:28px;height:28px;border:0;border-radius:5px;background:transparent;color:var(--project-muted)}
+.argus-project-modal-file-overflow,.argus-project-modal-local-note{margin:9px 0 0;font-size:11px;line-height:1.6;color:var(--project-muted)}
+.argus-project-modal-local-note{margin-top:13px}
+.argus-project-modal-error{margin:16px 0 0;color:#c86d64;font-size:12px;line-height:1.6}
+.argus-project-modal-footer{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:26px;padding-top:20px;border-top:1px solid var(--project-line)}
+.argus-project-modal-footer button{display:flex;align-items:center;justify-content:center;gap:8px;min-width:90px;min-height:40px;padding:9px 15px;border-radius:7px;font:inherit;font-size:12px}
+.argus-project-modal-cancel{border:1px solid var(--project-line);background:transparent;color:var(--project-text)}
+.argus-project-modal-cancel:hover{background:var(--project-surface)}
+.argus-project-modal-next{border:1px solid var(--project-accent);background:var(--project-accent);color:#252523}
+.argus-project-modal-next:hover:not(:disabled){filter:brightness(1.07)}
 .argus-projects-error{margin-bottom:20px;font-size:13px;line-height:1.7}
 .argus-projects-error button{border:0;background:transparent;text-decoration:underline;text-underline-offset:3px;color:var(--project-text);padding:6px 0}
 .argus-projects-loading{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--project-muted)}
-@media(max-width:520px){.argus-projects{padding:22px 18px}.argus-projects-content{margin-top:44px}.argus-projects-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.argus-project-card{padding:16px}.argus-project-card h2{font-size:16px}.argus-project-create{grid-column:1/-1;aspect-ratio:auto;min-height:240px}.argus-project-create-submit{margin-top:20px}.argus-project-card-bottom{font-size:10px}}
+@media(max-width:520px){.argus-projects{padding:22px 18px}.argus-projects-content{margin-top:44px}.argus-projects-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.argus-project-card{padding:16px}.argus-project-card h2{font-size:16px}.argus-project-card-bottom{font-size:10px}.argus-project-modal form{padding:22px}.argus-project-modal-pickers{grid-template-columns:1fr}.argus-project-modal-pickers button{min-height:62px}.argus-project-modal-section-heading{align-items:flex-start;flex-direction:column;gap:0}}
 @media(prefers-reduced-motion:reduce){.argus-projects *{transition:none!important}}
