@@ -13,9 +13,18 @@ logger = logging.getLogger('argus.local_models')
 
 def available_memory_bytes():
     try:
-        import psutil
-        return psutil.virtual_memory().available
-    except ImportError:
+        import os
+        if os.name == 'nt':
+            import ctypes
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [('length', ctypes.c_ulong), ('load', ctypes.c_ulong), *[(name, ctypes.c_ulonglong) for name in ('totalPhysical', 'availablePhysical', 'totalCommit', 'availableCommit', 'totalVirtual', 'availableVirtual', 'extended')]]
+            state = MemoryStatus()
+            state.length = ctypes.sizeof(state)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(state)):
+                raise OSError('Memory counters are unavailable')
+            return min(state.availablePhysical, state.availableCommit // 2)
+        return os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+    except (AttributeError, OSError, ValueError):
         return 1024 * 1024 * 1024
 
 
@@ -79,10 +88,14 @@ def model_lock(name):
 def load_model(name, config):
     configure_runtime(config)
     from gliner import GLiNER
+    from .relex_adapter import install
     try:
-        return GLiNER.from_pretrained(name, local_files_only=True)
+        with _compute_lock:
+            model = GLiNER.from_pretrained(name, local_files_only=True)
     except OSError:
-        return GLiNER.from_pretrained(name)
+        with _compute_lock:
+            model = GLiNER.from_pretrained(name)
+    return install(model)
 
 
 def relex(text, profile, config):
@@ -147,7 +160,7 @@ def relex_direct(texts, profile, config):
         expected = set(windows)
         for owner, output in enumerate(outputs):
             output['memoryWindowSplit'] = any((owner, window['start'], window['end']) not in expected for window in output['windows'])
-        return [{**output, 'entities': list(output['entities'].values()), 'relationships': list(output['relationships'].values())} for output in outputs]
+        return [{**output, 'entities': list(output['entities'].values()), 'relationships': list(output['relationships'].values()), 'localAdapter': 'deduplicated-spans-bounded-projection-1' if getattr(model.model, '_argus_bounded_spans', False) else None} for output in outputs]
 
 
 def ner_many(texts, types, config, stop_check=lambda: None):
