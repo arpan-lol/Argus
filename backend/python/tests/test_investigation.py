@@ -67,14 +67,31 @@ class InvestigationTest(TestCase):
         return Investigation(self.row, lambda *event: self.events.append(event), model_call=model, tool_call=tool)
 
     def test_greeting_finishes_without_retrieval(self):
-        model = mock.Mock(return_value=(call("finish_report", report()), {"total_tokens": 42}))
+        model = mock.Mock(return_value=({"role": "assistant", "content": json.dumps(report())}, {"total_tokens": 42}))
         tool = mock.Mock()
         state = self.runtime(model, tool).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "greeting"}})
         self.assertEqual(state["report"]["purpose"], "conversation")
         tool.assert_not_called()
+        self.assertEqual(model.call_count, 1)
+        self.assertIsNone(model.call_args.args[1])
         self.assertEqual(self.ledger.budget["reportedTokens"], 42)
 
+    def test_empty_project_answers_in_one_small_structured_call(self):
+        self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
+        self.row["configuration"]["workspaceDescription"] = "Materials research"
+        model = mock.Mock(return_value=({"role": "assistant", "content": json.dumps(report())}, {"total_tokens": 120}))
+        tool = mock.Mock()
+        state = self.runtime(model, tool).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "empty-project"}})
+        self.assertEqual(state["report"]["purpose"], "conversation")
+        self.assertEqual(model.call_count, 1)
+        messages, definitions = model.call_args.args
+        self.assertIsNone(definitions)
+        self.assertIn("Materials research", messages[0]["content"])
+        self.assertNotIn("rank_entities", json.dumps(messages))
+        tool.assert_not_called()
+
     def test_checkpoint_resume_keeps_sources_tools_and_budget(self):
+        self.row["request"]["query"] = "Find the published hello source"
         model = mock.Mock(side_effect=[(call("search_sources", {"query": "hello", "mode": "lexical"}), None), RuntimeError("interrupted")])
         tool = mock.Mock(return_value={"outcome": "answered", "items": [source()]})
         runtime = self.runtime(model, tool)
