@@ -12,6 +12,7 @@ import { ProcessingActivity } from '@/components/source-explorer/ProcessingActiv
 import { projectApi, projectRoot, type Project, type ProcessingEvent } from '@/lib/projects';
 import { normalizeSourceDocument } from '@/lib/ingestion-types';
 import { GraphMap, type MapNode } from '@/components/source-explorer/GraphMap';
+import { KnowledgeGraph } from '@/components/source-explorer/KnowledgeGraph';
 import { useSearchOptions } from '@/hooks/use-search-options';
 import { api, type DocumentSummary, type EvidenceDocument } from '@/lib/evidence-types';
 import { statusLabel, type IngestionJob } from '@/lib/ingestion-types';
@@ -44,6 +45,7 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [dark, setDark] = useState(false);
   const [mapMode, setMapMode] = useState<'network' | 'grouped'>('network');
+  const [graphView, setGraphView] = useState<'knowledge' | 'sources'>('knowledge');
   const [explorerExpanded, setExplorerExpanded] = useState(false);
   const [graphCompact, setGraphCompact] = useState(false);
   const [configurationOpen, setConfigurationOpen] = useState(false);
@@ -193,8 +195,8 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
       setSelectedId(chunkId || nextDocumentId);
     }
   };
-  const selectCitation = (source: ChatSource) => { graphPanel.current?.resize(65); setPipelineFocus(source); setDocumentId(source.documentId); setMapFocus({nodeId: source.chunkId || source.documentId, nonce: Date.now()}); };
-  const selectNode = (node: MapNode) => { if (node.documentId) focusSource(node.documentId, node.chunkId); setSelectedId(node.id); setSelectedNode(node); };
+  const selectCitation = (source: ChatSource) => { setGraphView('sources'); graphPanel.current?.resize(65); setPipelineFocus(source); setDocumentId(source.documentId); setMapFocus({nodeId: source.chunkId || source.documentId, nonce: Date.now()}); };
+  const selectNode = (node: MapNode) => { if (node.type === 'entity') { setSelectedNode(null); setGraphView('knowledge'); setMapFocus({nodeId: node.id, nonce: Date.now()}); return; } if (node.documentId) focusSource(node.documentId, node.chunkId); setSelectedId(node.id); setSelectedNode(node); };
   const showFiles = () => filePanel.current?.resize(85);
   const showGraph = () => graphPanel.current?.resize(70);
   const upload = () => { setUploadRequest(previous => previous + 1); };
@@ -316,12 +318,12 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
           <div className="ce-explorer-content">
             <ResizablePanelGroup direction="vertical" className="ce-source-panels" autoSaveId={`argus-source-split:${projectId}`}>
               <ResizablePanel ref={filePanel} defaultSize={45} minSize={15} className="ce-project-file-panel">
-                {project ? <ProjectSources project={project} uploadRequest={uploadRequest} refreshVersion={dataVersion} focus={pipelineFocus} documentId={documentId} chunkId={selectedNode?.type === 'chunk' ? selectedNode.id : undefined} onProject={setProject} onJobsChange={setWorkspaceJobs} onUploaded={() => setDataVersion(version => version + 1)} onBackToGraph={() => { setDocumentId(undefined); setPipelineFocus(null); graphPanel.current?.resize(55); }} onFocus={(id, chunkId) => { focusSource(id, chunkId); setMapFocus({nodeId: chunkId || id, nonce: Date.now()}); }} /> : !projectError && <div className="ce-file-empty" role="status">Loading workspace…</div>}
+                {project ? <ProjectSources project={project} uploadRequest={uploadRequest} refreshVersion={dataVersion} focus={pipelineFocus} documentId={documentId} chunkId={selectedNode?.type === 'chunk' ? selectedNode.id : undefined} onProject={setProject} onJobsChange={setWorkspaceJobs} onUploaded={() => setDataVersion(version => version + 1)} onBackToGraph={() => { setDocumentId(undefined); setPipelineFocus(null); setGraphView('knowledge'); graphPanel.current?.resize(55); }} onFocus={(id, chunkId) => { focusSource(id, chunkId); setGraphView('sources'); setMapFocus({nodeId: chunkId || id, nonce: Date.now()}); }} /> : !projectError && <div className="ce-file-empty" role="status">Loading workspace…</div>}
               </ResizablePanel>
               <ResizableHandle withHandle className="ce-source-resize" aria-label="Resize files and graph" />
               <ResizablePanel ref={graphPanel} defaultSize={55} minSize={10} onResize={size => setGraphCompact(size < 20)} className={`ce-project-graph-panel ${graphCompact ? 'is-compact' : ''}`}>
-              <div className="ce-map-toolbar"><h2>Graph</h2><div className="ce-map-modes" role="group" aria-label="Graph layout"><button aria-pressed={mapMode === 'network'} onClick={() => { setMapMode('network'); localStorage.setItem('argus-map-mode', 'network'); }}>Network</button><button aria-pressed={mapMode === 'grouped'} onClick={() => { setMapMode('grouped'); localStorage.setItem('argus-map-mode', 'grouped'); }}>Trees</button></div><button className="ce-icon" onClick={() => setExplorerExpanded(value => !value)} aria-label={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'} title={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'}>{explorerExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button></div>
-              <div className="ce-project-graph-content"><GraphMap apiRoot={root} refreshToken={graphVersion} mode={mapMode} focus={mapFocus} onSelect={selectNode} onFocus={target => { if (target.documentId) focusSource(target.documentId, target.chunkId); }} />{chatConfig?.coverage.publishedDocuments === 0 && <div className="ce-project-graph-empty"><p>Your graph starts here.<br />Connections appear as source files finish ingestion.</p></div>}</div>
+              <div className="ce-map-toolbar"><div className="ce-map-modes" role="group" aria-label="Graph view"><button aria-pressed={graphView === 'knowledge'} onClick={() => setGraphView('knowledge')}>Knowledge graph</button><button aria-pressed={graphView === 'sources'} onClick={() => setGraphView('sources')}>Source graph</button></div>{graphView === 'sources' && <div className="ce-map-modes" role="group" aria-label="Source graph layout"><button aria-pressed={mapMode === 'network'} onClick={() => { setMapMode('network'); localStorage.setItem('argus-map-mode', 'network'); }}>Network</button><button aria-pressed={mapMode === 'grouped'} onClick={() => { setMapMode('grouped'); localStorage.setItem('argus-map-mode', 'grouped'); }}>Trees</button></div>}<button className="ce-icon" onClick={() => setExplorerExpanded(value => !value)} aria-label={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'} title={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'}>{explorerExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button></div>
+              <div className="ce-project-graph-content">{graphView === 'knowledge' ? <KnowledgeGraph apiRoot={root} refreshToken={graphVersion} focus={mapFocus} onSource={target => { setGraphView('sources'); setMapFocus({nodeId: target.nodeId, nonce: Date.now()}); graphPanel.current?.resize(75); }} /> : <GraphMap apiRoot={root} refreshToken={graphVersion} mode={mapMode} focus={mapFocus} onSelect={selectNode} onFocus={target => { if (target.documentId) focusSource(target.documentId, target.chunkId); }} />}{chatConfig?.coverage.publishedDocuments === 0 && <div className="ce-project-graph-empty"><p>Your graph starts here.<br />Connections appear as source files finish ingestion.</p></div>}</div>
               </ResizablePanel>
             </ResizablePanelGroup>
           </div>

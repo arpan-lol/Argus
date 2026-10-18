@@ -28,7 +28,7 @@ type Props = {
   onFocus?: (focus: { documentId?: string; sectionId?: string; chunkId?: string }) => void;
 };
 
-const names = { group: 'Source group', document: 'File', section: 'Heading', chunk: 'Chunk', entity: 'Shared name' };
+const names = { group: 'Source group', document: 'Document', section: 'Section', chunk: 'Chunk', entity: 'Entity' };
 const colors = { group: '#b99540', document: '#c6a34f', section: '#869ab2', chunk: '#5b9b88', entity: '#a187b5' };
 const empty: MapView = { nodes: [], edges: [], level: 'overview' };
 const mergeViews = (previous: MapView, next: MapView): MapView => {
@@ -45,7 +45,7 @@ const boundedView = (view: MapView, camera: Camera, dimensions: { width: number;
   const nodes = visible.slice(0, nodeLimit);
   const ids = new Set(nodes.map(node => node.id));
   const edges = view.edges.filter(edge => ids.has(edge.source) && ids.has(edge.target)).sort((a, b) => {
-    const score = (edge: MapEdge) => (edge.type === 'RELATES' ? 0 : edge.type === 'SHARES_TERM' || edge.derived ? 2 : 1) + (keep.has(edge.source) || keep.has(edge.target) ? -1 : 0);
+    const score = (edge: MapEdge) => (edge.type === 'RELATES' ? 0 : edge.type === 'SHARES_ENTITY' || edge.derived ? 2 : 1) + (keep.has(edge.source) || keep.has(edge.target) ? -1 : 0);
     return score(a) - score(b);
   });
   const edgeLimit = Math.max(900, Math.min(3600, nodeLimit * 2));
@@ -68,9 +68,9 @@ const edgeMeaning = (edge: MapEdge) => {
   const meanings: Record<string, [string, string]> = {
     HAS_SECTION: ['Contains heading', 'This heading belongs to the connected document.'],
     HAS_CHUNK: ['Contains chunk', 'This passage belongs to the connected heading.'],
-    NEXT_CHUNK: ['Next chunk', 'The arrow follows reading order within the same source section.'],
-    MENTIONS: ['Mentions', 'This passage mentions the connected name. This does not establish a scientific relationship.'],
-    SHARES_TERM: ['Shared name · summarized', labels ? `Shared mentions: ${labels}. This is a navigation summary, not agreement between sources.` : 'A summary of a shared-mention path, not agreement between sources.'],
+    NEXT_CHUNK: ['Next chunk', 'The arrow follows reading order within the same source document.'],
+    MENTIONS: ['Mentions', 'This passage mentions the connected entity. The edge records a source occurrence.'],
+    SHARES_ENTITY: ['Shared entity · derived', labels ? `Both documents reference these entities: ${labels}. Derived document summary.` : 'Derived summary of documents referencing common entities.'],
   };
   return meanings[edge.type] || ['Source connection', 'A recorded relationship between these sources.'];
 };
@@ -148,10 +148,10 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     const c = camera.current;
     const dark = window.document.documentElement.classList.contains('dark');
     context.clearRect(0, 0, width, height);
-    context.fillStyle = dark ? '#171918' : '#fafbf8';
+    context.fillStyle = dark ? '#171918' : '#f4efe6';
     context.fillRect(0, 0, width, height);
     const step = 28;
-    context.fillStyle = dark ? '#282c29' : '#e2e7de';
+    context.fillStyle = dark ? '#282c29' : '#e7dfd3';
     for (let x = ((-c.x * c.zoom) % step + step) % step; x < width; x += step) {
       for (let y = ((-c.y * c.zoom) % step + step) % step; y < height; y += step) context.fillRect(x, y, 1, 1);
     }
@@ -186,7 +186,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       const a = projected.get(edge.source), b = projected.get(edge.target);
       return !!a && !!b && (onScreen(a) || pathIds.has(edge.source)) && (onScreen(b) || pathIds.has(edge.target));
     });
-    const priority = (edge: MapEdge) => edge.type === 'MENTIONS' && pathIds.has(edge.source) && pathIds.has(edge.target) ? 0 : forcedIds.has(edge.source) && forcedIds.has(edge.target) ? 1 : edge.type === 'RELATES' ? 2 : edge.type === 'SHARES_TERM' || edge.derived ? 4 : 3;
+    const priority = (edge: MapEdge) => edge.type === 'MENTIONS' && pathIds.has(edge.source) && pathIds.has(edge.target) ? 0 : forcedIds.has(edge.source) && forcedIds.has(edge.target) ? 1 : edge.type === 'RELATES' ? 2 : edge.type === 'SHARES_ENTITY' || edge.derived ? 4 : 3;
     eligibleEdges.sort((a, b) => priority(a) - priority(b));
     const edgeLimit = Math.max(900, Math.min(3600, renderLimit * 2));
     const atRenderLimit = candidates.length > renderLimit || eligibleEdges.length > edgeLimit;
@@ -201,10 +201,11 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       const pathEdge = edge.type === 'MENTIONS' && (path ? pathIds.has(edge.source) && pathIds.has(edge.target) : linkIds.has(edge.source) && linkIds.has(edge.target));
       const active = pathEdge || edge.id === hoveredEdge.current || [path ? null : selected.current, hovered.current].some(id => id && (edge.source === id || edge.target === id));
       const branch = edge.type === 'HAS_SECTION' || edge.type === 'HAS_CHUNK';
-      context.strokeStyle = active ? (dark ? '#dfc374' : '#88702c') : branch ? (dark ? '#80968a' : '#7c9284') : (dark ? '#64796b' : '#92a497');
+      context.strokeStyle = active ? (dark ? '#dfc374' : '#88702c') : branch ? (dark ? '#9aa79e' : '#c4bdae') : (dark ? '#a5afa8' : '#cbc4b8');
       context.lineWidth = pathEdge ? 2.3 : active ? 1.9 : desired === 'overview' ? .6 : branch ? 1.25 : 1;
-      context.globalAlpha = (desired === 'overview' && !active ? .68 : 1) * opacity(edge.id);
-      context.setLineDash(edge.derived || edge.type === 'SHARES_TERM' || edge.type === 'SHARED_MENTION' ? [3, 4] : []);
+      const derived = edge.derived || edge.type === 'SHARES_ENTITY' || edge.type === 'SHARED_MENTION';
+      context.globalAlpha = (active ? 1 : derived ? (dark ? .34 : .34) : branch ? (dark ? .4 : .4) : (dark ? .38 : .38)) * opacity(edge.id);
+      context.setLineDash(edge.derived || edge.type === 'SHARES_ENTITY' || edge.type === 'SHARED_MENTION' ? [3, 4] : []);
       context.beginPath(); context.moveTo(a.x, a.y);
       if (branch) {
         const junction = a.y + (b.y - a.y) * .52;
@@ -252,20 +253,18 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
         continue;
       }
       context.beginPath(); context.arc(x, y, radius + (active ? 4 : 0), 0, Math.PI * 2);
-      context.fillStyle = active ? (dark ? '#655a39' : '#f0e8c9') : (dark ? '#202723' : '#fff'); context.fill();
-      context.strokeStyle = colors[node.type]; context.lineWidth = active ? 2 : 1.2; context.stroke();
+      context.fillStyle = active ? (dark ? '#655a39' : '#fffaf0') : colors[node.type]; context.fill();
+      context.strokeStyle = active ? (dark ? '#f1db9b' : '#594a32') : (dark ? '#171918' : '#fffaf0'); context.lineWidth = active ? 2 : 1.5; context.stroke();
       if (group) {
         context.font = `600 ${radius < 12 ? 9 : 11}px sans-serif`; context.textAlign = 'center'; context.textBaseline = 'middle';
         context.fillStyle = dark ? '#e8d49e' : '#725d26'; context.fillText(String(node.count || ''), x, y);
-      } else if (!coarse) {
-        context.beginPath(); context.arc(x, y, Math.max(2, radius - 3), 0, Math.PI * 2); context.fillStyle = colors[node.type]; context.fill();
       }
       const showLabel = path ? pathIds.has(node.id) || node.id === hovered.current : active || (linkIds.has(node.id) && node.type !== 'section') || (node.type === 'document' && (c.zoom > .12 || projected.size < 30)) || (node.type === 'entity' && projected.size < 100);
       if (showLabel) {
         const label = clip(node.label || node.preview || names[node.type], node.type === 'group' ? 20 : node.type === 'document' && c.zoom < .28 ? 14 : 31);
         context.font = `${active ? 600 : 400} 11px sans-serif`;
         const labelWidth = context.measureText(label).width + 12;
-        context.fillStyle = dark ? '#1b211eed' : '#fafbf8ed';
+        context.fillStyle = dark ? '#1b211eed' : '#fffaf0ed';
         context.fillRect(x - labelWidth / 2, y + radius + 5, labelWidth, 20);
         context.fillStyle = dark ? '#d8dfd9' : '#4a564e'; context.textAlign = 'center'; context.textBaseline = 'middle';
         context.fillText(label, x, y + radius + 15);
@@ -356,7 +355,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       const { width, height } = dimensions.current;
       const [detail] = await Promise.all([
         mapRequest<MapView>(`/view?${viewQuery(target, width, height)}`),
-        node.type === 'chunk' ? loadConnections(node.id) : Promise.resolve(),
+        node.type === 'chunk' || node.type === 'entity' ? loadConnections(node.id) : Promise.resolve(),
       ]);
       if (disposed.current || sequence !== navigationSequence.current) return;
       current.current = boundedView(mergeViews(current.current, detail), target, dimensions.current, new Set([node.id]));
@@ -388,7 +387,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     if (node.type === 'group') { void fly(node.id); return; }
     if (node.type === 'document' && camera.current.zoom < .45) { void fly(node.id); return; }
     selected.current = node.id;
-    if (node.type === 'chunk') void loadConnections(node.id);
+    if (node.type === 'chunk' || node.type === 'entity') void loadConnections(node.id);
     callbacks.current.onSelect(node); draw();
   };
 
@@ -581,17 +580,17 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
         if (event.key === 'Home') fit();
         if (event.key === 'Enter') { const node = [...current.current.nodes, ...(neighborhood.current?.nodes || [])].find(item => item.id === selected.current); if (node) activate(node); }
       }} />
-    <div className={styles.legend}><span className={styles.level}>{zoomLabel}</span><span><i style={{ background: colors.document }} />Files</span><span><i style={{ background: colors.chunk }} />Chunks</span><span><i style={{ background: colors.entity }} />Shared names</span></div>
+    <div className={styles.legend}><span className={styles.level}>{zoomLabel}</span><span><i style={{ background: colors.document }} />Documents</span><span><i style={{ background: colors.chunk }} />Chunks</span><span><i style={{ background: colors.entity }} />Entities</span></div>
     {tooltip && <div className={styles.tooltip} style={{ left: tooltip.x, top: tooltip.y }}><small>{names[tooltip.node.type]}</small><strong>{clip(tooltip.node.preview || tooltip.node.label, 100)}</strong></div>}
     {edgeTooltip && <div className={styles.tooltip} role="tooltip" style={{ left: edgeTooltip.x, top: edgeTooltip.y }}><strong>{edgeMeaning(edgeTooltip.edge)[0]}</strong><p>{edgeMeaning(edgeTooltip.edge)[1]}</p></div>}
     {loading && <div className={styles.notice} role="status"><Loader2 size={15} className={styles.spin} />Opening source map…</div>}
     {navigatingTo && !loading && <div className={styles.navigationStatus} role="status"><Loader2 size={14} className={styles.spin} />Loading destination connections…</div>}
     {error && <div className={styles.error} role="alert"><span>{error}</span><button onClick={() => { setError(null); setReload(value => value + 1); }}><RotateCcw size={13} />Retry</button></div>}
     {(truncated || renderTruncated) && !error && !connectionsOpen && <div className={styles.limit}>Zoom in to reveal more sources</div>}
-    {summaryTruncated && !error && !connectionsOpen && <div className={`${styles.limit} ${truncated || renderTruncated ? styles.limitSecondary : ''}`}>Some shared-name links are hidden in this summary</div>}
+    {summaryTruncated && !error && !connectionsOpen && <div className={`${styles.limit} ${truncated || renderTruncated ? styles.limitSecondary : ''}`}>Some derived shared-entity links are hidden in this overview</div>}
     {connectionsOpen && <ConnectionPaths paths={connections?.paths || []} loading={connectionsLoading} error={connectionsError} truncated={connections?.truncated} activeTargetChunkId={activeConnection?.targetChunkId} onFollow={followConnection} onClose={clearConnections} />}
     <div className={styles.controls}><button aria-label="Zoom in" onClick={() => zoomBy(1.7)}><Plus size={16} /></button><button aria-label="Zoom out" onClick={() => zoomBy(1 / 1.7)}><Minus size={16} /></button>{onExpand && <button aria-label={expanded ? 'Collapse Source Explorer' : 'Expand Source Explorer'} onClick={onExpand}>{expanded ? <Minimize2 size={15} /> : <Expand size={15} />}</button>}<button aria-label="Show whole source map" onClick={fit}><LocateFixed size={15} /></button><button aria-label="About the source map" aria-expanded={help} onClick={() => setHelp(value => !value)}><HelpCircle size={16} /></button></div>
-    {help && <div className={styles.help}><strong>Your sources, connected</strong><p>{mode === 'grouped' ? 'Groups organize documents for navigation. Zoom in for document trees; group membership is not a topic classification.' : 'Each point is a document. Their arrangement follows shared names; it is not a topic classification.'}</p><dl className={styles.edgeMeanings}><div><dt>Contains</dt><dd>Document → heading → chunk.</dd></div><div><dt>Next chunk</dt><dd>Reading order within a section.</dd></div><div><dt>Mentions</dt><dd>A chunk names this entity.</dd></div><div><dt>Shared name · dashed</dt><dd>A summarized shared-mention path.</dd></div></dl><p>These links describe structure and mentions. They do not establish agreement, contradiction, or a scientific relationship.</p></div>}
+    {help && <div className={styles.help}><strong>Your sources, connected</strong><p>{mode === 'grouped' ? 'Groups organize documents for navigation. Zoom in for document trees; group membership is not a topic classification.' : 'Each point is a document. Positions remain stable as documents arrive. Dashed edges summarize common entities.'}</p><dl className={styles.edgeMeanings}><div><dt>HAS_SECTION / HAS_CHUNK</dt><dd>Document → Section → Chunk.</dd></div><div><dt>NEXT_CHUNK</dt><dd>Reading order within a document.</dd></div><div><dt>MENTIONS</dt><dd>A chunk contains a mention of this entity.</dd></div><div><dt>Shared entity · derived</dt><dd>Both documents mention a common entity.</dd></div></dl><p>Containment and mention edges describe source structure. RELATES edges show extracted semantic predicates; inspect their source and status.</p></div>}
     <div className={styles.keyboard}><label htmlFor="map-node-keyboard">Navigate visible sources</label><select id="map-node-keyboard" value="" onChange={event => { const node = [...current.current.nodes, ...(neighborhood.current?.nodes || [])].find(item => item.id === event.target.value); if (node) activate(node); }}><option value="">Choose a visible source</option>{[...new Map([...accessible, ...(connections?.nodes || [])].map(node => [node.id, node])).values()].map(node => <option key={node.id} value={node.id}>{names[node.type]}: {clip(node.label, 70)}</option>)}</select></div>
   </div>;
 }
