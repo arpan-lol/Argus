@@ -171,7 +171,8 @@ def merge_labels(settings, additions, config):
     for key, maximum in (("entityTypes", config["profileEntityCap"]), ("relationshipTypes", config["profileRelationshipCap"])):
         settings[key] = list(dict.fromkeys([*settings[key], *additions[key]]))[:maximum]
     settings["rationale"] = additions.get("rationale") or settings["rationale"]
-    settings['codeSourceIds'] = list(dict.fromkeys([*settings.get('codeSourceIds', []), *additions.get('codeSourceIds', [])]))
+    code_category = bool(set(config.get('categories', [])) & {'code_repository', 'codebase', 'code_base'})
+    settings['codeSourceIds'] = list(dict.fromkeys([*settings.get('codeSourceIds', []), *additions.get('codeSourceIds', [])])) if code_category else []
     return settings
 
 

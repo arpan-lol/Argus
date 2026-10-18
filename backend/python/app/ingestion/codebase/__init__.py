@@ -4,7 +4,10 @@ from pathlib import PurePosixPath
 def selected(job, profile=None):
     from ..parser_routing import SOURCE_SUFFIXES
     categories = set(job['configuration'].get('categories', []))
-    return bool(job['configuration'].get('codeAgentDeliveryRunId')) or bool(categories & {'code_repository', 'codebase', 'code_base'}) or PurePosixPath(job['filename']).suffix.lower() in SOURCE_SUFFIXES or job['source_id'] in (profile or {}).get('codeSourceIds', [])
+    code_category = bool(categories & {'code_repository', 'codebase', 'code_base'})
+    recognized_source = PurePosixPath(job['filename']).suffix.lower() in SOURCE_SUFFIXES
+    discovered_source = code_category and job['source_id'] in (profile or {}).get('codeSourceIds', [])
+    return bool(job['configuration'].get('codeAgentDeliveryRunId')) or code_category or recognized_source or discovered_source
 
 
 def configure(job):
