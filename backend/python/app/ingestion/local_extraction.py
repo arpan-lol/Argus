@@ -61,12 +61,19 @@ def extract_local(pipeline, job):
     chunks = pipeline.artifact(job['id'], 'chunk')['chunks']
     if document.get("metadata", {}).get("parser") == "stix_native_json":
         known_objects = {block["structured"]["nativeRecordId"]: block["structured"]["nativeRecord"] for block in document["blocks"] if block.get("structured", {}).get("nativeRecord")}
+        native_warnings = []
+        unpublished_relationships = 0
         for chunk in chunks:
-            output = pipeline.retry_call(job, "extract", chunk["id"], lambda c=chunk: {**extract_native_chunk(c, document, known_objects, chunks), "metadata": {"method": "stix_native", "windows": 0, "llmVerified": False, "fallback": False, "extractionLlmCalls": 0, "scoreMeaning": "Native STIX object identifiers and relationship references; no model score"}}, max_attempts=1)
+            def native_operation(c=chunk):
+                native = extract_native_chunk(c, document, known_objects, chunks)
+                return {"entities": native["entities"], "relationships": native["relationships"], "metadata": {"method": "stix_native", "windows": 0, "llmVerified": False, "fallback": False, "extractionLlmCalls": 0, "scoreMeaning": "Native STIX object identifiers and relationship references; no model score", "nativeWarnings": native["warnings"], "unpublishedRelationships": native["unpublishedRelationships"]}}
+            output = pipeline.retry_call(job, "extract", chunk["id"], native_operation, max_attempts=1)
             pipeline.validate_extraction(chunk, output)
+            native_warnings.extend(output.get("metadata", {}).get("nativeWarnings", []))
+            unpublished_relationships += output.get("metadata", {}).get("unpublishedRelationships", 0)
             for key in counts:
                 counts[key] += len(output[key])
-        return {**counts, "quality": "native_structured", "method": "stix_native", "extractionLlmCalls": 0, "fallbackChunks": 0, "warnings": document.get("metadata", {}).get("warnings", []), "nativeRecordCount": document.get("metadata", {}).get("nativeRecordCount", 0), "danglingReferenceCount": document.get("metadata", {}).get("danglingReferenceCount", 0)}
+        return {**counts, "quality": "native_structured", "method": "stix_native", "extractionLlmCalls": 0, "fallbackChunks": 0, "warnings": [*document.get("metadata", {}).get("warnings", []), *native_warnings], "unpublishedRelationships": unpublished_relationships, "nativeRecordCount": document.get("metadata", {}).get("nativeRecordCount", 0), "danglingReferenceCount": document.get("metadata", {}).get("danglingReferenceCount", 0)}
     for first in range(0, len(chunks), 16):
         batch = chunks[first:first + 16]
         pending = [chunk for chunk in batch if pipeline.item(job['id'], 'extract', chunk['id']) is None]

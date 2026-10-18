@@ -195,18 +195,24 @@ def extract_native_chunk(chunk, document, known_objects, all_chunks):
 
     entities = []
     relationships = []
+    warnings = []
+    unpublished_relationships = 0
+
+    def owners_for_field(block, field):
+        start = block["startOffset"] + field["start"]
+        end = block["startOffset"] + field["end"]
+        return [candidate for candidate in all_chunks if candidate["startOffset"] <= start and end <= candidate["endOffset"]]
+
+    def block_owner(block):
+        owners = [candidate for candidate in all_chunks if candidate["startOffset"] <= block["startOffset"] < candidate["endOffset"]]
+        return min(owners, key=lambda candidate: candidate["ordinal"]) if owners else None
+
     for block in document["blocks"]:
         structured = block.get("structured") or {}
         obj = structured.get("nativeRecord")
-        if not obj or block["startOffset"] < chunk["startOffset"] or block["startOffset"] >= chunk["endOffset"]:
+        if not obj or block["startOffset"] >= chunk["endOffset"] or block["endOffset"] <= chunk["startOffset"]:
             continue
-        candidates = [candidate for candidate in all_chunks if candidate["startOffset"] <= block["startOffset"] and candidate["endOffset"] >= block["endOffset"]]
-        if not candidates:
-            raise ValueError("STIX record exceeds one chunk; exact native record offsets cannot be preserved")
-        if chunk["id"] != min(candidates, key=lambda candidate: candidate["ordinal"])["id"]:
-            continue
-        local_base = block["startOffset"] - chunk["startOffset"]
-        raw = chunk["text"][local_base:local_base + block["endOffset"] - block["startOffset"]]
+        raw = document["text"][block["startOffset"]:block["endOffset"]]
         fields = string_fields(raw)
         by_key = {}
         for field in fields:
@@ -215,28 +221,42 @@ def extract_native_chunk(chunk, document, known_objects, all_chunks):
         def field_value(key, expected=None):
             return next((field for field in by_key.get(key, []) if expected is None or field["value"] == expected), None)
 
-        def append_entity(identifier, name, entity_type, description, field):
+        def append_entity(identifier, name, entity_type, description, field, source_record=None):
             if field is None or not isinstance(name, str) or not name.strip():
                 return None
-            start, end = local_base + field["start"], local_base + field["end"]
+            source_record = obj if source_record is None else source_record
+            start = block["startOffset"] + field["start"] - chunk["startOffset"]
+            end = block["startOffset"] + field["end"] - chunk["startOffset"]
+            if start < 0 or end > len(chunk["text"]) or chunk["text"][start:end] != field["quote"]:
+                return None
             key = "native_" + str(len(entities))
             span = source_span(chunk, start, end)
-            entities.append({"key": key, "name": name, "entity_type": entity_type, "description": description or "", "quote": chunk["text"][start:end], "sourceSpan": span, "sourceSpans": [span], "sourceSpanStatus": "exact", "extractionMethod": "stix_native", "llmVerified": False, "nativeResolverKey": identifier, "nativeFormat": "stix"})
+            revoked = source_record.get("revoked") is True
+            deprecated = source_record.get("x_mitre_deprecated") is True or source_record.get("x_deprecated") is True
+            state = "revoked" if revoked else "deprecated" if deprecated else "active"
+            entities.append({"key": key, "name": name, "entity_type": entity_type, "description": description or "", "quote": chunk["text"][start:end], "sourceSpan": span, "sourceSpans": [span], "sourceSpanStatus": "exact", "extractionMethod": "stix_native", "llmVerified": False, "nativeResolverKey": identifier, "nativeFormat": "stix", "nativeState": state, "revoked": revoked, "deprecated": deprecated, "sourceContext": {"nativeFormat": "stix", "revoked": revoked, "deprecated": deprecated, "nativeState": state}})
             return key
 
         if obj.get("type") != "relationship":
             identifier = obj["id"]
             name = obj.get("name") or obj.get("id")
-            field = field_value("name", name) if obj.get("name") else field_value("id", identifier)
-            append_entity(identifier, name, "stix_" + obj["type"], obj.get("description"), field)
+            name_field = field_value("name", name) if obj.get("name") else None
+            id_field = field_value("id", identifier)
+            name_owners = owners_for_field(block, name_field) if name_field else []
+            field = name_field if name_owners else id_field
+            candidates = name_owners if name_owners else owners_for_field(block, id_field) if id_field else []
+            if candidates and chunk["id"] == min(candidates, key=lambda candidate: candidate["ordinal"])["id"]:
+                append_entity(identifier, name, "stix_" + obj["type"], obj.get("description"), field)
             continue
 
         source_ref = obj.get("source_ref")
         target_ref = obj.get("target_ref")
         relationship_type = obj.get("relationship_type")
-        if not all(isinstance(value, str) for value in (source_ref, target_ref, relationship_type)):
-            continue
-        if _is_stix_id(source_ref) is None or _is_stix_id(target_ref) is None:
+        if not all(isinstance(value, str) for value in (source_ref, target_ref, relationship_type)) or _is_stix_id(source_ref) is None or _is_stix_id(target_ref) is None:
+            owner = block_owner(block)
+            if owner and chunk["id"] == owner["id"]:
+                warnings.append({"recordId": obj.get("id"), "kind": "malformed_relationship_fields"})
+                unpublished_relationships += 1
             continue
         source_object = known_objects.get(source_ref, {})
         target_object = known_objects.get(target_ref, {})
@@ -244,16 +264,46 @@ def extract_native_chunk(chunk, document, known_objects, all_chunks):
         target_field = field_value("target_ref", target_ref)
         type_field = field_value("relationship_type", relationship_type)
         if not source_field or not target_field or not type_field:
+            owner = block_owner(block)
+            if owner and chunk["id"] == owner["id"]:
+                warnings.append({"recordId": obj.get("id"), "kind": "relationship_fields_not_found"})
+                unpublished_relationships += 1
             continue
-        subject = append_entity(source_ref, source_object.get("name") or source_ref, native_type(source_ref, known_objects), source_object.get("description"), source_field)
-        target = append_entity(target_ref, target_object.get("name") or target_ref, native_type(target_ref, known_objects), target_object.get("description"), target_field)
+        field_owners = [owners_for_field(block, field) for field in (source_field, target_field, type_field)]
+        common = {candidate["id"]: candidate for candidate in field_owners[0]}
+        for owners in field_owners[1:]:
+            common = {identifier: candidate for identifier, candidate in common.items() if any(owner["id"] == identifier for owner in owners)}
+        if not common:
+            owner = block_owner(block)
+            if owner and chunk["id"] == owner["id"]:
+                warnings.append({"recordId": obj.get("id"), "kind": "relationship_fields_split_across_chunks"})
+                unpublished_relationships += 1
+            continue
+        relation_owner = min(common.values(), key=lambda candidate: candidate["ordinal"])
+        if chunk["id"] != relation_owner["id"]:
+            continue
+        subject = append_entity(source_ref, source_object.get("name") or source_ref, native_type(source_ref, known_objects), source_object.get("description"), source_field, source_object)
+        target = append_entity(target_ref, target_object.get("name") or target_ref, native_type(target_ref, known_objects), target_object.get("description"), target_field, target_object)
         if not subject or not target:
+            warnings.append({"recordId": obj.get("id"), "kind": "relationship_endpoint_offset_mismatch"})
+            unpublished_relationships += 1
             continue
         first = min(source_field["start"], target_field["start"], type_field["start"])
         last = max(source_field["end"], target_field["end"], type_field["end"])
-        start, end = local_base + first, local_base + last
+        start = block["startOffset"] + first - chunk["startOffset"]
+        end = block["startOffset"] + last - chunk["startOffset"]
+        if start < 0 or end > len(chunk["text"]) or end <= start:
+            warnings.append({"recordId": obj.get("id"), "kind": "relationship_quote_offset_mismatch"})
+            unpublished_relationships += 1
+            continue
         quote = chunk["text"][start:end]
         span = source_span(chunk, start, end)
         dangling = source_ref not in known_objects or target_ref not in known_objects
-        relationships.append({"subject": subject, "predicate": relationship_type, "object": target, "quote": quote, "conditions": [], "polarity": "affirmed", "polarityStatus": "source_structured", "qualifierStatus": "source_structured", "traversalStatus": "source_structured", "confidence": None, "sourceSpan": span, "sourceSpans": [span], "sourceSpanStatus": "exact", "extractionMethod": "stix_native", "llmVerified": False, "referenceStatus": "dangling_bundle_reference" if dangling else "resolved_in_bundle"})
-    return {"entities": entities, "relationships": relationships}
+        revoked = obj.get("revoked") is True
+        deprecated = obj.get("x_mitre_deprecated") is True or obj.get("x_deprecated") is True
+        endpoint_revoked = source_object.get("revoked") is True or target_object.get("revoked") is True
+        endpoint_deprecated = source_object.get("x_mitre_deprecated") is True or source_object.get("x_deprecated") is True or target_object.get("x_mitre_deprecated") is True or target_object.get("x_deprecated") is True
+        state = "revoked" if revoked else "deprecated" if deprecated else "active"
+        traversal_status = "revoked" if revoked or endpoint_revoked else "deprecated" if deprecated or endpoint_deprecated else "source_structured"
+        relationships.append({"subject": subject, "predicate": relationship_type, "object": target, "quote": quote, "conditions": [], "polarity": "affirmed", "polarityStatus": "source_structured", "qualifierStatus": "source_structured", "traversalStatus": traversal_status, "confidence": None, "sourceSpan": span, "sourceSpans": [span], "sourceSpanStatus": "exact", "extractionMethod": "stix_native", "llmVerified": False, "referenceStatus": "dangling_bundle_reference" if dangling else "resolved_in_bundle", "revoked": revoked, "deprecated": deprecated, "endpointRevoked": endpoint_revoked, "endpointDeprecated": endpoint_deprecated, "nativeState": state, "sourceContext": {"nativeFormat": "stix", "revoked": revoked, "deprecated": deprecated, "endpointRevoked": endpoint_revoked, "endpointDeprecated": endpoint_deprecated, "nativeState": state, "traversalStatus": traversal_status}})
+    return {"entities": entities, "relationships": relationships, "warnings": warnings, "unpublishedRelationships": unpublished_relationships}
