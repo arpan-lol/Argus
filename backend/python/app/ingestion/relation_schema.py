@@ -39,6 +39,30 @@ _CONTRACTS = {
         "communicates_with": ({"asset", "indicator"}, {"asset", "indicator"}),
         "indicates": ({"indicator"}, {"vulnerability", "technique", "threat_actor"}),
     },
+    "networking": {
+        "connects_to": ({"device", "interface", "service", "endpoint"}, {"device", "interface", "service", "endpoint", "subnet"}),
+        "routes_to": ({"device", "interface", "service"}, {"device", "interface", "endpoint", "subnet"}),
+        "uses_protocol": ({"device", "service", "endpoint"}, {"protocol"}),
+        "belongs_to": ({"interface", "endpoint", "device"}, {"subnet", "device"}),
+        "listens_on": ({"service", "device"}, {"endpoint", "interface"}),
+        "depends_on": ({"device", "service", "protocol"}, {"device", "service", "protocol", "endpoint"}),
+    },
+    "legal_policies": {
+        "requires": ({"party", "obligation", "activity", "clause"}, {"party", "obligation", "activity", "deadline", "condition"}),
+        "prohibits": ({"party", "clause", "policy"}, {"party", "activity", "action"}),
+        "permits": ({"party", "clause", "policy"}, {"party", "activity", "action"}),
+        "subject_to": ({"obligation", "permission", "exception"}, {"condition", "exception", "deadline"}),
+        "responsible_for": ({"party", "organization"}, {"obligation", "activity", "action"}),
+        "applies_to": ({"clause", "policy", "obligation"}, {"party", "activity", "action"}),
+    },
+    "finance_documents": {
+        "reports": ({"company", "organization", "document"}, {"metric", "amount", "transaction", "instrument"}),
+        "owns": ({"person", "organization", "company", "account"}, {"asset", "account", "instrument"}),
+        "transfers": ({"person", "organization", "company", "account"}, {"person", "organization", "company", "account", "asset"}),
+        "pays": ({"person", "organization", "company", "account"}, {"person", "organization", "company", "amount", "transaction"}),
+        "issued_by": ({"instrument", "security"}, {"company", "organization"}),
+        "has_value": ({"instrument", "asset", "transaction", "metric"}, {"amount", "metric"}),
+    },
 }
 
 
