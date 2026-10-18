@@ -24,7 +24,7 @@ def processing_config(project_id=None):
     embedding_endpoint = base_url(os.getenv("EMBEDDING_MODEL_ENDPOINT")) if os.getenv("EMBEDDING_MODEL_ENDPOINT") else None
     resource_hash = lambda value: hashlib.sha256((value.rstrip("/") + "/").encode()).hexdigest() if value else None
     config = {
-        "contract": "argus-ingestion-6-structured-context",
+        "contract": "argus-ingestion-7-deferred-entity-vectors",
         "semanticGraph": os.getenv("ARGUS_SEMANTIC_GRAPH", "argus_sources_v2"),
         "parser": "category-routed-source-blocks-5",
         "structureVersion": "heading-intersection-1",
@@ -38,6 +38,7 @@ def processing_config(project_id=None):
         "embeddingModel": embedding_model,
         "embeddingProvider": provider,
         "embeddingDimensions": 3072,
+        "entityEmbeddingPolicy": "explicit-post-ingestion-finalization",
         "embeddingTokensPerMinute": int(os.getenv('ARGUS_EMBEDDING_TOKENS_PER_MINUTE', '135000')),
         "llmResourceIdentity": resource_hash(llm_endpoint),
         "embeddingResourceIdentity": resource_hash(embedding_endpoint),

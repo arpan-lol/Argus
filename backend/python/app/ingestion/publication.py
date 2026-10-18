@@ -67,6 +67,11 @@ def supported_spans(chunk, record):
     return verified, primary or verified[0], "multiple_occurrences" if len(verified) > 1 else "exact"
 
 
+def publication_state(pipeline, job, phase=None, error=None):
+    previous = pipeline.item(job['id'], 'publication_state', 'current') or {}
+    pipeline.save_item(job['id'], 'publication_state', 'current', {**previous, 'phase': phase or previous.get('phase', 'preparing'), 'sourceId': job['source_id'], 'graph': semantic_graph_name(job['configuration']), 'error': error, 'recoverable': True, 'recovery': 'Retry publication from persisted validated artifacts under the source lease'})
+
+
 def publish(pipeline, job):
     with connection() as lease:
         key=publication_lease_key(job["source_id"])
@@ -86,7 +91,12 @@ def publish(pipeline, job):
                 except Exception as error:
                     if "already" not in str(error).lower() and "exists" not in str(error).lower():
                         raise
-            return _publish(pipeline,job)
+            publication_state(pipeline, job, "preparing")
+            try:
+                return _publish(pipeline,job)
+            except Exception as error:
+                publication_state(pipeline, job, error=str(error))
+                raise
         finally:
             lease.rollback()
             lease.execute("SELECT pg_advisory_unlock(hashtextextended(%s,0))",(key,))
@@ -99,8 +109,7 @@ def _publish(pipeline, job):
     title = metadata.get("title") or job["filename"]
     graph = graph_connection(job["configuration"])
     affected_entities = {row[0] for row in graph.query("MATCH (m:Mention {documentId:$source})-[:RESOLVED_TO]->(e:Entity) RETURN DISTINCT e.id", {"source": job["source_id"]}).result_set}
-    for label in ("Chunk", "Entity"):
-        index(graph, label, job["configuration"]["embeddingDimensions"])
+    index(graph, "Chunk", job["configuration"]["embeddingDimensions"])
     for label in ("Document", "SourceRevision", "Section", "Chunk", "Entity", "Mention", "Assertion", "ResolutionDecision"):
         try:
             graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.id)")
@@ -160,7 +169,9 @@ def _publish(pipeline, job):
             method = entity.get("extractionMethod", extraction_metadata.get("method", "unknown"))
             llm_verified = entity.get("llmVerified", extraction_metadata.get("llmVerified")) is True
             if canonical_id not in staged_entities:
-                writes.add("MERGE (e:Entity {id:$entity}) ON CREATE SET e.label=$label,e.type=$type,e.description=$description,e.embedding=vecf32($vector),e.embeddingModel=$model", {"entity": canonical_id, "label": canonical["label"], "type": canonical["entity_type"], "description": canonical["description"], "vector": canonical["embedding"], "model": canonical["embedding_model"]})
+                writes.add("MERGE (e:Entity {id:$entity}) ON CREATE SET e.label=$label,e.type=$type,e.description=$description,e.embeddingModel=$model", {"entity": canonical_id, "label": canonical["label"], "type": canonical["entity_type"], "description": canonical["description"], "model": canonical["embedding_model"]})
+                if canonical["embedding"]:
+                    writes.add("MATCH (e:Entity {id:$entity}) SET e.embedding=vecf32($vector),e.embeddingModel=$model", {"entity": canonical_id, "vector": canonical["embedding"], "model": canonical["embedding_model"]})
                 staged_entities.add(canonical_id)
             writes.add("MATCH (c:Chunk {id:$chunk}) MERGE (m:Mention {id:$mention}) SET m.jobId=$job,m.text=$quote,m.startOffset=$start,m.endOffset=$end,m.sourceSpans=$spans,m.sourceSpanStatus=$spanStatus,m.sourceSpanAmbiguous=$ambiguous,m.extractionMethod=$method,m.llmVerified=$verified,m.confidence=$confidence,m.documentId=$document,m.active=false MERGE (c)-[:HAS_MENTION]->(m)", {"chunk": chunk["id"], "mention": mention_id, "job": job["id"], "document": job["source_id"], "quote": entity["quote"], "start": start, "end": end, "spans": json.dumps(spans), "spanStatus": span_status, "ambiguous": len(spans) > 1, "method": method, "verified": llm_verified, "confidence": entity.get("confidence")})
             writes.add("MATCH (m:Mention {id:$mention}) OPTIONAL MATCH (m)-[old:RESOLVED_TO]->() DELETE old", {"mention": mention_id})
@@ -185,7 +196,7 @@ def _publish(pipeline, job):
             status = relationship.get('traversalStatus', 'unverified_no_context_cue')
             review_count += int(status == 'needs_context_review')
             native_count += int(relationship.get('extractionMethod') == 'stix_native')
-            context = {key: relationship.get(key) for key in ('sourceContextSignals', 'negationCue', 'speculationCue', 'modalityCue', 'exceptionCue', 'experiencerCue', 'temporalityCue', 'alternativeCue', 'qualifierStatus', 'sourceMeasurements', 'measurementStatus', 'nativeRecordId', 'nativeReferenceStatus', 'referenceStatus', 'nativeState', 'revoked', 'deprecated') if key in relationship}
+            context = {key: relationship.get(key) for key in ('sourceContextSignals', 'negationCue', 'speculationCue', 'modalityCue', 'exceptionCue', 'experiencerCue', 'temporalityCue', 'alternativeCue', 'qualifierStatus', 'relationScopeStatus', 'relationScopeSignals', 'sourceMeasurements', 'measurementStatus', 'nativeRecordId', 'nativeReferenceStatus', 'referenceStatus', 'nativeState', 'revoked', 'deprecated') if key in relationship}
             writes.add("MATCH (a:Assertion {id:$id}),(s:Entity)-[r:RELATES {assertionId:$id}]->() SET a.traversalStatus=$status,a.context=$context,a.qualifierStatus=$qualifier,r.traversalStatus=$status,r.polarity=$polarity", {"id": assertion_id, "status": status, "context": json.dumps(context), "qualifier": relationship.get('qualifierStatus', 'not_classified'), "polarity": relationship['polarity']})
             writes.add("MATCH (a:Assertion {id:$id}),(s:Entity)-[r:RELATES {assertionId:$id}]->() SET a.confidence=$confidence,a.polarityStatus=$polarityStatus,r.confidence=$confidence,r.extractionMethod=$method", {"id": assertion_id, "confidence": relationship.get("confidence"), "polarityStatus": relationship.get("polarityStatus", "source_classified"), "method": relationship.get("extractionMethod", extraction_metadata.get("method", "unknown"))})
         publication_chunks.append({**chunk, "documentId": job["source_id"], "revisionId": job["revision"], "processingVersion": job["processing_version"], "sectionId": section_id, "sectionIds": [section["id"] for section in related_sections], "sectionTitle": primary["title"], "sourceUrl": metadata.get("sourceUrl") or job["source_url"], "locationKind": "source", "extractionMetadata": extraction_metadata})
@@ -202,20 +213,27 @@ def _publish(pipeline, job):
     payload = {**metadata, "id": job["source_id"], "revisionId": job["revision"], "processingVersion": job["processing_version"], "rawPath": job["original_path"], "title": title, "text": document["text"], "textLength": len(document["text"]), "sections": sections, "chunks": publication_chunks, "entities": list(entities.values()), "sourceUrl": metadata.get("sourceUrl") or job["source_url"], "offsetUnit": "unicode_codepoint", "blocks": document["blocks"], "normalization": document["normalization"], "extractionQuality": extraction_quality, "warnings": extraction_quality["warnings"], "extractionBoundary": "Source spans and structure checked. Semantic relationships are extracted locally by GLiNER-relex; code relationships come from Python syntax. Unresolved call names do not establish runtime targets."}
     from app.services.corpus import publish_document
     counts = {"documents": 1, "sections": len(sections), "chunks": len(chunks), "entities": len(entities), "mentions": mention_count, "assertions": assertion_count, "graph": semantic_graph_name(job["configuration"]), "localGraphWriteBatches": writes.query_count, "localGraphWriteRecords": writes.record_count, **extraction_quality}
+    publication_state(pipeline, job, "graph_staged")
     with connection() as conn:
         conn.execute("UPDATE ingestion_publications SET active=false WHERE source_id=%s", (job["source_id"],))
         publish_document(payload, conn)
         conn.execute("INSERT INTO ingestion_publications(job_id,source_id,counts,active) VALUES(%s,%s,%s,false) ON CONFLICT(job_id) DO UPDATE SET active=false,counts=excluded.counts,published_at=now()", (job["id"], job["source_id"], Jsonb(counts)))
+    publication_state(pipeline, job, "postgres_staged")
     for label, property_name in (("SourceRevision", "sourceId"), ("Section", "documentId"), ("Chunk", "documentId"), ("Mention", "documentId"), ("Assertion", "documentId")):
         graph.query(f"MATCH (n:{label} {{{property_name}:$source}}) SET n.active=CASE WHEN (n.jobId=$job OR n.id=$job) AND coalesce(n.projectionCurrent,true) THEN true ELSE false END", {"source": job["source_id"], "job": job["id"]})
     graph.query("MATCH (a:Assertion {documentId:$source})-[:SUBJECT]->(s:Entity)-[r:RELATES]->() WHERE r.assertionId=a.id AND r.sourceId=$source SET r.active=(r.jobId=$job)", {"source": job["source_id"], "job": job["id"]})
     if affected_entities:
         write_batches(graph, "UNWIND $ids AS id MATCH (e:Entity {id:id}) OPTIONAL MATCH (e)<-[:RESOLVED_TO]-(m:Mention) WHERE m.active=true WITH e,count(m) AS mentions SET e.active=(mentions>0)", "ids", sorted(affected_entities))
     graph.query("MATCH (d:Document {id:$source}) SET d.active=true,d.activeJobId=$job,d.title=$title,d.revisionId=$revision,d.sourceUrl=$url,d.extractionQuality=$quality,d.sourceCoverage=$coverage", {"source": job["source_id"], "job": job["id"], "title": title, "revision": job["revision"], "url": metadata.get("sourceUrl") or job["source_url"] or "", "quality": json.dumps(extraction_quality), "coverage": json.dumps(metadata.get("sourceCoverage"))})
+    from .native_linking import link_native_references
+    counts["nativeReferenceLinking"] = link_native_references(graph, document, chunks, job, pipeline)
+    counts["entityEmbeddingPolicy"] = "explicit-post-ingestion-finalization"
     graph.query("MATCH (r:SourceRevision {id:$job}) SET r.graphComplete=true", {"job": job["id"]})
+    publication_state(pipeline, job, "graph_active")
     with connection() as conn:
         conn.execute("UPDATE ingestion_publications SET active=false WHERE source_id=%s AND job_id<>%s", (job["source_id"], job["id"]))
         with conn.cursor() as cursor:
             cursor.executemany("UPDATE ingestion_entities SET aliases=(SELECT jsonb_agg(DISTINCT value) FROM jsonb_array_elements(aliases || %s::jsonb)) WHERE id=%s", [(Jsonb(sorted(accepted_aliases[canonical_id])), canonical_id) for canonical_id in sorted(accepted_aliases)])
-        conn.execute("UPDATE ingestion_publications SET active=true,published_at=now() WHERE job_id=%s", (job["id"],))
+        conn.execute("UPDATE ingestion_publications SET active=true,counts=%s,published_at=now() WHERE job_id=%s", (Jsonb(counts), job["id"]))
+    publication_state(pipeline, job, "ready")
     return counts

@@ -128,7 +128,7 @@ class IngestionPipeline:
             history = [a for a in attempts if a["stage"] == stage]
             latest = history[-1] if history else {}
             stages.append({"name": stage, "status": latest.get("status", "queued"), "attempts": len(history), "error": latest.get("error"), "startedAt": latest.get("started_at"), "completedAt": latest.get("finished_at"), "durationMs": latest.get("duration_ms"), "metadata": latest.get("metadata", {}), "history": history})
-        return serialize({"id": row["id"], "filename": row["filename"], "documentId": row["source_id"], "status": row["status"], "currentStage": row["current_stage"], "createdAt": row["created_at"], "updatedAt": row["updated_at"], "error": row["error"], "revision": row["revision"], "processingVersion": row["processing_version"], "configuration": row["configuration"], "stages": stages, "chunkCount": artifacts.get("chunk", {}).get("count", 0), "itemCounts": item_counts, "counts": artifacts.get("publish", {})})
+        return serialize({"id": row["id"], "filename": row["filename"], "documentId": row["source_id"], "status": row["status"], "currentStage": row["current_stage"], "createdAt": row["created_at"], "updatedAt": row["updated_at"], "error": row["error"], "revision": row["revision"], "processingVersion": row["processing_version"], "configuration": row["configuration"], "stages": stages, "chunkCount": artifacts.get("chunk", {}).get("count", 0), "itemCounts": item_counts, "counts": artifacts.get("publish", {}), "publicationState": self.item(job_id, "publication_state", "current")})
 
     def list_jobs(self, limit=50, offset=0):
         from app.projects.scope import current_project

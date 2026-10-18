@@ -4,13 +4,11 @@ from psycopg.types.json import Jsonb
 
 from app.database import connection
 from .config import fingerprint
-from .providers import Providers
 from .publication import semantic_graph_name
 from .semantic_context import stable_identifier
 
 
 def resolve_basic(pipeline, job):
-    provider = Providers(job['configuration'], pipeline.call_recorder(job['id']), lambda: pipeline.check_paused(job['id']))
     space = semantic_graph_name(job['configuration'])
     mentions = deferred_count = 0
     records = []
@@ -48,20 +46,9 @@ def resolve_basic(pipeline, job):
         vector = cached_vectors.get(canonical_id) or (prior['embedding'] if prior and prior['embedding_model'] == job['configuration']['embeddingModel'] else None)
         if vector and len(vector) == job['configuration']['embeddingDimensions'] and all(math.isfinite(value) for value in vector) and any(vector):
             vectors_by_id[canonical_id] = vector
-    missing = [(entity, canonical_id) for canonical_id, entity in unique.items() if canonical_id not in vectors_by_id]
-    for start in range(0, len(missing), 256):
-        batch = missing[start:start + 256]
-        key = fingerprint([job['configuration']['embeddingModel'], [mention_id for _, mention_id in batch]])
-        vectors = pipeline.retry_call(job, 'entity_embed_batch', key, lambda rows=batch: {'vectors': provider.embed([entity['name'] + '\n' + entity['entity_type'] + '\n' + entity['description'] for entity, _ in rows])})['vectors']
-        with connection() as conn, conn.cursor() as cursor:
-            cursor.executemany("INSERT INTO ingestion_items(job_id,stage,item_id,payload) VALUES(%s,'entity_embed',%s,%s) ON CONFLICT(job_id,stage,item_id) DO UPDATE SET payload=excluded.payload", [(job['id'], identifier, Jsonb({'vector': vector})) for (_, identifier), vector in zip(batch, vectors, strict=True)])
-        vectors_by_id.update({identifier: vector for (_, identifier), vector in zip(batch, vectors, strict=True)})
     decisions = []
     items = []
     for entity, mention_id, canonical_id, deferred in records:
-        vector = vectors_by_id[canonical_id]
-        if len(vector) != job['configuration']['embeddingDimensions'] or not any(vector) or any(not math.isfinite(value) for value in vector):
-            raise ValueError('Entity vector is invalid')
         decision_id = 'resolution:' + fingerprint([job['id'], mention_id])
         verdict = 'deferred' if deferred else 'same'
         rationale = 'GLiNER fallback mention kept separate.' if deferred else 'STIX object ID and consistent native type key.' if entity.get('nativeResolverKey') else 'Exact qualified Python symbol, preserving case.' if entity['entity_type'].startswith('code_') else 'Stable identifier candidate grouping.' if stable_identifier(entity['name']) else 'Exact normalized name and type candidate grouping; identity is unverified and homonyms may remain.'
@@ -70,8 +57,8 @@ def resolve_basic(pipeline, job):
         mentions += 1
         deferred_count += int(deferred)
     with connection() as conn, conn.cursor() as cursor:
-        cursor.executemany("INSERT INTO ingestion_entities(id,label,entity_type,description,aliases,embedding,embedding_model,created_by_job,source_quote) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET description=CASE WHEN length(excluded.description)>length(ingestion_entities.description) THEN excluded.description ELSE ingestion_entities.description END", [(identifier, entity['name'], entity['entity_type'], entity['description'], Jsonb([entity['name']]), Jsonb(vectors_by_id[identifier]), job['configuration']['embeddingModel'], job['id'], entity['quote']) for identifier, entity in unique.items()])
+        cursor.executemany("INSERT INTO ingestion_entities(id,label,entity_type,description,aliases,embedding,embedding_model,created_by_job,source_quote) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET description=CASE WHEN length(excluded.description)>length(ingestion_entities.description) THEN excluded.description ELSE ingestion_entities.description END", [(identifier, entity['name'], entity['entity_type'], entity['description'], Jsonb([entity['name']]), Jsonb(vectors_by_id[identifier]) if identifier in vectors_by_id else None, job['configuration']['embeddingModel'], job['id'], entity['quote']) for identifier, entity in unique.items()])
         cursor.executemany('INSERT INTO ingestion_resolution_decisions(id,job_id,mention_id,canonical_id,decision,rationale,votes) VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET canonical_id=excluded.canonical_id,decision=excluded.decision,rationale=excluded.rationale WHERE NOT ingestion_resolution_decisions.reverted', decisions)
         cursor.executemany("INSERT INTO ingestion_items(job_id,stage,item_id,payload) VALUES(%s,'resolve',%s,%s) ON CONFLICT(job_id,stage,item_id) DO UPDATE SET payload=excluded.payload", items)
         conn.execute('UPDATE ingestion_jobs SET updated_at=now() WHERE id=%s', (job['id'],))
-    return {'resolvedMentions': mentions, 'deferredMentions': deferred_count, 'candidatePairs': 0, 'duplicateLlmCalls': 0, 'entityEmbeddingsCreated': len(missing), 'entityEmbeddingsReused': len(unique) - len(missing), 'method': 'sdk-style-normalized-name-type-1'}
+    return {'resolvedMentions': mentions, 'deferredMentions': deferred_count, 'candidatePairs': 0, 'duplicateLlmCalls': 0, 'entityEmbeddingsCreated': 0, 'entityEmbeddingsReused': len(vectors_by_id), 'entityEmbeddingsDeferred': len(unique) - len(vectors_by_id), 'entityEmbeddingPolicy': 'explicit-post-ingestion-finalization', 'method': 'sdk-style-normalized-name-type-1'}

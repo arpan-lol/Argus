@@ -97,6 +97,15 @@ def metrics(project_id: str):
     return project_metrics(project_id)
 
 
+@scoped.post('/finalize-entities')
+def finalize_entity_vectors(project_id: str):
+    from app.ingestion.entity_finalization import finalize_entities
+    try:
+        return finalize_entities(pipeline, project_id)
+    except RuntimeError as error:
+        raise HTTPException(409, str(error))
+
+
 @scoped.post('/ingestion-control')
 def ingestion_control(project_id: str, body: IngestionControl):
     with connection() as conn:
