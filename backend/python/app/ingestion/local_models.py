@@ -1,6 +1,7 @@
 import threading
 import gc
 import logging
+import time
 
 
 _models = {}
@@ -9,6 +10,21 @@ _registry_lock = threading.Lock()
 _torch_configured = False
 _compute_lock = threading.Lock()
 logger = logging.getLogger('argus.local_models')
+_runtime = {}
+
+
+def runtime_status():
+    return {**_runtime, 'loadedModels': list(_models), 'availableMemoryBytes': available_memory_bytes()}
+
+
+def compute_device(config):
+    import torch
+    value = config.get('localModelDevice', 'auto')
+    if value not in {'auto', 'cpu', 'cuda'}:
+        raise ValueError('Local model device must be auto, cpu or cuda')
+    if value == 'cuda' and not torch.cuda.is_available():
+        raise ValueError('CUDA was requested but this PyTorch runtime cannot access a CUDA GPU')
+    return 'cuda' if value != 'cpu' and torch.cuda.is_available() else 'cpu'
 
 
 def available_memory_bytes():
@@ -33,14 +49,16 @@ def memory_failure(error):
 
 
 def relation_inference(model, texts, rows, labels, relations, config, batch_size):
-    effective = max(1, min(batch_size, available_memory_bytes() // (768 * 1024 * 1024)))
+    import torch
+    memory = torch.cuda.mem_get_info()[0] if compute_device(config) == 'cuda' else available_memory_bytes()
+    effective = max(1, min(batch_size, memory // (768 * 1024 * 1024)))
     rows = sorted(rows, key=lambda row: row[2] - row[1])
     results = []
     for start in range(0, len(rows), effective):
         group = rows[start:start + effective]
         failed = False
         try:
-            with _compute_lock:
+            with _compute_lock, torch.inference_mode():
                 entities, links = model.inference(texts=[texts[owner][left:right] for owner, left, right in group], labels=labels, relations=relations, threshold=config['relexEntityThreshold'], adjacency_threshold=config['relexAdjacencyThreshold'], relation_threshold=config['relexRelationThreshold'], flat_ner=True, multi_label=False, return_relations=True, batch_size=len(group))
             results.extend(zip(group, entities, links, strict=True))
         except (RuntimeError, MemoryError) as error:
@@ -50,6 +68,8 @@ def relation_inference(model, texts, rows, labels, relations, config, batch_size
             logger.warning('Reducing local relation work after allocation failure: items=%s characters=%s error=%s', len(group), sum(right - left for _, left, right in group), str(error)[:180])
         if failed:
             gc.collect()
+            if compute_device(config) == 'cuda':
+                torch.cuda.empty_cache()
             if len(group) > 1:
                 middle = len(group) // 2
                 results.extend(relation_inference(model, texts, group[:middle], labels, relations, config, 1))
@@ -77,6 +97,7 @@ def configure_runtime(config):
             if not 1 <= threads <= 64:
                 raise ValueError('Local model thread count must be between 1 and 64')
             torch.set_num_threads(threads)
+            _runtime.update({'torchVersion': torch.__version__, 'device': compute_device(config), 'threads': threads, 'cudaAvailable': torch.cuda.is_available(), 'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None})
             _torch_configured = True
 
 
@@ -89,12 +110,16 @@ def load_model(name, config):
     configure_runtime(config)
     from gliner import GLiNER
     from .relex_adapter import install
+    started = time.monotonic()
     try:
         with _compute_lock:
             model = GLiNER.from_pretrained(name, local_files_only=True)
     except OSError:
         with _compute_lock:
             model = GLiNER.from_pretrained(name)
+    model.to(compute_device(config))
+    model.eval()
+    logger.info('Loaded local model %s on %s in %.2fs', name, compute_device(config), time.monotonic() - started)
     return install(model)
 
 
@@ -105,7 +130,7 @@ def relex(text, profile, config):
 def relex_many(texts, profile, config):
     from .batching import service
     from .config import fingerprint
-    key = fingerprint([profile['entityTypes'], profile['relationshipTypes'], profile.get('entityDescriptions'), {name: config.get(name) for name in ('relexModel', 'glinerOverlapWords', 'relexEntityThreshold', 'relexAdjacencyThreshold', 'relexRelationThreshold', 'relexBatchSize', 'localModelThreads')}])
+    key = fingerprint([profile['entityTypes'], profile['relationshipTypes'], profile.get('entityDescriptions'), {name: config.get(name) for name in ('relexModel', 'glinerOverlapWords', 'relexEntityThreshold', 'relexAdjacencyThreshold', 'relexRelationThreshold', 'relexBatchSize', 'localModelThreads', 'localModelDevice')}])
     return service('relex').submit(key, texts, lambda values: relex_direct(values, profile, config))
 
 

@@ -88,22 +88,8 @@ def project(project_id: str):
 
 @scoped.get('/metrics')
 def metrics(project_id: str):
-    with connection() as conn:
-        receipts = conn.execute("SELECT i.payload FROM ingestion_items i JOIN ingestion_jobs j ON j.id=i.job_id WHERE j.project_id=%s AND i.stage='provider_call'", (project_id,)).fetchall()
-    totals = {'inputTokens': 0, 'outputTokens': 0, 'embeddingTokens': 0, 'llmCalls': 0, 'embeddingCalls': 0, 'failedCalls': 0, 'durationMs': 0, 'usageMissingCalls': 0}
-    for row in receipts:
-        value = row['payload']
-        usage = value.get('usage') or {}
-        embedding = value.get('kind') in ('embedding', 'query_embedding')
-        totals['embeddingCalls' if embedding else 'llmCalls'] += 1
-        totals['failedCalls'] += int(value.get('status') == 'failed')
-        totals['usageMissingCalls'] += int(not usage)
-        totals['durationMs'] += value.get('durationMs') or 0
-        tokens = usage.get('input_tokens', usage.get('prompt_tokens', 0)) or 0
-        totals['embeddingTokens' if embedding else 'inputTokens'] += tokens
-        if not embedding:
-            totals['outputTokens'] += usage.get('output_tokens', usage.get('completion_tokens', 0)) or 0
-    return {'actualReportedUsage': totals, 'costUsd': None, 'duplicateMode': 'sdk_basic', 'execution': {'queue': 'one job per file', 'workers': int(os.getenv('ARGUS_INGESTION_WORKERS', '1')), 'parallelStages': ['embed', 'mentions', 'configure'], 'chunkEmbeddingBatchSize': 64, 'embeddingTokensPerMinute': processing_config()['embeddingTokensPerMinute']}, 'estimate': {'duplicateLlmCalls': 0, 'extractionLlmCalls': 0, 'workspaceDiscovery': 'Batched random samples; no calls start after 30 seconds; each dispatched response may finish; shared workspace token budget'}}
+    from app.ingestion.metrics import project_metrics
+    return project_metrics(project_id)
 
 
 @scoped.put('/description')

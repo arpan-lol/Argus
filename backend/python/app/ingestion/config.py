@@ -24,11 +24,11 @@ def processing_config(project_id=None):
     embedding_endpoint = base_url(os.getenv("EMBEDDING_MODEL_ENDPOINT")) if os.getenv("EMBEDDING_MODEL_ENDPOINT") else None
     resource_hash = lambda value: hashlib.sha256((value.rstrip("/") + "/").encode()).hexdigest() if value else None
     config = {
-        "contract": "argus-ingestion-5-local-relations",
+        "contract": "argus-ingestion-6-structured-context",
         "semanticGraph": os.getenv("ARGUS_SEMANTIC_GRAPH", "argus_sources_v2"),
-        "parser": "category-routed-source-blocks-4",
+        "parser": "category-routed-source-blocks-5",
         "structureVersion": "heading-intersection-1",
-        "chunker": "falkordb-sdk-v1.4.0-sentence-token-cap-offsets-1",
+        "chunker": "structure-sentence-clause-token-cap-offsets-2",
         "chunkTokens": int(os.getenv("ARGUS_CHUNK_TOKENS", "512")),
         "overlapSentences": int(os.getenv("ARGUS_CHUNK_OVERLAP_SENTENCES", "2")),
         "tokenEncoding": "cl100k_base",
@@ -49,6 +49,7 @@ def processing_config(project_id=None):
         "relexModel": os.getenv("ARGUS_RELEX_MODEL", "knowledgator/gliner-relex-base-v1.0"),
         "relexBatchSize": int(os.getenv('ARGUS_RELEX_BATCH_SIZE', '4')),
         "localModelThreads": int(os.getenv('ARGUS_LOCAL_MODEL_THREADS', str(min(8, os.cpu_count() or 1)))),
+        "localModelDevice": os.getenv('ARGUS_LOCAL_MODEL_DEVICE', 'auto'),
         "relexEntityThreshold": float(os.getenv("ARGUS_RELEX_ENTITY_THRESHOLD", "0.4")),
         "relexRelationThreshold": float(os.getenv("ARGUS_RELEX_RELATION_THRESHOLD", "0.8")),
         "relexAdjacencyThreshold": float(os.getenv("ARGUS_RELEX_ADJACENCY_THRESHOLD", "0.65")),
@@ -57,7 +58,7 @@ def processing_config(project_id=None):
         "retries": int(os.getenv("ARGUS_INGESTION_RETRIES", "3")),
         "retryBaseSeconds": float(os.getenv("ARGUS_RETRY_BASE_SECONDS", "2")),
         "promptVersion": "batched-category-label-discovery-1",
-        "extractionVersion": "local-relex-code-structure-1",
+        "extractionVersion": "local-relex-source-context-2",
         "maxOutputTokens": int(os.getenv("ARGUS_MAX_OUTPUT_TOKENS", "8192")),
         "modelTimeoutSeconds": float(os.getenv("ARGUS_MODEL_TIMEOUT_SECONDS", "120")),
         "extractionThinkingBudget": int(os.getenv("ARGUS_EXTRACTION_THINKING_BUDGET", "0")),
