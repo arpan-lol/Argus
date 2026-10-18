@@ -8,7 +8,7 @@ import httpx
 from langgraph.checkpoint.memory import InMemorySaver
 from openai import OpenAI
 
-from app.investigation.runtime import Investigation, RunBudgetReached, collect_sources, validate_sources
+from app.investigation.runtime import Investigation, RunBudgetReached, collect_sources, compact, deduplicate_tool_passages, validate_sources
 from app.investigation import service
 
 
@@ -124,7 +124,7 @@ class InvestigationTest(TestCase):
         self.assertEqual(state["report"]["purpose"], "conversation")
         self.assertEqual(state["tool_count"], 1)
         self.assertEqual(model.call_count, 2)
-        self.assertIn('"retrievalToolCount": 9', model.call_args.args[0][-1]["content"])
+        self.assertEqual(json.loads(model.call_args.args[0][-1]["content"])["retrievalToolCount"], 9)
         self.assertIn("rank_entities", json.dumps(model.call_args.args[0]))
         tool.assert_not_called()
 
@@ -142,6 +142,54 @@ class InvestigationTest(TestCase):
         self.assertEqual(model.call_count, 2)
         tool.assert_called_once_with("search_sources", {"query": "batteries"})
 
+    def test_unknown_lookup_cannot_end_as_missing_source_support(self):
+        self.row["request"]["query"] = "Compare the documented incidents CASE-A and CASE-B"
+        model = mock.Mock(side_effect=[
+            (call("read_chunks", {"chunk_ids": ["CASE-A", "CASE-B"]}, "wrong-ids"), None),
+            ({"role": "assistant", "content": json.dumps(report("insufficient_support", text="No sources document these incidents."))}, None),
+            (call("search_sources", {"query": "CASE-A CASE-B", "mode": "lexical"}, "discover"), None),
+            ({"role": "assistant", "content": json.dumps(report("source_answer", ["S1"], text="The retrieved source documents both incidents."))}, None),
+        ])
+        tool = mock.Mock(side_effect=[
+            {"outcome": "unknown_chunk", "items": [], "unknownChunkIds": ["CASE-A", "CASE-B"], "inputError": True, "recovery": "Discover chunk IDs with search_sources first."},
+            {"outcome": "answered", "items": [source()]},
+        ])
+        state = self.runtime(model, tool).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "lookup-recovery"}})
+        self.assertEqual(state["report"]["purpose"], "source_answer")
+        self.assertEqual(state["tool_count"], 2)
+        self.assertEqual(model.call_count, 4)
+        repair_messages, repair_tools = model.call_args_list[2].args
+        self.assertIn("search_sources", [item["function"]["name"] for item in repair_tools])
+        self.assertIn("lookup", json.dumps(repair_messages).lower())
+
+    def test_real_empty_search_can_finish_after_invalid_lookup(self):
+        model = mock.Mock(side_effect=[
+            (call("read_chunks", {"chunk_ids": ["human-label"]}, "invalid"), None),
+            (call("search_sources", {"query": "human-label", "mode": "lexical"}, "search"), None),
+            ({"role": "assistant", "content": json.dumps(report("insufficient_support", text="The bounded source search found no matches."))}, None),
+        ])
+        tool = mock.Mock(side_effect=[{"items": [], "unknownChunkIds": ["human-label"]}, {"outcome": "not_found", "items": []}])
+        state = self.runtime(model, tool).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "empty-after-recovery"}})
+        self.assertEqual(state["report"]["purpose"], "insufficient_support")
+        self.assertEqual(tool.call_count, 2)
+
+    def test_schema_errors_are_recoverable_without_running_bad_tool(self):
+        model = mock.Mock(side_effect=[
+            (call("search_sources", {"query": "valid query", "limit": 900}, "bad-limit"), None),
+            (call("search_sources", {"query": "valid query", "limit": 5, "mode": "lexical"}, "valid-limit"), None),
+            ({"role": "assistant", "content": json.dumps(report("source_answer", ["S1"]))}, None),
+        ])
+        tool = mock.Mock(return_value={"items": [source()]})
+        state = self.runtime(model, tool).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "schema-recovery"}})
+        self.assertEqual(state["report"]["purpose"], "source_answer")
+        tool.assert_called_once_with("search_sources", {"query": "valid query", "limit": 5, "mode": "lexical"})
+        self.assertEqual(state["tool_count"], 2)
+
+    def test_validation_repair_can_use_tools_from_saved_synthesis_checkpoint(self):
+        model = mock.Mock(return_value=(call("search_sources", {"query": "repair", "mode": "lexical"}, "repair"), None))
+        graph = self.runtime(model, mock.Mock(return_value={"items": [source()]})).graph(InMemorySaver())
+        self.assertIn("synthesize", graph.nodes)
+
     def test_invalid_tool_catalog_citation_gets_model_feedback(self):
         self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
         self.row["request"]["query"] = "list all tools"
@@ -154,7 +202,7 @@ class InvestigationTest(TestCase):
         self.assertEqual(state["report"]["purpose"], "conversation")
         self.assertEqual(model.call_count, 2)
         self.assertIn("_system", json.dumps(model.call_args.args[0]))
-        self.assertIsNone(model.call_args.args[1])
+        self.assertIn("search_sources", [item["function"]["name"] for item in model.call_args.args[1]])
 
     def test_checkpoint_resume_keeps_sources_tools_and_budget(self):
         self.row["request"]["query"] = "Find the published hello source"
@@ -221,6 +269,100 @@ class InvestigationTest(TestCase):
         sources = collect_sources({"items": [source(), source()]}, {})
         self.assertEqual(len(sources), 1)
         self.assertEqual(sources["S1"]["key"], ["job-1", "chunk-1", 20, 25])
+
+    def test_search_preserves_late_qualifying_passages_and_all_hit_identities(self):
+        self.row["request"]["query"] = "Find all services hosted in WEST-3 that read DATA-ATLAS"
+        text = "Unrelated operational notes.\n" * 900 + "[R066] Billing Export reads DATA-ATLAS.\n[R068] Billing Export is hosted in WEST-3."
+        items = [{**source(), "chunkId": f"chunk-{index}", "text": text if index == 0 else f"Other source passage {index}.", "endOffset": 20 + (len(text) if index == 0 else len(f"Other source passage {index}.")), "textTruncated": False, "processing": {"glinerCoverage": {"windows": [{"startOffset": 0, "endOffset": 3000}] * 30}, "fallback": True, "llmVerified": False}} for index in range(9)]
+        runtime = self.runtime(mock.Mock(), mock.Mock(return_value={"outcome": "answered", "items": items, "truncations": []}))
+        state = initial()
+        message = call("search_sources", {"query": self.row["request"]["query"], "mode": "lexical"})
+        state.update(pending=message["tool_calls"], messages=[message])
+        state = runtime.tools(state)
+        packed = json.loads(state["messages"][-1]["content"])
+        self.assertEqual(len(packed["items"]), 9)
+        self.assertEqual({item["chunkId"] for item in packed["items"]}, {f"chunk-{index}" for index in range(9)})
+        messages = runtime.messages(state, 7000)
+        content = json.dumps(messages)
+        self.assertIn("[R066] Billing Export reads DATA-ATLAS", content)
+        self.assertIn("[R068] Billing Export is hosted in WEST-3", content)
+        self.assertTrue(packed["items"][0]["processing"]["fallback"])
+        excerpt = packed["items"][0]
+        self.assertTrue(excerpt["textTruncated"])
+        self.assertEqual(text[excerpt["contextExcerptStartOffset"] - 20:excerpt["contextExcerptEndOffset"] - 20], excerpt["text"])
+        self.assertLessEqual(len(runtime.encoding.encode(state["messages"][-1]["content"])), 2000)
+        event = next(payload for kind, payload in self.events if kind == "tool_end")
+        self.assertEqual(event["modelContext"]["shownItems"], 9)
+        self.assertTrue(event["modelContext"]["excerptedPassages"])
+
+    def test_compaction_preserves_graph_direction_polarity_and_full_lists(self):
+        payload = {"items": [{"predicate": "writes", "polarity": "negated", "subject": {"id": "producer"}, "object": {"id": "dataset"}, "conditions": [{"value": str(index)} for index in range(12)]} for _ in range(12)], "paths": [{"hops": list(range(12))}], "truncations": [str(index) for index in range(12)]}
+        self.assertEqual(compact(payload), payload)
+
+    def test_source_text_is_not_duplicated_in_model_context(self):
+        self.row["request"]["query"] = "Find the relevant source"
+        runtime = self.runtime(mock.Mock(), mock.Mock(return_value={"outcome": "answered", "items": [{**source(), "text": "source-only-sentinel"}]}))
+        state = initial()
+        message = call("search_sources", {"query": "relevant", "mode": "lexical"})
+        state.update(pending=message["tool_calls"], messages=[message])
+        state = runtime.tools(state)
+        messages = runtime.messages(state, 7000)
+        self.assertEqual(json.dumps(messages).count("source-only-sentinel"), 1)
+        self.assertIn("S1", json.dumps(messages))
+
+    def test_read_chunks_keeps_complete_text_that_fits_context_budget(self):
+        text = "Source narrative. " * 120 + "A final, necessary qualification."
+        runtime = self.runtime(mock.Mock(), mock.Mock(return_value={"outcome": "answered", "items": [{**source(), "text": text, "endOffset": 20 + len(text)}]}))
+        state = initial()
+        message = call("read_chunks", {"chunk_ids": ["chunk-1"]})
+        state.update(pending=message["tool_calls"], messages=[message])
+        state = runtime.tools(state)
+        packed = json.loads(state["messages"][-1]["content"])
+        self.assertEqual(packed["items"][0]["text"], text)
+
+    def test_model_context_budget_reports_omitted_assertions(self):
+        self.row["request"]["graph_expansion"] = True
+        items = [{"id": f"assertion-{index}", "predicate": "reads", "polarity": "affirmed", "subject": {"id": "service"}, "object": {"id": "dataset"}, "quote": "A source-supported assertion. " * 100, "conditions": []} for index in range(50)]
+        runtime = self.runtime(mock.Mock(), mock.Mock(return_value={"outcome": "answered", "items": items, "paths": [], "warnings": [], "truncations": []}))
+        state = initial()
+        message = call("inspect_assertions", {"entity_id": "dataset", "limit": 50})
+        state.update(pending=message["tool_calls"], messages=[message])
+        state = runtime.tools(state)
+        content = state["messages"][-1]["content"]
+        packed = json.loads(content)
+        self.assertLessEqual(len(runtime.encoding.encode(content)), 3000)
+        self.assertEqual(packed["contextCoverage"]["retrievedItems"], 50)
+        self.assertEqual(packed["contextCoverage"]["shownItems"], len(packed["items"]))
+        self.assertEqual(packed["contextCoverage"]["omittedItems"], 50 - len(packed["items"]))
+        self.assertTrue(packed["truncations"])
+
+    def test_source_reference_limit_is_explicit(self):
+        payload = {"items": [{**source(), "chunkId": f"chunk-{index}"} for index in range(25)]}
+        sources = collect_sources(payload, {})
+        self.assertEqual(len(sources), 24)
+        self.assertTrue(payload["items"][-1].get("citationUnavailable"))
+
+    def test_repeated_passages_are_only_removed_when_original_is_visible(self):
+        original = {"role": "tool", "tool_call_id": "first", "content": json.dumps({"items": [{"sourceReference": "S1", "text": "unique source passage"}]})}
+        repeated = {**original, "tool_call_id": "second"}
+        compacted = deduplicate_tool_passages([original, repeated])
+        self.assertEqual(json.loads(compacted[0]["content"])["items"][0]["text"], "unique source passage")
+        self.assertEqual(json.loads(compacted[1]["content"])["items"][0]["sameTextAs"], "S1")
+        self.assertEqual(json.loads(deduplicate_tool_passages([repeated])[0]["content"])["items"][0]["text"], "unique source passage")
+        self.assertIn("text", json.loads(original["content"])["items"][0])
+
+    def test_clipped_context_turns_are_explicit_and_latest_result_is_required(self):
+        runtime = self.runtime(mock.Mock())
+        state = initial()
+        first = call("search_sources", {"query": "first"}, "first")
+        second = call("search_sources", {"query": "second"}, "second")
+        state["messages"] = [first, {"role": "tool", "tool_call_id": "first", "content": "large old passage " * 4000}, second, {"role": "tool", "tool_call_id": "second", "content": json.dumps({"items": [{"sourceReference": "S1", "text": "latest support"}]})}]
+        messages = runtime.messages(state, 2000)
+        self.assertIn("omittedToolTurns", json.dumps(messages))
+        self.assertIn("latest support", json.dumps(messages))
+        self.assertNotIn("large old passage", json.dumps(messages))
+        with self.assertRaisesRegex(RunBudgetReached, "latest tool result"):
+            runtime.messages(state, 10)
 
     def test_citations_revalidate_publication_and_exact_offsets(self):
         sources = collect_sources({"items": [source()]}, {})

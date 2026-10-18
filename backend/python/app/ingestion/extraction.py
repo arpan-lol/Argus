@@ -82,6 +82,8 @@ def gliner_fallback(chunk, candidates, types, reason, attempts):
 
 
 def extract_document(pipeline, job):
+    from .pipeline import PauseRequested
+
     provider = Providers(job["configuration"], pipeline.call_recorder(job["id"]))
     document = pipeline.artifact(job["id"], "normalize")
     chunks = pipeline.artifact(job["id"], "chunk")["chunks"]
@@ -102,16 +104,20 @@ def extract_document(pipeline, job):
             candidates = pipeline.retry_call(job, "gliner", chunk["id"], lambda c=chunk: provider.gliner(c["text"], types))
             provider.credentials(job["configuration"].get("llmProvider"), job["configuration"].get("llmCredentialEnv"))
             attempts = 0
+            previous_error = None
 
             def extract(c=chunk, mentions=candidates):
-                nonlocal attempts
+                nonlocal attempts, previous_error
                 payload = {"entity_types": types, "gliner_candidates": mentions["mentions"], "source": c["text"], "extraction_settings": {"instructions": instructions, "relationshipTypes": profile.get("relationshipTypes", [])}, "source_context": {"title": document["metadata"].get("title", job["filename"]), "coverageLabel": document["metadata"].get("sourceCoverage", {}).get("coverageLabel")}}
+                if previous_error:
+                    payload["previous_validation_error"] = previous_error
                 attempts += 1
                 try:
                     output = provider.structured(extraction_schema(types), prompt, payload)
                 except Exception as error:
                     if getattr(error, "status_code", None) in (401, 403, 404):
                         raise ConfigurationRequired("LLM2 access or deployment configuration must be corrected before extraction can continue") from error
+                    previous_error = provider.safe_error(error)[:1200]
                     raise
                 try:
                     pipeline.validate_extraction(c, output)
@@ -120,18 +126,19 @@ def extract_document(pipeline, job):
                     allowed = profile.get("relationshipTypes", [])
                     if allowed and any(row["predicate"] not in allowed for row in output["relationships"]):
                         raise ValueError("Connection labels must match configured relationshipTypes: " + ", ".join(allowed))
-                except ValueError:
+                except ValueError as error:
+                    previous_error = str(error)[:1200]
                     raise
                 output = annotate_output(c, output)
                 output["metadata"] = {"method": "gliner_llm_verified", "llmVerified": True, "fallback": False, "llmAttempts": attempts, "glinerCoverage": mentions.get("coverage")}
                 return output
 
             try:
-                result = pipeline.retry_call(job, "extract", chunk["id"], extract, max_attempts=1)
-            except ConfigurationRequired:
+                result = pipeline.retry_call(job, "extract", chunk["id"], extract, max_attempts=2)
+            except (ConfigurationRequired, PauseRequested):
                 raise
             except Exception as error:
-                if attempts != 1:
+                if attempts != 2:
                     raise
                 result = gliner_fallback(chunk, candidates, types, provider.safe_error(error), attempts)
                 pipeline.validate_extraction(chunk, result)

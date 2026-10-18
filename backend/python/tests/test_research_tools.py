@@ -42,6 +42,26 @@ def edge(identifier, left, right):
 
 
 class ResearchToolsTest(TestCase):
+    def test_unknown_chunks_are_input_errors_instead_of_empty_searches(self):
+        session = mock.Mock(jobs=['job-1'])
+        session.finish.side_effect = lambda payload, outcome=None: {'outcome': outcome, **payload}
+        payload = {'items': [], 'unknownChunkIds': ['CASE-A', 'CASE-B']}
+        with mock.patch('app.retrieval.routes.Session', return_value=session), mock.patch('app.retrieval.tools.read_chunks', return_value=payload):
+            result = execute('read_chunks', {'chunk_ids': ['CASE-A', 'CASE-B']})
+        self.assertEqual(result['outcome'], 'unknown_chunk')
+        self.assertTrue(result['inputError'])
+        self.assertIn('search_sources', result['recovery'])
+
+    def test_partial_chunk_lookup_preserves_valid_passages(self):
+        session = mock.Mock(jobs=['job-1'])
+        session.finish.side_effect = lambda payload, outcome=None: {'outcome': outcome, **payload}
+        payload = {'items': [{'chunkId': 'chunk-1', 'text': 'valid source'}], 'unknownChunkIds': ['CASE-A']}
+        with mock.patch('app.retrieval.routes.Session', return_value=session), mock.patch('app.retrieval.tools.read_chunks', return_value=payload):
+            result = execute('read_chunks', {'chunk_ids': ['chunk-1', 'CASE-A']})
+        self.assertEqual(result['outcome'], 'partial')
+        self.assertTrue(result['inputError'])
+        self.assertEqual(result['items'][0]['text'], 'valid source')
+
     def test_article_mapping_has_five_research_tools_with_recall_disabled(self):
         self.assertEqual(len(ARTICLE_TOOLS), 6)
         self.assertEqual(sum(item['available'] for item in ARTICLE_TOOLS), 5)

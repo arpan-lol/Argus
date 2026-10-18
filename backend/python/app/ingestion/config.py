@@ -49,7 +49,7 @@ def processing_config(project_id=None):
         "retryBaseSeconds": float(os.getenv("ARGUS_RETRY_BASE_SECONDS", "2")),
         "maxLlmCallsPerJob": int(os.getenv("ARGUS_MAX_LLM_CALLS_PER_JOB", "0")),
         "promptVersion": "falkordb-35e67a0-adapted-grounding-2",
-        "extractionVersion": "single-attempt-gliner-fallback-1",
+        "extractionVersion": "two-attempt-gliner-fallback-2",
         "maxOutputTokens": int(os.getenv("ARGUS_MAX_OUTPUT_TOKENS", "8192")),
         "modelTimeoutSeconds": float(os.getenv("ARGUS_MODEL_TIMEOUT_SECONDS", "120")),
         "extractionThinkingBudget": int(os.getenv("ARGUS_EXTRACTION_THINKING_BUDGET", "0")),
