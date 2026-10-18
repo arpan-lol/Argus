@@ -249,6 +249,8 @@ class InvestigationTest(TestCase):
         self.assertFalse(body["parallel_tool_calls"])
         self.assertEqual(body["tool_choice"], "auto")
         self.assertEqual(body["text"]["format"]["type"], "json_schema")
+        self.assertNotIn('"title"', json.dumps(body["text"]["format"]["schema"]))
+        self.assertNotIn('"title"', json.dumps(body["tools"]))
         self.assertNotIn("finish_report", [item["name"] for item in body["tools"]])
         self.assertEqual(requests[0].url.path, "/openai/v1/responses")
         self.assertFalse(requests[0].url.query)
