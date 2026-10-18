@@ -69,7 +69,7 @@ Slice 4 was previously exercised on one semantic source before the reset. That s
 
 The source map retains both Network and Trees layouts, stable positions, progressive viewport loading, citation navigation, and expanded modal viewing. The native FalkorDB Browser can inspect semantic graphs once fresh ingestion creates them.
 
-Downloaded corpus files, provider credentials, databases, model artifacts, and detailed local progress remain outside Git. The root docs/ folder is intentionally ignored. Read agents.md for working agreements.
+Downloaded corpus files, provider credentials, databases, model artifacts, and detailed local progress remain outside Git. The root docs/ folder is intentionally ignored.
 
 ## Model deployment configuration
 
