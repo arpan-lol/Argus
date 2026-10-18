@@ -50,6 +50,7 @@ def processing_config(project_id=None):
         "relexBatchSize": int(os.getenv('ARGUS_RELEX_BATCH_SIZE', '4')),
         "localModelThreads": int(os.getenv('ARGUS_LOCAL_MODEL_THREADS', str(min(8, os.cpu_count() or 1)))),
         "localModelDevice": os.getenv('ARGUS_LOCAL_MODEL_DEVICE', 'auto'),
+        "localModelCacheSize": int(os.getenv('ARGUS_LOCAL_MODEL_CACHE_SIZE', '0')),
         "relexEntityThreshold": float(os.getenv("ARGUS_RELEX_ENTITY_THRESHOLD", "0.4")),
         "relexRelationThreshold": float(os.getenv("ARGUS_RELEX_RELATION_THRESHOLD", "0.8")),
         "relexAdjacencyThreshold": float(os.getenv("ARGUS_RELEX_ADJACENCY_THRESHOLD", "0.65")),

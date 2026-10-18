@@ -108,7 +108,9 @@ def model_lock(name):
 
 def load_model(name, config):
     configure_runtime(config)
-    limit = config.get('localModelCacheSize', 1 if compute_device(config) == 'cpu' else 2)
+    limit = config.get('localModelCacheSize', 0)
+    if limit == 0:
+        limit = 2 if compute_device(config) == 'cuda' or available_memory_bytes() >= 4 * 1024 ** 3 else 1
     if not 1 <= limit <= 2:
         raise ValueError('Local model cache size must be one or two')
     while len(_models) >= limit:
@@ -119,6 +121,7 @@ def load_model(name, config):
             import torch
             torch.cuda.empty_cache()
         logger.info('Released idle local model %s before loading %s', previous, name)
+    _runtime['modelCacheLimit'] = limit
     from gliner import GLiNER
     from .relex_adapter import install
     started = time.monotonic()

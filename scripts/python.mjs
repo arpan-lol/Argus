@@ -14,7 +14,7 @@ if (mode === 'setup' && !existsSync(venv)) {
   if (created.error) throw created.error;
   if (created.status !== 0) process.exit(created.status ?? 1);
 }
-const python = existsSync(venv) ? venv : existsSync(legacyVenv) ? legacyVenv : (process.env.PYTHON || 'python');
+const python = process.env.ARGUS_PYTHON || (existsSync(venv) ? venv : existsSync(legacyVenv) ? legacyVenv : (process.env.PYTHON || 'python'));
 if (mode === 'setup' && spawnSync(python, ['-m', 'pip', '--version'], { cwd: root, stdio: 'ignore', windowsHide: true }).status !== 0) {
   const seeded = spawnSync(python, ['-m', 'ensurepip', '--upgrade'], { cwd: root, stdio: 'inherit', windowsHide: true });
   if (seeded.status !== 0) process.exit(seeded.status ?? 1);
