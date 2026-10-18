@@ -131,26 +131,39 @@ class IngestionPipeline:
             rows = conn.execute('SELECT j.id,j.status,j.source_id,j.created_at,s.filename FROM ingestion_jobs j JOIN ingestion_sources s ON s.id=j.source_id WHERE j.id=ANY(%s) ORDER BY s.filename', (identifiers,)).fetchall()
         return serialize([{'id': row['id'], 'status': row['status'], 'documentId': row['source_id'], 'filename': row['filename'], 'createdAt': row['created_at']} for row in rows])
 
-    def get_job(self, job_id):
-        row = self.job_row(job_id)
-        with connection() as conn:
-            attempts = conn.execute("SELECT * FROM ingestion_attempts WHERE job_id=%s ORDER BY id", (job_id,)).fetchall()
-            artifacts = {r["stage"]: r["payload"] for r in conn.execute("SELECT stage,CASE WHEN stage='chunk' THEN jsonb_build_object('count',jsonb_array_length(payload->'chunks')) ELSE payload END AS payload FROM ingestion_artifacts WHERE job_id=%s AND stage IN ('chunk','publish')", (job_id,)).fetchall()}
-            item_counts = conn.execute("SELECT stage,count(*) AS count FROM ingestion_items WHERE job_id=%s GROUP BY stage", (job_id,)).fetchall()
+    def job_response(self, row, attempts, artifacts, item_counts, publication_state):
         stages = []
         for stage in STAGES:
-            history = [a for a in attempts if a["stage"] == stage]
+            history = [attempt for attempt in attempts if attempt["stage"] == stage]
             latest = history[-1] if history else {}
             stages.append({"name": stage, "status": latest.get("status", "queued"), "attempts": len(history), "error": latest.get("error"), "startedAt": latest.get("started_at"), "completedAt": latest.get("finished_at"), "durationMs": latest.get("duration_ms"), "metadata": latest.get("metadata", {}), "history": history})
-        return serialize({"id": row["id"], "filename": row["filename"], "documentId": row["source_id"], "status": row["status"], "currentStage": row["current_stage"], "createdAt": row["created_at"], "updatedAt": row["updated_at"], "error": row["error"], "revision": row["revision"], "processingVersion": row["processing_version"], "configuration": row["configuration"], "stages": stages, "chunkCount": artifacts.get("chunk", {}).get("count", 0), "itemCounts": item_counts, "counts": artifacts.get("publish", {}), "publicationState": self.item(job_id, "publication_state", "current")})
+        return serialize({"id": row["id"], "filename": row["filename"], "documentId": row["source_id"], "status": row["status"], "currentStage": row["current_stage"], "createdAt": row["created_at"], "updatedAt": row["updated_at"], "error": row["error"], "revision": row["revision"], "processingVersion": row["processing_version"], "configuration": row["configuration"], "stages": stages, "chunkCount": artifacts.get("chunk", {}).get("count", 0), "itemCounts": item_counts, "counts": artifacts.get("publish", {}), "publicationState": publication_state})
+
+    def job_details(self, rows):
+        identifiers = [row['id'] for row in rows]
+        grouped = {identifier: {'attempts': [], 'artifacts': {}, 'counts': [], 'publication': None} for identifier in identifiers}
+        if identifiers:
+            with connection() as conn:
+                for attempt in conn.execute('SELECT * FROM ingestion_attempts WHERE job_id=ANY(%s) ORDER BY id', (identifiers,)).fetchall():
+                    grouped[attempt['job_id']]['attempts'].append(attempt)
+                for artifact in conn.execute("SELECT job_id,stage,CASE WHEN stage='chunk' THEN jsonb_build_object('count',jsonb_array_length(payload->'chunks')) ELSE payload END AS payload FROM ingestion_artifacts WHERE job_id=ANY(%s) AND stage IN ('chunk','publish')", (identifiers,)).fetchall():
+                    grouped[artifact['job_id']]['artifacts'][artifact['stage']] = artifact['payload']
+                for count in conn.execute('SELECT job_id,stage,count(*) AS count FROM ingestion_items WHERE job_id=ANY(%s) GROUP BY job_id,stage', (identifiers,)).fetchall():
+                    grouped[count['job_id']]['counts'].append({'stage': count['stage'], 'count': count['count']})
+                for state in conn.execute("SELECT job_id,payload FROM ingestion_items WHERE job_id=ANY(%s) AND stage='publication_state' AND item_id='current'", (identifiers,)).fetchall():
+                    grouped[state['job_id']]['publication'] = state['payload']
+        return [self.job_response(row, grouped[row['id']]['attempts'], grouped[row['id']]['artifacts'], grouped[row['id']]['counts'], grouped[row['id']]['publication']) for row in rows]
+
+    def get_job(self, job_id):
+        return self.job_details([self.job_row(job_id)])[0]
 
     def list_jobs(self, limit=50, offset=0):
         from app.projects.scope import current_project
         project_id = current_project.get()
         with connection() as conn:
-            rows = conn.execute("SELECT id FROM ingestion_jobs WHERE project_id IS NOT DISTINCT FROM %s ORDER BY (status='running') DESC,(status IN ('failed','waiting_configuration','interrupted')) DESC,(status='registered') ASC,updated_at DESC LIMIT %s OFFSET %s", (project_id, limit, offset)).fetchall()
+            rows = conn.execute("SELECT j.*,s.filename FROM ingestion_jobs j JOIN ingestion_sources s ON s.id=j.source_id WHERE j.project_id IS NOT DISTINCT FROM %s ORDER BY (j.status='running') DESC,(j.status IN ('failed','waiting_configuration','interrupted')) DESC,(j.status='registered') ASC,j.updated_at DESC LIMIT %s OFFSET %s", (project_id, limit, offset)).fetchall()
             total = conn.execute("SELECT count(*) AS count FROM ingestion_jobs WHERE project_id IS NOT DISTINCT FROM %s", (project_id,)).fetchone()["count"]
-        return {"jobs": [self.get_job(row["id"]) for row in rows], "total": total, "limit": limit, "offset": offset}
+        return {"jobs": self.job_details(rows), "total": total, "limit": limit, "offset": offset}
 
     def artifact(self, job_id, stage):
         with connection() as conn:
