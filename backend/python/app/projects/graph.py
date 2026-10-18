@@ -13,6 +13,7 @@ from .scope import project_scope
 
 
 _summary_cache = {}
+_SOURCE_LAYOUT = 'network'
 
 
 router = APIRouter(prefix='/projects/{project_id}/map', dependencies=[Depends(project_scope)])
@@ -27,63 +28,62 @@ def store_layout(pipeline, job):
     chunks = pipeline.artifact(job['id'], 'chunk')['chunks']
     with connection() as conn:
         items = {(row['stage'], row['item_id']): row['payload'] for row in conn.execute("SELECT stage,item_id,payload FROM ingestion_items WHERE job_id=%s AND stage=ANY(%s)", (job['id'], ['extract', 'resolve'])).fetchall()}
-    for mode in ('network', 'grouped'):
-        with connection() as conn:
-            conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))', ('project-layout:' + project_id + mode,))
-            root = conn.execute('SELECT x,y FROM project_layouts WHERE project_id=%s AND mode=%s AND node_id=%s', (project_id, mode, job['source_id'])).fetchone()
-            count = conn.execute("SELECT count(*) AS n FROM project_layouts WHERE project_id=%s AND mode=%s AND payload->>'type'='document'", (project_id, mode)).fetchone()['n']
-            angle = count * math.pi * (3 - math.sqrt(5))
-            radius = 1200 * math.sqrt(count)
-            x, y = (root['x'], root['y']) if root else (radius * math.cos(angle), radius * math.sin(angle))
-            pending = []
-            def put(identifier, kind, px, py, label, **metadata):
-                payload = {'id': identifier, 'type': kind, 'label': label[:100], 'preview': label[:180], 'jobId': job['id'], **metadata}
-                pending.append((project_id, mode, identifier, px, py, Jsonb(payload)))
-            put(job['source_id'], 'document', x, y, document['metadata'].get('title', job['filename']), documentId=job['source_id'])
-            section_positions = {}
-            for position, section in enumerate(sections):
-                angle = math.tau * position / max(1, len(sections))
-                sx, sy = (x + (position - len(sections) / 2) * 130, y + 150) if mode == 'grouped' else (x + 250 * math.cos(angle), y + 250 * math.sin(angle))
-                section_positions[section['id']] = (sx, sy)
-                put(section['id'], 'section', sx, sy, section['title'], documentId=job['source_id'], sectionId=section['id'])
-            child_counts = {}
-            chunk_positions = {}
-            for chunk in chunks:
-                primary, _ = chunk_sections(chunk, sections)
-                sx, sy = section_positions[primary['id']]
-                ordinal = child_counts.get(primary['id'], 0)
-                child_counts[primary['id']] = ordinal + 1
-                angle = ordinal * math.pi * (3 - math.sqrt(5))
-                r = 55 * math.sqrt(ordinal + 1)
-                cx, cy = (sx + (ordinal % 9 - 4) * 28, sy + 90 + ordinal // 9 * 30) if mode == 'grouped' else (sx + r * math.cos(angle), sy + r * math.sin(angle))
-                put(chunk['id'], 'chunk', cx, cy, chunk['text'], documentId=job['source_id'], sectionId=primary['id'], chunkId=chunk['id'])
-                chunk_positions[chunk['id']] = (cx, cy)
-                extracted = items['extract', chunk['id']]
-                for entity in extracted['entities']:
-                    from app.ingestion.config import fingerprint
-                    mention_id = 'mention:' + fingerprint([chunk['id'], entity['key']])
-                    decision = items['resolve', mention_id]
-                    entity_id = decision['canonicalId']
-                    h = int(hashlib.sha256(entity_id.encode()).hexdigest()[:12], 16)
-                    ea = h / (16 ** 12) * math.tau
-                    put(entity_id, 'entity', cx + 80 * math.cos(ea), cy + 80 * math.sin(ea), entity['name'], entityType=entity['entity_type'])
-            for entity in document.get('codeGraph', {}).get('entities', []):
+    with connection() as conn:
+        conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))', ('project-layout:' + project_id + _SOURCE_LAYOUT,))
+        root = conn.execute('SELECT x,y FROM project_layouts WHERE project_id=%s AND mode=%s AND node_id=%s', (project_id, _SOURCE_LAYOUT, job['source_id'])).fetchone()
+        count = conn.execute("SELECT count(*) AS n FROM project_layouts WHERE project_id=%s AND mode=%s AND payload->>'type'='document'", (project_id, _SOURCE_LAYOUT)).fetchone()['n']
+        angle = count * math.pi * (3 - math.sqrt(5))
+        radius = 1200 * math.sqrt(count)
+        x, y = (root['x'], root['y']) if root else (radius * math.cos(angle), radius * math.sin(angle))
+        pending = []
+        def put(identifier, kind, px, py, label, **metadata):
+            payload = {'id': identifier, 'type': kind, 'label': label[:100], 'preview': label[:180], 'jobId': job['id'], **metadata}
+            pending.append((project_id, _SOURCE_LAYOUT, identifier, px, py, Jsonb(payload)))
+        put(job['source_id'], 'document', x, y, document['metadata'].get('title', job['filename']), documentId=job['source_id'])
+        section_positions = {}
+        for position, section in enumerate(sections):
+            angle = math.tau * position / max(1, len(sections))
+            sx, sy = x + 250 * math.cos(angle), y + 250 * math.sin(angle)
+            section_positions[section['id']] = (sx, sy)
+            put(section['id'], 'section', sx, sy, section['title'], documentId=job['source_id'], sectionId=section['id'])
+        child_counts = {}
+        chunk_positions = {}
+        for chunk in chunks:
+            primary, _ = chunk_sections(chunk, sections)
+            sx, sy = section_positions[primary['id']]
+            ordinal = child_counts.get(primary['id'], 0)
+            child_counts[primary['id']] = ordinal + 1
+            angle = ordinal * math.pi * (3 - math.sqrt(5))
+            r = 55 * math.sqrt(ordinal + 1)
+            cx, cy = sx + r * math.cos(angle), sy + r * math.sin(angle)
+            put(chunk['id'], 'chunk', cx, cy, chunk['text'], documentId=job['source_id'], sectionId=primary['id'], chunkId=chunk['id'])
+            chunk_positions[chunk['id']] = (cx, cy)
+            extracted = items['extract', chunk['id']]
+            for entity in extracted['entities']:
                 from app.ingestion.config import fingerprint
-                from app.ingestion.publication import semantic_graph_name
-                entity_id = 'entity:' + fingerprint([semantic_graph_name(job['configuration']), entity['name'].strip(), entity['type']])
-                supporting = next((chunk for chunk in chunks if chunk['startOffset'] < entity['end'] and chunk['endOffset'] > entity['start']), None)
-                if supporting:
-                    ax, ay = chunk_positions[supporting['id']]
-                    h = int(hashlib.sha256(entity_id.encode()).hexdigest()[:12], 16)
-                    ea = h / (16 ** 12) * math.tau
-                    put(entity_id, 'entity', ax + 80 * math.cos(ea), ay + 80 * math.sin(ea), entity['name'], entityType=entity['type'], extractionMethod='python_ast')
-            with conn.cursor() as cursor:
-                cursor.executemany('INSERT INTO project_layouts(project_id,mode,node_id,x,y,payload) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(project_id,mode,node_id) DO UPDATE SET payload=excluded.payload', pending)
+                mention_id = 'mention:' + fingerprint([chunk['id'], entity['key']])
+                decision = items['resolve', mention_id]
+                entity_id = decision['canonicalId']
+                h = int(hashlib.sha256(entity_id.encode()).hexdigest()[:12], 16)
+                ea = h / (16 ** 12) * math.tau
+                put(entity_id, 'entity', cx + 80 * math.cos(ea), cy + 80 * math.sin(ea), entity['name'], entityType=entity['entity_type'])
+        for entity in document.get('codeGraph', {}).get('entities', []):
+            from app.ingestion.config import fingerprint
+            from app.ingestion.publication import semantic_graph_name
+            entity_id = 'entity:' + fingerprint([semantic_graph_name(job['configuration']), entity['name'].strip(), entity['type']])
+            supporting = next((chunk for chunk in chunks if chunk['startOffset'] < entity['end'] and chunk['endOffset'] > entity['start']), None)
+            if supporting:
+                ax, ay = chunk_positions[supporting['id']]
+                h = int(hashlib.sha256(entity_id.encode()).hexdigest()[:12], 16)
+                ea = h / (16 ** 12) * math.tau
+                put(entity_id, 'entity', ax + 80 * math.cos(ea), ay + 80 * math.sin(ea), entity['name'], entityType=entity['type'], extractionMethod='python_ast')
+        with conn.cursor() as cursor:
+            cursor.executemany('INSERT INTO project_layouts(project_id,mode,node_id,x,y,payload) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(project_id,mode,node_id) DO UPDATE SET payload=excluded.payload', pending)
 
 
-def nodes_for(project_id, mode, bounds=None, limit=800, documents_only=False, identifiers=None):
+def nodes_for(project_id, bounds=None, limit=800, documents_only=False, identifiers=None):
     query = "SELECT l.* FROM project_layouts l WHERE l.project_id=%s AND l.mode=%s AND (((l.payload->>'type')='entity' AND EXISTS(SELECT 1 FROM ingestion_resolution_decisions d JOIN ingestion_publications p ON p.job_id=d.job_id JOIN ingestion_jobs j ON j.id=d.job_id WHERE d.canonical_id=l.node_id AND p.active AND j.project_id=l.project_id)) OR ((l.payload->>'type')<>'entity' AND EXISTS(SELECT 1 FROM ingestion_publications p WHERE p.job_id=l.payload->>'jobId' AND p.active)))"
-    parameters = [project_id, mode]
+    parameters = [project_id, _SOURCE_LAYOUT]
     if bounds:
         query += ' AND l.x BETWEEN %s AND %s AND l.y BETWEEN %s AND %s'
         parameters.extend([bounds['minX'], bounds['maxX'], bounds['minY'], bounds['maxY']])
@@ -169,26 +169,26 @@ def shared_document_connections(nodes):
 
 
 @router.get('/overview')
-def overview(project_id: str, mode: str = Query('network', pattern='^(network|grouped)$')):
-    nodes, truncated = nodes_for(project_id, mode, limit=2000, documents_only=True)
+def overview(project_id: str):
+    nodes, truncated = nodes_for(project_id, limit=2000, documents_only=True)
     bounds = {'minX': min((node['x'] for node in nodes), default=0) - 500, 'maxX': max((node['x'] for node in nodes), default=0) + 500, 'minY': min((node['y'] for node in nodes), default=0) - 500, 'maxY': max((node['y'] for node in nodes), default=0) + 500}
     edges, summary_truncated = shared_document_connections(nodes)
     return {'nodes': nodes, 'edges': edges, 'bounds': bounds, 'source': 'published semantic sources', 'truncated': truncated, 'summaryTruncated': summary_truncated}
 
 
 @router.get('/view')
-def view(project_id: str, minX: float, maxX: float, minY: float, maxY: float, zoom: float, mode: str = Query('network', pattern='^(network|grouped)$'), limit: int = Query(800, ge=1, le=1000)):
+def view(project_id: str, minX: float, maxX: float, minY: float, maxY: float, zoom: float, limit: int = Query(800, ge=1, le=1000)):
     bounds = {'minX': minX, 'maxX': maxX, 'minY': minY, 'maxY': maxY}
-    documents, _ = nodes_for(project_id, mode, bounds, limit, True)
+    documents, _ = nodes_for(project_id, bounds, limit, True)
     documents_only = zoom < .12 and len(documents) > 16
-    nodes, truncated = nodes_for(project_id, mode, bounds, limit, documents_only)
+    nodes, truncated = nodes_for(project_id, bounds, limit, documents_only)
     shared_edges, summary_truncated = shared_document_connections(documents)
     return {'nodes': nodes, 'edges': [*shared_edges, *connections(nodes)], 'level': 'documents' if documents_only else 'detail', 'truncated': truncated, 'summaryTruncated': summary_truncated, 'source': 'falkordb', 'status': 'ready'}
 
 
 @router.get('/locate/{identifier}')
-def locate(project_id: str, identifier: str, mode: str = Query('network', pattern='^(network|grouped)$')):
-    nodes, _ = nodes_for(project_id, mode, identifiers=[identifier])
+def locate(project_id: str, identifier: str):
+    nodes, _ = nodes_for(project_id, identifiers=[identifier])
     if not nodes:
         raise HTTPException(404, 'Graph node not published in this project')
     node = nodes[0]
@@ -196,19 +196,19 @@ def locate(project_id: str, identifier: str, mode: str = Query('network', patter
 
 
 @router.get('/node/{identifier}')
-def inspect(project_id: str, identifier: str, mode: str = Query('network', pattern='^(network|grouped)$')):
-    node = locate(project_id, identifier, mode)['node']
+def inspect(project_id: str, identifier: str):
+    node = locate(project_id, identifier)['node']
     return {**node, 'description': node.get('entityType', ''), 'content': {'text': node['preview']}}
 
 
 @router.get('/neighborhood/{identifier}')
-def neighborhood(project_id: str, identifier: str, mode: str = Query('network', pattern='^(network|grouped)$')):
-    focus = locate(project_id, identifier, mode)['node']
+def neighborhood(project_id: str, identifier: str):
+    focus = locate(project_id, identifier)['node']
     graph = graph_connection(processing_config())
     rows = graph.ro_query("MATCH p=(a {id:$id})-[:MENTIONS|RELATES|HAS_SECTION|HAS_CHUNK*1..2]-(b) WHERE all(n IN nodes(p) WHERE n.active=true) AND all(r IN relationships(p) WHERE type(r)<>'RELATES' OR r.active=true) RETURN DISTINCT b.id LIMIT 201", {'id': identifier}, timeout=1500).result_set
     shared = graph.ro_query("MATCH (a:Chunk {id:$id})-[:MENTIONS]->(e:Entity)<-[:MENTIONS]-(b:Chunk) WHERE a.active=true AND e.active=true AND b.active=true AND a.documentId<>b.documentId RETURN DISTINCT e.id,e.label,b.id,b.documentId LIMIT 41", {'id': identifier}, timeout=1500).result_set if focus['type'] == 'chunk' else []
     identifiers = [identifier, *[row[0] for row in rows[:200]], *[value for entity, label, chunk, document in shared[:40] for value in (entity, chunk, document)]]
-    nodes, truncated = nodes_for(project_id, mode, identifiers=identifiers)
+    nodes, truncated = nodes_for(project_id, identifiers=identifiers)
     titles = {node['id']: node['label'] for node in nodes if node['type'] == 'document'}
     paths = [{'sourceChunkId': identifier, 'targetChunkId': chunk, 'entityId': entity, 'label': label, 'documentId': document, 'documentTitle': titles.get(document, 'Connected source')} for entity, label, chunk, document in shared[:40]]
     return {'nodes': nodes, 'edges': connections(nodes), 'paths': paths, 'truncated': truncated or len(rows) > 200 or len(shared) > 40, 'note': 'Published local connections. Shared mentions are navigation, not agreement between sources.', 'focusId': focus['id']}

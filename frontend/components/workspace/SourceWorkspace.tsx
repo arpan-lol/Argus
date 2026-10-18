@@ -44,7 +44,6 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [dark, setDark] = useState(false);
-  const [mapMode, setMapMode] = useState<'network' | 'grouped'>('network');
   const [graphView, setGraphView] = useState<'knowledge' | 'sources'>('knowledge');
   const [explorerExpanded, setExplorerExpanded] = useState(false);
   const [graphCompact, setGraphCompact] = useState(false);
@@ -76,7 +75,6 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
     void workspaceApi<{model: string; coverage: ChatCoverage}>('/chat-config').then(setChatConfig).catch(() => undefined);
     const saved = savedRuns(projectId);
     void Promise.all(saved.slice(-12).map(id => workspaceApi<SavedChat>(`/chat/${id}`).catch(() => null))).then(runs => setTurns(runs.filter((run): run is SavedChat => !!run).map(run => ({id: run.runId, runId: run.runId, query: run.query, model: run.model, events: run.events, result: run.result || undefined, error: run.result ? undefined : run.error || 'This investigation has saved progress. Reconnect to continue.'}))));
-    setMapMode(localStorage.getItem('argus-map-mode') === 'grouped' ? 'grouped' : 'network');
     const value = localStorage.getItem('falkor-theme') === 'dark';
     setDark(value);
     window.document.documentElement.classList.toggle('dark', value);
@@ -99,9 +97,9 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
     if (!selectedNode) { setNodeDetails(null); return; }
     let active = true;
     setNodeDetails(null);
-    void workspaceApi<Record<string, unknown>>(`/map/node/${encodeURIComponent(selectedNode.id)}?mode=${mapMode}`).then(next => { if (active) setNodeDetails(next); }).catch(() => undefined);
+    void workspaceApi<Record<string, unknown>>(`/map/node/${encodeURIComponent(selectedNode.id)}`).then(next => { if (active) setNodeDetails(next); }).catch(() => undefined);
     return () => { active = false; };
-  }, [selectedNode, mapMode, workspaceApi]);
+  }, [selectedNode, workspaceApi]);
 
   useEffect(() => {
     const dialog = explorerDialog.current;
@@ -322,8 +320,8 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
               </ResizablePanel>
               <ResizableHandle withHandle className="ce-source-resize" aria-label="Resize files and graph" />
               <ResizablePanel ref={graphPanel} defaultSize={55} minSize={10} onResize={size => setGraphCompact(size < 20)} className={`ce-project-graph-panel ${graphCompact ? 'is-compact' : ''}`}>
-              <div className="ce-map-toolbar"><div className="ce-map-modes" role="group" aria-label="Graph view"><button aria-pressed={graphView === 'knowledge'} onClick={() => setGraphView('knowledge')}>Knowledge graph</button><button aria-pressed={graphView === 'sources'} onClick={() => setGraphView('sources')}>Source graph</button></div>{graphView === 'sources' && <div className="ce-map-modes" role="group" aria-label="Source graph layout"><button aria-pressed={mapMode === 'network'} onClick={() => { setMapMode('network'); localStorage.setItem('argus-map-mode', 'network'); }}>Network</button><button aria-pressed={mapMode === 'grouped'} onClick={() => { setMapMode('grouped'); localStorage.setItem('argus-map-mode', 'grouped'); }}>Trees</button></div>}<button className="ce-icon" onClick={() => setExplorerExpanded(value => !value)} aria-label={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'} title={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'}>{explorerExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button></div>
-              <div className="ce-project-graph-content">{graphView === 'knowledge' ? <KnowledgeGraph apiRoot={root} refreshToken={graphVersion} focus={mapFocus} onSource={target => { setGraphView('sources'); setMapFocus({nodeId: target.nodeId, nonce: Date.now()}); graphPanel.current?.resize(75); }} /> : <GraphMap apiRoot={root} refreshToken={graphVersion} mode={mapMode} focus={mapFocus} onSelect={selectNode} onFocus={target => { if (target.documentId) focusSource(target.documentId, target.chunkId); }} />}{chatConfig?.coverage.publishedDocuments === 0 && <div className="ce-project-graph-empty"><p>Your graph starts here.<br />Connections appear as source files finish ingestion.</p></div>}</div>
+              <div className="ce-map-toolbar"><div className="ce-map-modes" role="group" aria-label="Graph view"><button aria-pressed={graphView === 'knowledge'} onClick={() => setGraphView('knowledge')}>Knowledge graph</button><button aria-pressed={graphView === 'sources'} onClick={() => setGraphView('sources')}>Source graph</button></div><button className="ce-icon" onClick={() => setExplorerExpanded(value => !value)} aria-label={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'} title={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'}>{explorerExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button></div>
+              <div className="ce-project-graph-content">{graphView === 'knowledge' ? <KnowledgeGraph apiRoot={root} refreshToken={graphVersion} focus={mapFocus} onSource={target => { setGraphView('sources'); setMapFocus({nodeId: target.nodeId, nonce: Date.now()}); graphPanel.current?.resize(75); }} /> : <GraphMap apiRoot={root} refreshToken={graphVersion} focus={mapFocus} onSelect={selectNode} onFocus={target => { if (target.documentId) focusSource(target.documentId, target.chunkId); }} />}{chatConfig?.coverage.publishedDocuments === 0 && <div className="ce-project-graph-empty"><p>Your graph starts here.<br />Connections appear as source files finish ingestion.</p></div>}</div>
               </ResizablePanel>
             </ResizablePanelGroup>
           </div>
@@ -334,7 +332,7 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
     <dialog ref={nodeDialog} className="ce-node-dialog" onCancel={() => setSelectedNode(null)} onClick={event => { if (event.target === event.currentTarget) setSelectedNode(null); }} aria-labelledby="node-title">
       <div className="ce-node-dialog-heading"><h2 id="node-title">{selectedNode?.type === 'chunk' ? 'Chunk preview' : selectedNode?.type === 'document' ? 'Source document' : selectedNode?.label}</h2><button className="ce-icon" onClick={() => setSelectedNode(null)} aria-label="Close node details"><X size={18} /></button></div>
       {selectedNode?.documentId && <div className="ce-node-source"><span>Source</span><button disabled={!sourceTitle} onClick={() => { if (selectedNode?.documentId) { showGraph(); setMapFocus({nodeId:selectedNode.documentId,nonce:Date.now()}); } setSelectedNode(null); }}>{sourceTitle || 'Loading document…'}{sourceTitle && <ArrowUpRight size={15} />}</button></div>}
-      {(selectedNode?.type === 'entity' || selectedNode?.type === 'group') && typeof nodeDetails?.description === 'string' && <p className="ce-node-description">{nodeDetails.description}</p>}
+      {selectedNode?.type === 'entity' && typeof nodeDetails?.description === 'string' && <p className="ce-node-description">{nodeDetails.description}</p>}
       {selectedNode?.type !== 'document' && <p className="ce-node-content">{typeof recordContent?.text === 'string' ? recordContent.text : selectedChunk?.text || selectedSection?.title || selectedNode?.preview}</p>}
       <div className="ce-node-actions">{selectedNode?.type === 'chunk' && <button className="ce-open-file" onClick={() => { setMapFocus({nodeId:selectedNode.id,nonce:Date.now()}); showGraph(); setSelectedNode(null); }}><Network size={15} />Explore connections</button>}<button className="ce-open-file" onClick={() => { if (selectedNode) setMapFocus({nodeId:selectedNode.id,nonce:Date.now()}); showGraph(); setSelectedNode(null); }}><Network size={15} />Show in graph</button></div>
     </dialog>

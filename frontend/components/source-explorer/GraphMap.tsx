@@ -6,7 +6,7 @@ import styles from './GraphMap.module.css';
 import { ConnectionPaths, type ConnectionPath } from './ConnectionPaths';
 
 export type MapNode = {
-  id: string; type: 'group' | 'document' | 'section' | 'chunk' | 'entity';
+  id: string; type: 'document' | 'section' | 'chunk' | 'entity';
   label: string; preview?: string; x: number; y: number; radius?: number;
   documentId?: string; sectionId?: string; chunkId?: string; count?: number;
   [key: string]: unknown;
@@ -20,7 +20,6 @@ type ScreenEdge = { edge: MapEdge; points: { x: number; y: number }[]; minX: num
 type Props = {
   apiRoot?: string;
   refreshToken?: number;
-  mode?: 'network' | 'grouped';
   expanded?: boolean;
   onExpand?: () => void;
   focus?: { nodeId: string; nonce: number } | null;
@@ -28,8 +27,8 @@ type Props = {
   onFocus?: (focus: { documentId?: string; sectionId?: string; chunkId?: string }) => void;
 };
 
-const names = { group: 'Source group', document: 'Document', section: 'Section', chunk: 'Chunk', entity: 'Entity' };
-const colors = { group: '#b99540', document: '#c6a34f', section: '#869ab2', chunk: '#5b9b88', entity: '#a187b5' };
+const names = { document: 'Document', section: 'Section', chunk: 'Chunk', entity: 'Entity' };
+const colors = { document: '#c6a34f', section: '#869ab2', chunk: '#5b9b88', entity: '#a187b5' };
 const empty: MapView = { nodes: [], edges: [], level: 'overview' };
 const mergeViews = (previous: MapView, next: MapView): MapView => {
   const nodes = [...new Map([...previous.nodes, ...next.nodes].map(node => [node.id, node])).values()].slice(-3000);
@@ -75,14 +74,14 @@ const edgeMeaning = (edge: MapEdge) => {
   return meanings[edge.type] || ['Source connection', 'A recorded relationship between these sources.'];
 };
 
-async function request<T>(path: string, signal?: AbortSignal, mode = 'network', apiRoot = ''): Promise<T> {
-  const response = await fetch(`/api${apiRoot}/map${path}${path.includes('?') ? '&' : '?'}mode=${mode}`, { cache: 'no-store', signal });
+async function request<T>(path: string, signal?: AbortSignal, apiRoot = ''): Promise<T> {
+  const response = await fetch(`/api${apiRoot}/map${path}`, { cache: 'no-store', signal });
   if (!response.ok) throw new Error('The source map could not load. Retry when the server is available.');
   return response.json();
 }
 
-export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFocus, mode = 'network', expanded = false, onExpand }: Props) {
-  const mapRequest = useCallback(<T,>(path: string, signal?: AbortSignal) => request<T>(path, signal, mode, apiRoot), [mode, apiRoot]);
+export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFocus, expanded = false, onExpand }: Props) {
+  const mapRequest = useCallback(<T,>(path: string, signal?: AbortSignal) => request<T>(path, signal, apiRoot), [apiRoot]);
   const host = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const camera = useRef<Camera>({ x: 0, y: 0, zoom: .015 });
@@ -101,8 +100,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
   const viewportRequestKey = useRef('');
   const observedRefreshToken = useRef(refreshToken);
   const viewportEffectRefreshToken = useRef(refreshToken);
-  const readyMode = useRef<string | null>(null);
-  const modeCameras = useRef<Partial<Record<'network' | 'grouped', Camera>>>({});
+  const ready = useRef(false);
   const fitted = useRef(false);
   const current = useRef<MapView>(empty);
   const screenNodes = useRef<{ node: MapNode; x: number; y: number; radius: number }[]>([]);
@@ -242,10 +240,9 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       const { node, x, y } = point;
       if (x < -100 || y < -70 || x > width + 100 || y > height + 70) continue;
       const active = node.id === selected.current || node.id === hovered.current || pathIds.has(node.id);
-      const group = node.type === 'group';
       context.globalAlpha = opacity(node.id);
-      const coarse = projected.size > 160 && desired === 'overview' && !group && !(path ? pathIds.has(node.id) : linkIds.has(node.id)) && !active;
-      const radius = group ? Math.max(7, Math.min(17, c.zoom * 4096 * .33)) : coarse ? 1 : node.type === 'document' ? 7 : node.type === 'entity' ? 6 : 4.5;
+      const coarse = projected.size > 160 && desired === 'overview' && !(path ? pathIds.has(node.id) : linkIds.has(node.id)) && !active;
+      const radius = coarse ? 1 : node.type === 'document' ? 7 : node.type === 'entity' ? 6 : 4.5;
       screenNodes.current.push({ node, x, y, radius: radius + (coarse ? 2 : 7) });
       if (coarse) {
         context.beginPath(); context.arc(x, y, radius, 0, Math.PI * 2);
@@ -255,13 +252,9 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       context.beginPath(); context.arc(x, y, radius + (active ? 4 : 0), 0, Math.PI * 2);
       context.fillStyle = active ? (dark ? '#655a39' : '#fffaf0') : colors[node.type]; context.fill();
       context.strokeStyle = active ? (dark ? '#f1db9b' : '#594a32') : (dark ? '#171918' : '#fffaf0'); context.lineWidth = active ? 2 : 1.5; context.stroke();
-      if (group) {
-        context.font = `600 ${radius < 12 ? 9 : 11}px sans-serif`; context.textAlign = 'center'; context.textBaseline = 'middle';
-        context.fillStyle = dark ? '#e8d49e' : '#725d26'; context.fillText(String(node.count || ''), x, y);
-      }
       const showLabel = path ? pathIds.has(node.id) || node.id === hovered.current : active || (linkIds.has(node.id) && node.type !== 'section') || (node.type === 'document' && (c.zoom > .12 || projected.size < 30)) || (node.type === 'entity' && projected.size < 100);
       if (showLabel) {
-        const label = clip(node.label || node.preview || names[node.type], node.type === 'group' ? 20 : node.type === 'document' && c.zoom < .28 ? 14 : 31);
+        const label = clip(node.label || node.preview || names[node.type], node.type === 'document' && c.zoom < .28 ? 14 : 31);
         context.font = `${active ? 600 : 400} 11px sans-serif`;
         const labelWidth = context.measureText(label).width + 12;
         context.fillStyle = dark ? '#1b211eed' : '#fffaf0ed';
@@ -384,7 +377,6 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
   };
 
   const activate = (node: MapNode) => {
-    if (node.type === 'group') { void fly(node.id); return; }
     if (node.type === 'document' && camera.current.zoom < .45) { void fly(node.id); return; }
     selected.current = node.id;
     if (node.type === 'chunk' || node.type === 'entity') void loadConnections(node.id);
@@ -398,7 +390,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     viewportRequestKey.current = '';
     ++refreshSequence.current;
     disposed.current = false;
-    readyMode.current = null; ++navigationSequence.current;
+    ready.current = false; ++navigationSequence.current;
     setLoading(true); setError(null); clearConnections();
     world.current = null; overview.current = empty; current.current = empty; appeared.current.clear(); appearanceUntil.current = 0;
     renderLimitReached.current = false; setRenderTruncated(false); setSummaryTruncated(false);
@@ -426,17 +418,16 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     const theme = new MutationObserver(draw); theme.observe(window.document.documentElement, { attributes: true, attributeFilter: ['class'] });
     const controller = new AbortController();
     overviewRequest.current = controller;
-    mapRequest<{ bounds: Bounds; nodes?: MapNode[]; groups?: MapNode[]; edges?: MapEdge[]; truncated?: boolean; summaryTruncated?: boolean }>('/overview', controller.signal).then(result => {
+    mapRequest<{ bounds: Bounds; nodes?: MapNode[]; edges?: MapEdge[]; truncated?: boolean; summaryTruncated?: boolean }>('/overview', controller.signal).then(result => {
       if (!active || generation !== mapGeneration.current) return;
-      world.current = result.bounds; overview.current = { nodes: result.nodes || result.groups || [], edges: result.edges || [], level: 'overview', truncated: result.truncated, summaryTruncated: result.summaryTruncated };
+      world.current = result.bounds; overview.current = { nodes: result.nodes || [], edges: result.edges || [], level: 'overview', truncated: result.truncated, summaryTruncated: result.summaryTruncated };
       setTruncated(!!result.truncated);
       setSummaryTruncated(!!result.summaryTruncated);
-      const saved = modeCameras.current[mode];
-      if (saved) move(saved); else fit();
-      readyMode.current = mode; setLoading(false);
+      fit();
+      ready.current = true; setLoading(false);
     }).catch(failure => { if (active && generation === mapGeneration.current && failure.name !== 'AbortError') { setError(failure.message); setLoading(false); } });
-    return () => { modeCameras.current[mode] = { ...camera.current }; active = false; disposed.current = true; controller.abort(); overviewRequest.current = null; refreshRequest.current?.abort(); viewportRequest.current?.abort(); neighborhoodRequest.current?.abort(); resize.disconnect(); theme.disconnect(); cancelAnimationFrame(animation.current); cancelAnimationFrame(revealAnimation.current); };
-  }, [draw, fit, move, connectionCamera, clearConnections, mapRequest, mode, reload]);
+    return () => { active = false; disposed.current = true; controller.abort(); overviewRequest.current = null; refreshRequest.current?.abort(); viewportRequest.current?.abort(); neighborhoodRequest.current?.abort(); resize.disconnect(); theme.disconnect(); cancelAnimationFrame(animation.current); cancelAnimationFrame(revealAnimation.current); };
+  }, [draw, fit, move, connectionCamera, clearConnections, mapRequest, reload]);
 
   useEffect(() => {
     let active = true, sequence = 0, pending = false;
@@ -449,7 +440,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       if (!world.current || pending || navigating.current || performance.now() < travelingUntil.current) return;
       const c = camera.current, { width, height } = dimensions.current;
       const { bounds, query } = viewportQuery(c, width, height);
-      const key = `${mode}|${query}`;
+      const key = query;
       if (key === viewportRequestKey.current) return;
       if (c.zoom < .025 && overview.current.nodes.length > 100) {
         viewportRequestKey.current = key; setTruncated(!!overview.current.truncated);
@@ -468,7 +459,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     };
     const interval = window.setInterval(load, 180); load();
     return () => { active = false; window.clearInterval(interval); viewportRequest.current?.abort(); };
-  }, [draw, mapRequest, reload, refreshToken, mode]);
+  }, [draw, mapRequest, reload, refreshToken]);
 
   useEffect(() => {
     if (observedRefreshToken.current === refreshToken) return;
@@ -487,15 +478,15 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     const preserve = new Set([selected.current, hovered.current, ...((neighborhood.current?.nodes || []).map(node => node.id))].filter((id): id is string => !!id));
     const hadDocuments = overview.current.nodes.length > 0;
     void Promise.all([
-      mapRequest<{ bounds: Bounds; nodes?: MapNode[]; groups?: MapNode[]; edges?: MapEdge[]; truncated?: boolean; summaryTruncated?: boolean }>('/overview', controller.signal),
+      mapRequest<{ bounds: Bounds; nodes?: MapNode[]; edges?: MapEdge[]; truncated?: boolean; summaryTruncated?: boolean }>('/overview', controller.signal),
       mapRequest<MapView>(`/view?${query}`, controller.signal),
     ]).then(([freshOverview, freshView]) => {
       if (controller.signal.aborted || generation !== mapGeneration.current || sequence !== refreshSequence.current) return;
-      const overviewNodes = freshOverview.nodes || freshOverview.groups || [];
+      const overviewNodes = freshOverview.nodes || [];
       world.current = freshOverview.bounds;
       overview.current = { nodes: overviewNodes, edges: freshOverview.edges || [], level: 'overview', truncated: freshOverview.truncated, summaryTruncated: freshOverview.summaryTruncated };
       current.current = boundedView(mergeViews({ ...current.current, nodes: current.current.nodes.filter(node => preserve.has(node.id)), edges: current.current.edges.filter(edge => preserve.has(edge.source) && preserve.has(edge.target)) }, freshView), target, dimensions.current, preserve);
-      viewportRequestKey.current = `${mode}|${query}`;
+      viewportRequestKey.current = query;
       setTruncated(!!freshOverview.truncated || !!freshView.truncated || !!current.current.truncated);
       setSummaryTruncated(!!freshView.summaryTruncated || !!freshOverview.summaryTruncated);
       setAccessible(freshView.nodes.slice(0, 200));
@@ -513,9 +504,9 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       if (refreshRequest.current === controller) refreshRequest.current = null;
     });
     return () => { controller.abort(); };
-  }, [refreshToken, mapRequest, mode, draw, fit]);
+  }, [refreshToken, mapRequest, draw, fit]);
 
-  useEffect(() => { if (!loading && readyMode.current === mode && focus?.nodeId) void fly(focus.nodeId); }, [focus?.nodeId, focus?.nonce, fly, loading, mode]);
+  useEffect(() => { if (!loading && ready.current && focus?.nodeId) void fly(focus.nodeId); }, [focus?.nodeId, focus?.nonce, fly, loading]);
 
   const hit = (x: number, y: number) => { for (let index = screenNodes.current.length - 1; index >= 0; index--) { const point = screenNodes.current[index]; if (Math.hypot(point.x - x, point.y - y) <= point.radius) return point.node; } return undefined; };
   const hitEdge = (x: number, y: number) => {
@@ -590,7 +581,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     {summaryTruncated && !error && !connectionsOpen && <div className={`${styles.limit} ${truncated || renderTruncated ? styles.limitSecondary : ''}`}>Some derived shared-entity links are hidden in this overview</div>}
     {connectionsOpen && <ConnectionPaths paths={connections?.paths || []} loading={connectionsLoading} error={connectionsError} truncated={connections?.truncated} activeTargetChunkId={activeConnection?.targetChunkId} onFollow={followConnection} onClose={clearConnections} />}
     <div className={styles.controls}><button aria-label="Zoom in" onClick={() => zoomBy(1.7)}><Plus size={16} /></button><button aria-label="Zoom out" onClick={() => zoomBy(1 / 1.7)}><Minus size={16} /></button>{onExpand && <button aria-label={expanded ? 'Collapse Source Explorer' : 'Expand Source Explorer'} onClick={onExpand}>{expanded ? <Minimize2 size={15} /> : <Expand size={15} />}</button>}<button aria-label="Show whole source map" onClick={fit}><LocateFixed size={15} /></button><button aria-label="About the source map" aria-expanded={help} onClick={() => setHelp(value => !value)}><HelpCircle size={16} /></button></div>
-    {help && <div className={styles.help}><strong>Your sources, connected</strong><p>{mode === 'grouped' ? 'Groups organize documents for navigation. Zoom in for document trees; group membership is not a topic classification.' : 'Each point is a document. Positions remain stable as documents arrive. Dashed edges summarize common entities.'}</p><dl className={styles.edgeMeanings}><div><dt>HAS_SECTION / HAS_CHUNK</dt><dd>Document → Section → Chunk.</dd></div><div><dt>NEXT_CHUNK</dt><dd>Reading order within a document.</dd></div><div><dt>MENTIONS</dt><dd>A chunk contains a mention of this entity.</dd></div><div><dt>Shared entity · derived</dt><dd>Both documents mention a common entity.</dd></div></dl><p>Containment and mention edges describe source structure. RELATES edges show extracted semantic predicates; inspect their source and status.</p></div>}
+    {help && <div className={styles.help}><strong>Your sources, connected</strong><p>Each point is a document. Positions remain stable as documents arrive. Dashed edges summarize common entities.</p><dl className={styles.edgeMeanings}><div><dt>HAS_SECTION / HAS_CHUNK</dt><dd>Document → Section → Chunk.</dd></div><div><dt>NEXT_CHUNK</dt><dd>Reading order within a document.</dd></div><div><dt>MENTIONS</dt><dd>A chunk contains a mention of this entity.</dd></div><div><dt>Shared entity · derived</dt><dd>Both documents mention a common entity.</dd></div></dl><p>Containment and mention edges describe source structure. RELATES edges show extracted semantic predicates; inspect their source and status.</p></div>}
     <div className={styles.keyboard}><label htmlFor="map-node-keyboard">Navigate visible sources</label><select id="map-node-keyboard" value="" onChange={event => { const node = [...current.current.nodes, ...(neighborhood.current?.nodes || [])].find(item => item.id === event.target.value); if (node) activate(node); }}><option value="">Choose a visible source</option>{[...new Map([...accessible, ...(connections?.nodes || [])].map(node => [node.id, node])).values()].map(node => <option key={node.id} value={node.id}>{names[node.type]}: {clip(node.label, 70)}</option>)}</select></div>
   </div>;
 }
