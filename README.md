@@ -1,130 +1,188 @@
-# Argus
+![Argus · Multi Agent GraphRAG for ANY Workload](assets/readme/argus-cover.png)
 
-An inspectable source workspace powered by FalkorDB. Python and LangGraph run ingestion, Postgres stores processing state and BM25 indexes, and FalkorDB stores the semantic graph and vectors. The Next.js dashboard retains central chat and a resizable Source Explorer.
+Argus is a **GraphRAG workspace with multiple agents** built on [FalkorDB](https://www.falkordb.com/).
+
+It combines dynamic ingestion, hybrid retrieval, and bounded graph traversal to help answer questions whose context is spread across files and connected concepts.
+
+## GraphRAG on steroids:
+
+Every graph connection points back to a source. The agent can inspect that source and try another path.
+
+## Powerful Ingestion Pipelines for any use case
+
+* Argus picks a reader based on the selected data category. Documents and code use different pipelines
+* Document text is split into passages. Search vectors and graph records are built from those passages
+* An AI Agent samples the files to learn useful entity and relationship labels before sending for ingestion
+* *This helped us save tokens by avoiding sending every chunk to an LLM for entity relationships*
+* [GLiNER](https://github.com/urchade/GLiNER) finds names in text. [GLiNER RelEx](https://huggingface.co/knowledgator/gliner-relex-base-v1.0) finds relationships between them
+* Argus checks each result against the source text. It groups repeated names before publishing the graph.
+* Codebase ingestions uses a separate Agent based on [Flow](https://github.com/samyakkkk/flow)
+* Then, a syntax parser also records imports, definitions, and calls.
+* Postgres tracks files and jobs. FalkorDB stores the graph and search vectors and everything in between!
+
+## Best of Traditional RAG
+
+* **Hybrid Retrieval with BM25 and RRF reranking** can be toggled on/off
+* This helps when a question mixes exact names with different wording.
+* A matching passage gives the graph a starting point. Argus follows its entities and searches for connections across sources.
+* Search scores rank possible answers. The cited passages support the final answer!
+
+## Multi Agent Architecture
+
+* The chat agent decides when to search, read a passage, check an entity, or follow a graph path.
+* Tools listed [here](#retrieval-tools).
+* Independent tool calls can run at the same time. Argus combines their results before the next step.
+* The agent adds parameters to Falkor searches. It cannot write its own database queries
+* A separate agent reads code repositories and builds their graphs
+
+## Backtracking when a path does not hold up
+
+* Each graph relationship points to the passage that supports it.
+* `review_path` checks every step in a found path against the current source.
+* If a step looks wrong, `path_between` can avoid it and search for another route.
+* The trace shows both attempts. A matching quote still needs human or agent interpretation
+* We noticed this technique getting popular in the graphRAG community, so decided to put it to the test!
+
+## Hella Transparent
+
+* Every file shows its processing steps, status, and time spent.
+* Chat shows searches, graph steps, sources, and timings as the agent works.
+* Clicking a citation opens the exact passage behind the answer.
+* These traces help locate missing text, weak graph links, and poor search results.
+
+## Duo Graph Viewers
+
+* The source graph shows files, passages, and where entities appear.
+* The knowledge graph shows entities and their recorded relationships.
+* The same entity can appear in many files. Each occurrence remains linked to its source.
+* The viewer loads nearby graph detail as needed. Citations take users back to the source.
+
+Argus supports code, research, security, and structured documents.
+
+## Product
+
+### On a Networking Documentation dump
+
+![Argus workspace with chat, uploaded source files, and a knowledge graph for a network defense corpus](assets/readme/network-defense-workspace.png)
+
+### Ingesting the FalkorDB GraphRAG SDK codebase!
+
+![Argus codebase workspace with a source graph and a cited multi-hop path across FalkorDB SDK files](assets/readme/falkordb-sdk-workspace.png)
+
+
+## Architecture
+
+### Ingestion overview
+
+![Argus routes codebases and documents into separate ingestion pipelines](assets/readme/ingestion-overview.png)
+
+### Document pipeline
+
+![Document pipeline: read and normalize, discover labels, chunk, embed, extract entities and relationships, validate, resolve, and publish](assets/readme/pipeline-documents.png)
+
+Argus reads documents and splits them into passages. It embeds passages in batches. [GLiNER](https://github.com/urchade/GLiNER) finds names. [GLiNER RelEx](https://huggingface.co/knowledgator/gliner-relex-base-v1.0) finds relationships. Argus checks where each result came from before saving it in FalkorDB. A brief setup pass samples the workspace to choose useful labels. It does not send every passage to a paid language model!
+
+### Codebase pipeline
+
+![Codebase pipeline: parse and chunk source files, batch embeddings, codebase agent reads and stages source-cited claims, then validate, resolve, and publish](assets/readme/pipeline-codebase.png)
+
+Code uses a separate agent. It reads files, searches them, and records connections with source citations. A syntax parser adds imports, definitions, inheritance, and named calls.
+
+### Retrieval pipeline
+
+![Argus retrieval flow: hybrid BM25 and vector search, RRF, graph traversal, assertion inspection, and cited answer](assets/readme/retrieval-find-sources.png)
+
+![Argus follows bounded, source-cited graph hops and inspects each assertion before composing an answer](assets/readme/retrieval-traverse-answer.png)
+
+The agent can search passages, inspect graph relationships, and follow paths. It can check a weak step and try another route. Every graph step keeps its source. The final answer cites those sources.
+
+### Retrieval tools
+
+| Tool | Purpose |
+| --- | --- |
+| `search_sources` | Find passages and explore their graph links. |
+| `resolve_entities` | Match names to graph entities. Show ambiguous matches. |
+| `read_chunks` | Read a passage and nearby text. |
+| `inspect_assertions` | Show a relationship and its source quote. |
+| `blast_radius` | Show reachable entities and sources for each step. |
+| `path_between` | Find a route between two entities. Avoid rejected steps. |
+| `review_path` | Check each step against current source text. |
+| `load_bearing` | Rank graph connectivity with PageRank. |
+| `source_authors` | Read credited authors from file metadata. |
+| `recent_changes` | Show when Argus indexed sources. |
+
+The agent uses these tools instead of writing database queries. Some older tool names remain inside the service. The agent does not see them. It can list its available tools when asked. See [FalkorDB's vector index documentation](https://falkordb.github.io/docs-staging/cypher/indexing/vector-index/) for details on vector search.
 
 ## Run locally
 
-Requirements: Python 3.12 (the tested local extraction runtime), Node.js 22.13+, npm, and Docker.
+### Requirements
+
+* Docker Desktop or Docker Engine with the Compose plugin
+* Node.js 22.13 or newer and npm
+* Python 3.12
+* At least 16 GB RAM is recommended for local extraction. The first run downloads model weights.
+* Azure deployments for chat, ingestion setup, and embeddings
+
+### 1. Start the databases
+
+From the repository root:
 
 ```powershell
 docker compose up -d
+```
+
+The development Compose file starts Postgres with `pg_search` and FalkorDB. Data persists in Docker volumes between restarts.
+
+### 2. Install the app and Python environment
+
+```powershell
 npm run setup
+```
+
+This installs the frontend dependencies, creates `backend/python/.venv` if needed, and installs the pinned Python requirements from `backend/python/requirements-lock.txt`.
+
+### 3. Configure Azure models
+
+Create the ignored local environment file:
+
+```powershell
 Copy-Item backend/python/.env.example backend/python/.env
+```
+
+Edit `backend/python/.env` and set:
+
+| Variable | Value |
+| --- | --- |
+| `LLM1_DEPLOYMENT_NAME` | Your stronger Azure model deployment for conversational research and retrieval |
+| `LLM1_DEPLOYMENT_URL` | The Azure Responses API URL for the LLM1 deployment |
+| `LLM1_DEPLOYMENT_KEY` | The LLM1 API key |
+| `LLM2_DEPLOYMENT_NAME` | Your smaller, lower-cost Azure model deployment for ingestion |
+| `LLM2_DEPLOYMENT_URL` | The Azure Responses API URL for the LLM2 deployment |
+| `LLM2_DEPLOYMENT_KEY` | The LLM2 API key |
+| `EMBEDDING_MODEL_NAME` | Your Azure embedding deployment name |
+| `EMBEDDING_MODEL_ENDPOINT` | The Azure endpoint for the embedding deployment |
+| `EMBEDDING_MODEL_KEY` | Its API key |
+
+Set both language model roles and the embedding deployment. LLM1 powers chat. LLM2 handles document setup and code reading. Embeddings power vector search. These deployments can share an Azure resource or use separate ones. Keep all keys local. The example file includes local database settings.
+
+### 4. Start Argus
+
+```powershell
 npm run dev
 ```
 
-Configure Azure LLM2 and the separate embedding deployment in ignored backend/.env or backend/python/.env before model processing. LLM2 is GPT-4.1 mini for all ingestion LLM work; LLM1/GPT-5 is reserved for the separately developed agent and is never selected by ingestion. `npm run setup` creates the local Python virtual environment when missing. The first local GLiNER run downloads model weights. All services bind to localhost; authentication remains outside this implementation pass.
+Open the workspace home at [http://localhost:3001](http://localhost:3001). The local service addresses are:
 
-- Dashboard: http://localhost:3001/dashboard
-- Python API and OpenAPI: http://localhost:4000/docs
-- FalkorDB Browser: http://localhost:3000
-- Postgres with pg_search: localhost:5434, database/user `argus`, development password `argus_local`.
-- FalkorDB Browser connection: localhost:6379, user `default`, empty password, TLS off.
-
-`npm run build` compiles Python and builds the frontend. `backend/src/` is retained as an inactive TypeScript migration reference; standard startup uses Python. `dev:legacy` is explicitly historical.
-
-## Ingestion
-
-Create a workspace on the home screen, select one or more document categories, describe the dataset, and choose files, a folder or a repository ZIP. Files selected in the creation modal follow the regular workspace upload path. A blank description is requested before uploading. New workspaces use the current local extraction contract; historical jobs retain their saved configuration and are not automatically reprocessed.
-
-Categories seed entity and relationship types. Direct LLM2 requests receive random source chunks grouped into adaptive batches of up to 10,000 source tokens, with one to four requests in flight based on uploaded file count and disk bytes. There are no tools or fixed model call counts. A persisted 30-second admission window starts when workspace discovery begins: no further call starts afterward, and an active response may finish subject to its normal 120-second request timeout. Later files reuse the saved workspace settings.
-
-The shared workspace budget defaults to 300,000 reserved tokens across calls and resumes. Reservations include the complete sampled request, schema, a conservative input allowance and up to 1,536 output tokens. Actual reported usage is shown separately. Reservations are not refunded after failures or crashes. Initial sampling is streamed; it does not pre-tokenize the whole corpus before the first batch. Entity types are capped at 24 and relationship types at 32 to bound local inference cost and overlapping labels.
-
-The Python/LangGraph flow is register Ã¢â€ â€™ parse Ã¢â€ â€™ normalize Ã¢â€ â€™ chunk, then chunk embeddings, initial entity extraction and workspace label discovery run in parallel. GLiNER-relex starts after the labels are ready. Entity resolution, source validation and graph publication follow. Entity embeddings are deferred until explicit post-ingestion finalization. Each file has immutable originals, revision/configuration identities, attempts, item artifacts, timings and checkpoints. Local model or provider failures remain explicit and retryable.
-
-Plain GLiNER extracts entity spans. Those spans are retained alongside GLiNER-relex results, deduplicated by source location. GLiNER-relex jointly extracts entities and relationships locally; there is no per-chunk LLM extraction or LLM duplicate judging. It uses entity threshold 0.4, adjacency threshold 0.65 and relation threshold 0.8, within the model authors' documented ranges. Its scores are uncalibrated and can be confidently wrong. Exact source offsets and valid relationship endpoints are checked; this does not independently validate the relation's meaning or classify negation. Model relations retain `unclassified` polarity and extraction provenance.
-
-Python source uses the built-in AST parser for imports, symbol definitions, inheritance and named call references. Qualified symbols preserve case and link matching references across files. These are syntax links; unresolved names are explicitly marked and do not establish runtime dispatch. GLiNER-relex processes Python comments and docstrings. Other supported languages retain source text and use local extraction; full semantic analysis for those languages is not implemented. Code syntax and model predictions expose their distinct provenance to retrieval tools.
-
-Readers support JATS/XML/NXML and gzip, text/Markdown/MDX, source code, HTML, text-bearing PDF, DOCX, PPTX, EML, CSV/TSV, XLSX, JSON and JSONL. HTML/DOCX/table readers retain structural blocks; PPTX includes slide/table locations, EML retains sender/recipient/subject context, and spreadsheets distinguish formulas from cached values without executing formulas. Native STIX JSON preserves explicit object IDs and relationships without local semantic extraction; exact external-ID occurrences link native records to prose sources as uploads accumulate. They preserve page/section/cell/record locations where the format supports them. JATS body accounting stops ingestion on actual text loss; abstract-only input is allowed with a coverage label. The optional `backend/python/requirements-layout.txt` installs Docling for category-routed PDF layout and table extraction. Otherwise PDFs use the text reader with an explicit warning. OCR, legacy Office binaries and arbitrary binary formats are not enabled.
-
-Repository ZIPs retain paths and originals, reject unsafe paths, links, encrypted entries and oversized archives, and report skipped generated or unsupported files. Folder uploads apply the same file selection policy. New publications and later uploads update the workspace graph through a reconnecting live processing stream, with a fallback snapshot refresh after inactivity. Both graph layouts and citation navigation use published records. The file reader is temporarily disabled; uploads, file lists and processing activity remain active. Readable UTF-8 or BOM UTF-16 repository files can be uploaded individually regardless of extension. Common generated/private files, images, media and unknown binary content are excluded with a visible reason.
-
-Chunking adapts the FalkorDB SDK v1.4.0 sentence/token algorithm with a 512-token cap and two-sentence overlap. Python and other source code use line boundaries. Oversized units split at exact source character boundaries. Normalized whitespace and citation offsets are retained; the modification notice and Apache-2.0 license remain under backend/python/licenses/.
-
-Exact normalized entity names and types use SDK-style grouping without model judgment. Per-file resolution does not call the embedding model for entities. Existing valid entity vectors are retained, but new entity vectors are deferred. After a workspace upload batch is complete, `POST /api/projects/{projectId}/finalize-entities` can explicitly backfill missing active-entity name vectors and create the entity vector index. It is resumable, refuses queued/running ingestion, and never runs automatically. Current source retrieval uses chunk vectors and does not require this optional entity index. Chunk and entity vectors use the separate Azure text-embedding-3-large deployment at native 3,072 dimensions. Relationship vectors are not generated; traversal uses stored relationships. A shared microbatch coordinator combines compatible chunk embedding work across file workers, with up to 256 inputs and 32,000 input tokens per request, two embedding dispatchers and a 40 ms coalescing window. Shared batch identifiers prevent duplicate usage accounting. Requests are checked against Azure array, per-input and aggregate token bounds. A Postgres admission ledger shares the ingestion allowance across workers, defaulting to 135,000 estimated tokens per rolling minute for the supplied 150,000 TPM deployment, leaving headroom for query traffic. Retry-After headers are honored. Provider latency and quota wait are recorded separately.
-
-Run `npm run setup` to install the pinned runtime into `backend/python/.venv`, which standard startup uses unless an isolated `backend/python/.venv-gpu` exists or `ARGUS_PYTHON` explicitly selects another interpreter. The first local model use may download weights; cached loading avoids remote revalidation when possible. Use `backend/python/requirements-dev.txt` for pytest. `ARGUS_RUN_STORAGE_TESTS=1` enables an isolated Postgres/FalkorDB check with synthetic files and mocked model outputs; it does not ingest the real corpus or call Azure.
-
-Originals, local model weights, credentials, backups and detailed progress remain outside Git. Do not ingest from `data/backups/` by default. Real ingestion is triggered by your file uploads in the UI.
-
-Four file workers prepare jobs concurrently. GLiNER and GLiNER-RelEx combine compatible chunks/files through shared local inference queues; tensor batches adapt to available memory. The RelEx adapter removes repeated identical span boundaries and ranks at most 64 candidate spans before quadratic pair scoring, with bounded projection activations. This prevents the observed tens-of-gigabytes intermediate allocation, but the span cap can reduce recall and its truncation is recorded. Memory-driven window splitting is a last resort and is recorded in source metadata.
-
-Archive uploads register sources/jobs and processing events in bulk, with a compact acknowledgement; detailed stage histories are loaded through the jobs API. Graph publication records recoverable cross-store phases in each job’s `publicationState`; retry resumes publication from persisted validated artifacts under a source lease. This is not a distributed transaction. Graph publication uses bounded UNWIND batches (32 vector records or 128 ordinary records), bulk staging reads and bulk layout writes. Canonical entity updates use a consistent identifier order to prevent concurrent row-lock deadlocks. Overview links summarize actual shared entities across documents; they do not imply scientific agreement.
-
-## Published retrieval tools
-
-`GET /api/retrieval/tools` lists nine typed tools. The original six are: `search_sources`, `find_entities`, `read_chunks`, `inspect_assertions`, `expand_connections`, and `find_paths`. The research extensions are `source_authors`, `recent_source_updates`, and `rank_entities`. Invoke one with `POST /api/retrieval/tools/{name}` and body `{"arguments": {...}}`. The agent receives these contracts rather than schema access or arbitrary Cypher. `app.retrieval.bindings.get_tools()` returns LangChain StructuredTools for typed retrieval integrations. The dashboard investigation uses these same bounded contracts; the same catalogue is exposed by the optional local MCP server.
-
-`POST /api/retrieval/search` accepts `{"query":"your question","mode":"hybrid","limit":10}`. Modes are lexical, vector and hybrid. Search combines published Postgres BM25 with native FalkorDB chunk ANN using reciprocal-rank fusion, constant 60. Query embeddings use explicit retrieval-query semantics, matching the publication's provider/model/dimensions, with a persistent profile-keyed cache. Hybrid channel failure is explicitly reported as partial, never silently disguised as hybrid success.
-
-Tools search only active semantic publications in the configured embedding space. They validate source revision and processing version, preserve exact quotation offsets, then recheck publication state before returning. Results retain assertion polarity, conditions, citations, timings, budget receipts and truncation reasons. Shared mentions are navigation rather than scientific assertions; composed paths do not establish a new scientific conclusion.
-
-Traversal uses bounded BFS over source-supported assertion adjacency: up to three hops, 20 assertions per expanded entity, 40 discovered entities and 100 returned assertions. The execution session admits up to 64 database operations with 1.5-second query timeouts and a soft 30-second elapsed budget; in-flight calls and final consistency/persistence can extend beyond it. Responses are capped at 64,000 characters. Snapshot scope is capped at 10,000 publications. ANN examines at most 240 indexed candidates before publication/document filtering and can underfill. Empty bounded results do not prove absence.
-
-For the pinned FalkorDB runtime, native cosine vector scores are distances (lower is nearer), confirmed by an identical-vector read returning approximately zero. Current upstream examples conflict with this runtime behavior; the API labels the signal `cosine_distance` explicitly. Neither BM25, distance nor fusion scores are confidence probabilities.
-
-Slice 4 was previously exercised on one semantic source before the reset. That source had incomplete body coverage under the old parser and is no longer published. Those observations do not establish cross-document quality or corpus-scale performance; the revised Azure pipeline is now being measured on an official cybersecurity/networking corpus. These ingestion observations are not a retrieval accuracy benchmark. Tool runs are persisted in the existing runs API, independently of ingestion jobs.
-
-The source map retains both Network and Trees layouts, stable positions, progressive viewport loading, citation navigation, and expanded modal viewing. The native FalkorDB Browser can inspect semantic graphs once fresh ingestion creates them.
-
-Downloaded corpus files, provider credentials, databases, model artifacts, and detailed local progress remain outside Git. The root docs/ folder is intentionally ignored.
-
-## Model deployment configuration
-
-
-Use the deployment variables in `backend/python/.env.example`:
-
-| Variables | Role |
+| Service | Address |
 | --- | --- |
-| `LLM1_DEPLOYMENT_NAME`, `LLM1_DEPLOYMENT_URL`, `LLM1_DEPLOYMENT_KEY` | Reserved for the separately developed agent; default deployment `gpt-5` |
-| `LLM2_DEPLOYMENT_NAME`, `LLM2_DEPLOYMENT_URL`, `LLM2_DEPLOYMENT_KEY` | Ingestion label discovery only; the current agent integration also selects this deployment for chat |
-| `AZURE_API_KEY` | Legacy agent fallback only; ingestion requires explicit role keys |
-| `AZURE_OPENAI_ENDPOINT` | Legacy provider setting; ingestion uses explicit embedding settings |
-| `EMBEDDING_MODEL_NAME`, `EMBEDDING_MODEL_ENDPOINT`, `EMBEDDING_MODEL_KEY` | Document and query embeddings; default model `text-embedding-3-large`, 3,072 dimensions |
+| Argus web app | [http://localhost:3001](http://localhost:3001) |
+| Python API and OpenAPI docs | [http://localhost:4000/docs](http://localhost:4000/docs) |
+| FalkorDB Browser | [http://localhost:3005](http://localhost:3005) |
+| Postgres | `localhost:5434` (`argus` / `argus_local`) |
+| FalkorDB Redis protocol | `localhost:6379` (development default has no password) |
 
-LLM URLs can be the complete Responses endpoint, such as `https://YOUR-RESOURCE.services.ai.azure.com/openai/v1/responses`. The application splits the API protocol from the base URL. A bare embedding resource endpoint gains `/openai/v1`; `/openai/v1/embeddings` is also accepted and normalized. An explicit `/models` embedding base uses the Azure inference API version. URLs must use HTTPS without credentials or query strings. Role-specific keys are used for their corresponding requests and never stored in processing profiles, graphs, or receipts. Responses requests use `store=false` and schema-validated output.
+Create a workspace, choose the relevant category or categories, describe the corpus, then upload files through the UI. The first local model use downloads GLiNER weights. Do not place credentials, private corpora, model weights, or database backups in Git.
 
-Chat and ingestion both use the configured `LLM2_*` deployment. `LLM1_*` is reserved for the separate agent and does not override chat. GPT-5 cannot be selected as LLM2 in new profiles. Ingestion requires LLM2 and never substitutes LLM1. Generic provider adapters remain available for the agent and historical profiles. Newly registered ingestion jobs always use the explicit LLM2 and embedding deployment settings; stale Google or legacy model variables cannot select an ingestion provider. The approved ingestion deployment uses native 3,072 dimensions.
+!!!
 
-Embedding model, dimensions, provider, and normalized Azure embedding endpoint define the new vector namespace and query cache. Existing vectors are retained; switching to a new namespace requires reprocessing sources before they become searchable there. Model and endpoint changes produce new processing versions rather than rewriting saved jobs. Provider errors do not silently select another model. Ingestion uses configured timeouts, rate limits and bounded retries.
-
-## Conversational research
-
-`POST /api/chat` returns NDJSON events for acceptance, model activity, real tool calls, usage, and the final cited report. Greetings receive a conversational answer without keyword searches. Research answers use the nine published-source tools, validate citation revisions and quotations, and open the cited processing job in Files. The legacy map retains its own identifiers and scope.
-
-Configure the `LLM2_*` deployment variables above to select the chat model. The `ARGUS_CHAT_*` budget and pricing settings remain independent. Responses requests use `store=false`.
-
-Postgres stores run events, tool receipts, budgets, and LangGraph checkpoints. `GET /api/chat/{runId}` reconnects to saved results; `POST /api/chat/{runId}/resume` retries an unfinished step. The browser retains at most 12 run IDs in session storage for reload recovery, and sends only two preceding turns as conversational context. New chat clears those browser references. There is no cross-conversation semantic memory.
-
-Each run admits at most eight model calls and eight retrieval calls, with 10,000 estimated context tokens, 2,048 maximum output tokens per call, and 64,000 reserved tokens overall. Two concurrent workers are allowed. A 180-second admission deadline and individual model request timeouts bound execution; in-flight work can exceed the admission deadline. Token reservations are estimates; reported usage is displayed separately. The optional $0.25 reservation limit applies only when both `ARGUS_CHAT_INPUT_USD_PER_MILLION` and `ARGUS_CHAT_OUTPUT_USD_PER_MILLION` are configured with deployment prices. No dollar cost is invented when prices are absent. Budget environment overrides in `.env.example` may lower these limits.
-
-Run recovery preserves previous budget reservations. Completed tool results replay from their receipts; a crash after a paid model call but before its checkpoint can cause that call to repeat on resume. Citation validation checks source identity and quotation offsets; it does not prove every generated interpretation. Available publication counts are shown in the chat and engine configuration.
-
-## Article-inspired research tools
-
-The six capabilities in [How to Build an Agent That Reasons Over a Graph](https://www.wemakedevs.org/blogs/how-to-build-an-agent-that-reasons-over-a-graph) are adapted to research sources:
-
-| Article tool | Argus tool | Research meaning |
-| --- | --- | --- |
-| `blast_radius` | `expand_connections` | Follow recorded assertions with bounded hops and citations; no causal impact is inferred. |
-| `who_to_wake` | `source_authors` | Read credited authors from a source's parsed metadata; no on-call or contact recommendations. |
-| `recent_changes` | `recent_source_updates` | Current source publications indexed in the last 1Ã¢â‚¬â€œ168 hours. Indexing time is separate from paper publication dates. |
-| `path_between` | `find_paths` | Return shortest discovered assertion paths within the configured bounds and support each hop. |
-| `load_bearing` | `rank_entities` | Rank connectivity in a bounded projection of current affirmed assertions. |
-| `recall` | Disabled | Long-term findings memory is off by explicit user choice. Direct API requests return `capability_disabled`. |
-
-The tool catalogue includes this mapping and availability. The chat can select the five active capabilities; it has no raw Cypher or schema tool. Disabling graph expansion also hides the ranking tool. Unknown document/entity IDs stop before dependent searches. Empty bounded results do not prove absence.
-
-Ranking computes PageRank over at most 200 source-validated assertions and 100 entities, with a 0.85 damping factor and 50-iteration cap. An optional entity ID restricts discovery to its bounded neighborhood. Duplicate directed entity pairs count as one edge; negated and uncertain assertions are excluded from ranking. Sampling, convergence and truncations are returned explicitly. This is connectivity in the sampled graph, not scientific importance, confidence, truth or causal influence. FalkorDB's whole-label PageRank procedure cannot filter the current publication snapshot, so ranking runs in process over fixed read-only FalkorDB queries instead of ranking retired graph records.
-
-Author and indexing-event citations are revalidated against the active publication, original normalized author metadata, or recorded indexing timestamp. They open the pinned processing job's reader, where authors and indexing time are displayed. Metadata citations do not establish scientific findings. Existing passage citations retain exact quotation/offset validation. All tools keep the existing per-call database, time, output, and publication-consistency limits.
-
-Start the optional MCP stdio server from the repository root:
-
-```sh
-node scripts/python.mjs mcp
-```
-
-It uses the same typed schemas and execution layer as HTTP and LangGraph, exposes nine read-only research tools, limits concurrent executions to two, and provides structured results plus backward-compatible text. The server speaks on stdin/stdout and opens no additional listening port. Install the Python requirements and initialize the local databases through the normal setup first. No external MCP-client configuration is changed automatically.
+---
