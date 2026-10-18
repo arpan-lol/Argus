@@ -14,6 +14,26 @@ from defusedxml import ElementTree
 SUPPORTED = {".txt", ".md", ".markdown", ".xml", ".jats", ".nxml", ".html", ".htm", ".pdf", ".docx", ".csv", ".tsv", ".xlsx", ".json"}
 
 
+def _table_text(rows, headers=None):
+    normalized = [["" if value is None else str(value).strip() for value in row] for row in rows]
+    if not normalized:
+        return "", {"rows": [], "headers": headers or []}
+    labels = list(headers) if headers is not None else normalized[0]
+    data = normalized if headers is not None else normalized[1:]
+    rendered = []
+    for row_number, row in enumerate(data, 1):
+        cells = []
+        for index, value in enumerate(row):
+            if not value:
+                continue
+            label = labels[index] if index < len(labels) else f"Column {index + 1}"
+            cells.append(f"{label}: {value}" if label else value)
+        if cells:
+            rendered.append("; ".join(cells))
+    structured = {"headers": labels, "rows": normalized, "dataRows": data}
+    return "\n".join(rendered) or "\n".join("\t".join(row) for row in normalized), structured
+
+
 def decode_source_text(raw, partial=False):
     encoding = "utf-16" if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else "utf-8-sig"
     try:
@@ -45,7 +65,7 @@ def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_a
                 raise ValueError("Office archive exceeds configured member or expanded-byte processing limits")
     blocks = []
     text_characters = 0
-    metadata = {"filename": path.name, "format": suffix, "parser": "source-blocks-3", "warnings": []}
+    metadata = {"filename": path.name, "format": suffix, "parser": "source-blocks-4", "warnings": []}
 
     def add(text, kind="paragraph", location=None, structured=None):
         nonlocal text_characters
@@ -109,9 +129,9 @@ def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_a
                 if tag == "table":
                     rows = [["".join(cell.itertext()).strip() for cell in row if cell.tag.split("}")[-1] in {"td", "th"}] for row in node.iter() if row.tag.split("}")[-1] == "tr"]
                     source_text = "".join(node.itertext())
-                    row_text = "\n".join("\t".join(row) for row in rows)
+                    row_text, table_structured = _table_text(rows)
                     retained = row_text if non_whitespace(row_text) == non_whitespace(source_text) else source_text
-                    add(retained, "table", location, {"rows": rows, "textRendering": "rows" if retained == row_text else "source_text"})
+                    add(retained, "table", location, {**table_structured, "textRendering": "rows_with_headers" if retained == row_text else "source_text"})
                 else:
                     kind = "citation" if tag in {"mixed-citation", "element-citation"} else "heading" if tag in {"title", "article-title"} else "preformatted" if tag == "preformat" else "caption" if tag == "caption" else "paragraph"
                     add("".join(node.itertext()), kind, location)
@@ -150,51 +170,124 @@ def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_a
         metadata["warnings"].extend(reasons)
     elif suffix == ".pdf":
         from pypdf import PdfReader
+        page_count = 0
+        readable_pages = 0
         for index, page in enumerate(PdfReader(io.BytesIO(raw)).pages):
+            page_count += 1
             text = page.extract_text() or ""
+            readable_pages += bool(text.strip())
             add(text, location={"pageNumber": index + 1})
             if not text.strip():
                 metadata["warnings"].append(f"Page {index + 1} has no extractable text; OCR is not configured")
         metadata["warnings"].append("PDF text reading order is parser-derived; coordinates and table structure are not reconstructed")
+        if readable_pages < page_count:
+            metadata["sourceCoverage"] = {"scope": "available_pdf_text", "pageCount": page_count, "pagesWithText": readable_pages, "pagesWithoutText": [i + 1 for i, page in enumerate(PdfReader(io.BytesIO(raw)).pages) if not (page.extract_text() or "").strip()], "coverageLabel": "partial_pdf_text", "limitedSource": True, "requiresAttention": True, "attentionReasons": ["One or more pages have no extractable text; OCR is unavailable, so processing must not continue as complete source coverage."]}
     elif suffix == ".docx":
         from docx import Document
         document = Document(io.BytesIO(raw))
         from docx.oxml.ns import qn
         from docx.text.paragraph import Paragraph
         from docx.table import Table
+        section_path = []
         for index, element in enumerate(document.element.body):
             if element.tag == qn("w:p"):
                 paragraph = Paragraph(element, document)
-                add(paragraph.text, "heading" if paragraph.style.name.startswith("Heading") else "paragraph", {"structuralPath": f"body/{index}"})
+                is_heading = paragraph.style.name.startswith("Heading")
+                if is_heading:
+                    level = int(re.search(r"\d+", paragraph.style.name).group()) if re.search(r"\d+", paragraph.style.name) else 1
+                    section_path = section_path[:max(0, level - 1)] + [paragraph.text.strip()]
+                add(paragraph.text, "heading" if is_heading else "paragraph", {"structuralPath": f"body/{index}", "sectionPath": list(section_path)})
             elif element.tag == qn("w:tbl"):
                 rows = [[cell.text for cell in row.cells] for row in Table(element, document).rows]
-                add("\n".join("\t".join(row) for row in rows), "table", {"structuralPath": f"body/{index}"}, {"rows": rows})
+                rendered, structured = _table_text(rows)
+                add(rendered, "table", {"structuralPath": f"body/{index}", "sectionPath": list(section_path)}, structured)
     elif suffix == ".xlsx":
         from openpyxl import load_workbook
         from openpyxl.utils import get_column_letter
         for sheet in load_workbook(io.BytesIO(raw), read_only=True, data_only=False):
-            for index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-                cells = ["" if cell is None else str(cell) for cell in row]
-                add("\t".join(cells), "table", {"sheetName": sheet.title, "cellRange": f"A{index}:{get_column_letter(sheet.max_column)}{index}"}, {"cells": cells})
+            rows = list(sheet.iter_rows())
+            if not rows:
+                continue
+            headers = [str(cell.value) if cell.value is not None else f"Column {cell.column}" for cell in rows[0]]
+            for index, row in enumerate(rows, start=1):
+                cells = ["" if cell.value is None else str(cell.value) for cell in row]
+                rendered, structured = ("\t".join(cells), {"headers": headers, "rows": [cells], "isHeader": True}) if index == 1 else _table_text([cells], headers=headers)
+                structured["cells"] = [{"coordinate": cell.coordinate, "value": None if cell.value is None else str(cell.value), "formula": str(cell.value) if cell.data_type == "f" else None, "dataType": cell.data_type} for cell in row]
+                add(rendered, "table", {"sheetName": sheet.title, "rowNumber": index, "cellRange": f"A{index}:{get_column_letter(sheet.max_column)}{index}"}, structured)
     elif suffix in {".csv", ".tsv"}:
-        for index, row in enumerate(csv.reader(io.StringIO(decode_source_text(raw)), delimiter="\t" if suffix == ".tsv" else ",")):
-            add("\t".join(row), "table", {"structuralPath": f"row/{index + 1}"}, {"cells": row})
+        rows = list(csv.reader(io.StringIO(decode_source_text(raw)), delimiter="\t" if suffix == ".tsv" else ","))
+        headers = rows[0] if rows else []
+        for index, row in enumerate(rows):
+            rendered, structured = _table_text([row], headers=headers if index else None)
+            structured.update({"cells": row, "rowNumber": index + 1, "isHeader": index == 0})
+            add(rendered, "table", {"structuralPath": f"row/{index + 1}", "rowNumber": index + 1}, structured)
     elif suffix in {".html", ".htm"}:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(raw, "html.parser")
         for element in soup(["script", "style", "nav"]):
             element.decompose()
         metadata["title"] = soup.title.get_text() if soup.title else path.stem
+        section_path = []
         for index, element in enumerate(soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "pre", "table", "li"])):
             if element.find_parent(["table", "li", "pre"]):
                 continue
-            add(element.get_text(" ", strip=True), "heading" if re.fullmatch("h[1-6]", element.name) else "paragraph", {"structuralPath": f"{element.name}/{index}"})
+            is_heading = bool(re.fullmatch("h[1-6]", element.name))
+            if is_heading:
+                level = int(element.name[1])
+                section_path = section_path[:level - 1] + [element.get_text(" ", strip=True)]
+            location = {"structuralPath": f"{element.name}/{index}", "sectionPath": list(section_path)}
+            if element.name == "table":
+                rows = [[cell.get_text(" ", strip=True) for cell in row.find_all(["th", "td"], recursive=False)] for row in element.find_all("tr")]
+                rendered, structured = _table_text(rows)
+                add(rendered, "table", location, structured)
+            else:
+                add(element.get_text(" ", strip=True), "heading" if is_heading else "preformatted" if element.name == "pre" else "list_item" if element.name == "li" else "paragraph", location)
+    elif suffix in {".md", ".markdown"}:
+        text = decode_source_text(raw)
+        lines = text.splitlines()
+        section_path = []
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            stripped = line.strip()
+            if not stripped:
+                index += 1
+                continue
+            heading = re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", stripped)
+            if heading:
+                level, value = len(heading.group(1)), heading.group(2).strip()
+                section_path = section_path[:level - 1] + [value]
+                add(value, "heading", {"structuralPath": f"line/{index + 1}", "lineNumber": index + 1, "headingLevel": level, "sectionPath": list(section_path)})
+                index += 1
+                continue
+            if "|" in stripped and index + 1 < len(lines) and re.match(r"^\s*\|?\s*:?-{3,}", lines[index + 1]):
+                table_lines = [stripped]
+                index += 2
+                while index < len(lines) and "|" in lines[index] and lines[index].strip():
+                    table_lines.append(lines[index].strip())
+                    index += 1
+                rows = [[cell.strip() for cell in row.strip("|").split("|")] for row in [table_lines[0], *table_lines[1:]]]
+                rendered, structured = _table_text(rows)
+                add(rendered, "table", {"structuralPath": f"line/{index - len(table_lines) + 1}", "sectionPath": list(section_path)}, structured)
+                continue
+            start = index
+            paragraph = [stripped]
+            index += 1
+            while index < len(lines) and lines[index].strip() and not re.match(r"^#{1,6}\s+", lines[index].strip()):
+                paragraph.append(lines[index].strip())
+                index += 1
+            add(" ".join(paragraph), "paragraph", {"structuralPath": f"line/{start + 1}", "lineNumber": start + 1, "sectionPath": list(section_path)})
     else:
         text = decode_source_text(raw)
         if suffix == ".json":
-            json.loads(text)
-        for index, paragraph in enumerate(re.split(r"\n\s*\n", text)):
-            add(paragraph, "heading" if suffix in {".md", ".markdown"} and paragraph.lstrip().startswith("#") else "paragraph", {"structuralPath": f"block/{index}"})
+            value = json.loads(text)
+            records = value if isinstance(value, list) else value.get("records", []) if isinstance(value, dict) and isinstance(value.get("records"), list) else [value]
+            for index, record in enumerate(records):
+                rendered = json.dumps(record, ensure_ascii=False, sort_keys=True)
+                add(rendered, "record", {"structuralPath": f"record/{index + 1}", "recordNumber": index + 1}, {"record": record})
+        else:
+            for index, paragraph in enumerate(re.split(r"\n\s*\n", text)):
+                add(paragraph, "paragraph", {"structuralPath": f"block/{index}"})
     if not blocks:
         raise ValueError("Parser produced no readable text. This document may require OCR or a different parser.")
     return {"blocks": blocks, "metadata": metadata}
