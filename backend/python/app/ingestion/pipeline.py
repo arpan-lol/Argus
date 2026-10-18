@@ -56,6 +56,8 @@ def initialize():
                     conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s,0))", (row["id"],))
     with PostgresSaver.from_conn_string(settings.database_url) as saver:
         saver.setup()
+    from .codebase.storage import ensure
+    ensure()
 
 
 def serialize(value):
@@ -227,6 +229,10 @@ class IngestionPipeline:
                     summaries.append(f"{result['fallbackChunks']} chunks kept local GLiNER mentions after failed extraction; no relationships extracted for those chunks.")
                 if result.get("deferredMentions"):
                     summaries.append(f"{result['deferredMentions']} mentions kept separate; duplicate checks deferred.")
+                if result.get('method') == 'codebase_graph_builder':
+                    summaries.append('Repository graph builder: ' + str(result.get('steps', 0)) + ' shared workspace steps; ' + result.get('quality', 'unverified') + ' coverage')
+                    receipt['codebaseRunId'] = result.get('codebaseRunId')
+                    receipt['codebaseCoverage'] = result.get('coverage')
                 coverage = result.get("metadata", {}).get("sourceCoverage", {})
                 if coverage.get("limitedSource"):
                     receipt["limitedSource"] = True
@@ -304,6 +310,9 @@ class IngestionPipeline:
         row = self.job_row(job_id)
         if row['configuration'].get('contract') != processing_config(row.get('project_id'))['contract']:
             raise RuntimeError('This upload uses an earlier ingestion pipeline. Create a new workspace and upload the original files to rebuild with local extraction.')
+        from .codebase import selected
+        if selected(row) and row['configuration'].get('codeAgentVersion') != processing_config(row.get('project_id')).get('codeAgentVersion'):
+            raise RuntimeError('This code upload predates the repository graph builder. Upload the originals again to use the new codebase pipeline.')
         with connection() as conn:
             acquired = conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS acquired", (job_id,)).fetchone()["acquired"]
             if not acquired:
@@ -355,7 +364,11 @@ class IngestionPipeline:
 
     def stage_parse(self, job):
         from .parser_routing import parse_source
+        from .codebase import selected
         result = parse_source(job["original_path"], job["configuration"], job["filename"])
+        if selected(job) and result['metadata'].get('parser') == 'python_ast':
+            result['metadata']['parser'] = 'source_text'
+            result['metadata']['parserRoute']['selected'] = 'source_text'
         if job["source_url"]:
             result["metadata"]["sourceUrl"] = job["source_url"]
         return result
@@ -363,7 +376,14 @@ class IngestionPipeline:
     def stage_normalize(self, job):
         from .profiles import source_quality
         from .parser_routing import attach_structure
-        result = attach_structure(source_quality(normalize(self.artifact(job["id"], "parse"))), job["filename"])
+        from .codebase import selected
+        result = source_quality(normalize(self.artifact(job["id"], "parse")))
+        if not selected(job):
+            result = attach_structure(result, job["filename"])
+        else:
+            result['metadata']['codeIngestionRoute'] = 'codebase_agent'
+            if result['metadata'].get('parser') == 'python_ast':
+                result['metadata']['parser'] = 'source_text'
         for block in result["blocks"]:
             block["id"] = "block:" + fingerprint([job["id"], block["ordinal"]])
         return result
@@ -386,6 +406,9 @@ class IngestionPipeline:
         return {"chunks": len(chunks), "model": job["configuration"]["embeddingModel"], "dimensions": job["configuration"]["embeddingDimensions"], "storage": "Durable PostgreSQL staging; FalkorDB vector properties/index published only after validation"}
 
     def stage_configure(self, job):
+        from .codebase import selected, configure
+        if selected(job):
+            return configure(job)
         config = job["configuration"]
         from .profiles import prepare_profile
         from .categories import seed_settings
@@ -394,10 +417,18 @@ class IngestionPipeline:
         return seed_settings(config["categories"], config["profileEntityCap"], config["profileRelationshipCap"])
 
     def stage_mentions(self, job):
+        from .codebase import selected
+        if selected(job):
+            return {'method': 'codebase_graph_builder', 'mentions': 0, 'localInferenceSkipped': True}
         from .local_extraction import extract_early_mentions
         return extract_early_mentions(self, job)
 
     def stage_extract(self, job):
+        from .codebase import selected, extract
+        if selected(job, self.artifact(job['id'], 'configure')):
+            if not job['configuration'].get('codeAgentVersion'):
+                raise ConfigurationRequired('This code upload predates the repository graph builder. Upload the originals again; old extraction artifacts are not reused.')
+            return extract(self, job)
         from .local_extraction import extract_local
         return extract_local(self, job)
 

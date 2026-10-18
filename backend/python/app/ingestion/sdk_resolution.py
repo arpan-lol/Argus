@@ -19,10 +19,13 @@ def resolve_basic(pipeline, job):
             mention_id = 'mention:' + fingerprint([chunk['id'], entity['key']])
             identifier = stable_identifier(entity['name'])
             native_key = entity.get('nativeResolverKey')
+            code_key = entity.get('codeResolverKey')
             surface = entity['name'].strip().lower()
             identity_key = ['identifier', identifier.lower(), entity['entity_type'].strip().lower()] if identifier else ['surface', surface, entity['entity_type'].strip().lower()]
             if native_key:
                 identity_key = ['native_stix', native_key.lower(), entity['entity_type'].strip().lower()]
+            if code_key:
+                identity_key = ['codebase_agent', code_key, entity['entity_type']]
             canonical_id = 'entity:' + fingerprint([space, identity_key]) if not deferred else 'entity:' + fingerprint([job['id'], mention_id])
             records.append((entity, mention_id, canonical_id, deferred))
     structure = pipeline.artifact(job['id'], 'normalize').get('codeGraph', {})
@@ -49,8 +52,12 @@ def resolve_basic(pipeline, job):
         decision_id = 'resolution:' + fingerprint([job['id'], mention_id])
         verdict = 'deferred' if deferred else 'same'
         rationale = 'GLiNER fallback mention kept separate.' if deferred else 'STIX object ID and consistent native type key.' if entity.get('nativeResolverKey') else 'Exact qualified Python symbol, preserving case.' if entity['entity_type'].startswith('code_') else 'Stable identifier candidate grouping.' if stable_identifier(entity['name']) else 'Exact normalized name and type candidate grouping; identity is unverified and homonyms may remain.'
+        if entity.get('codeResolverKey'):
+            rationale = 'Repository graph-builder identity key, preserving case; source-supported concept, not independently verified identity.'
         decisions.append((decision_id, job['id'], mention_id, canonical_id, verdict, rationale, Jsonb([])))
         items.append((job['id'], mention_id, Jsonb({'mentionId': mention_id, 'canonicalId': canonical_id, 'decisionId': decision_id, 'deferred': deferred, 'reason': rationale, 'identityStatus': 'native_stix_id' if entity.get('nativeResolverKey') else 'exact_symbol' if entity['entity_type'].startswith('code_') else 'stable_identifier' if stable_identifier(entity['name']) else 'unverified_surface_form', 'nativeResolverKey': entity.get('nativeResolverKey'), 'nativeFormat': entity.get('nativeFormat')})))
+        if entity.get('codeResolverKey'):
+            items[-1][2].obj.update(identityStatus='agent_assigned_repository_key', codeResolverKey=entity['codeResolverKey'])
         mentions += 1
         deferred_count += int(deferred)
     with connection() as conn, conn.cursor() as cursor:
