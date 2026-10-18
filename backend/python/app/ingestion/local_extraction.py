@@ -3,6 +3,8 @@ import time
 from .extraction import source_span
 from .local_models import relex_many
 from .providers import Providers
+from .relation_schema import endpoint_types_allowed, relation_constraints
+from .semantic_context import sentence_context, source_context, valid_entity_mention
 
 
 def prose_segments(document, chunk):
@@ -18,15 +20,19 @@ def prose_segments(document, chunk):
     return segments
 
 
-def convert_output(chunk, result, offset=0):
+def convert_output(chunk, result, offset=0, constraints=None):
     entities = []
     positions = {}
+    types_by_key = {}
     for item in result["entities"]:
         start, end = item["start"] + offset, item["end"] + offset
         if chunk["text"][start:end] != item["text"]:
             raise ValueError("Local extractor entity offsets do not match the source")
+        if not valid_entity_mention(item["text"], item.get("label"), chunk["text"]):
+            continue
         key = "local_" + str(offset) + "_" + str(len(entities))
         positions[(item["start"], item["end"])] = key
+        types_by_key[key] = item["label"]
         span = source_span(chunk, start, end)
         entities.append({"key": key, "name": item["text"], "entity_type": item["label"], "description": "", "quote": item["text"], "confidence": float(item["score"]), "sourceSpan": span, "sourceSpans": [span], "sourceSpanStatus": "exact", "extractionMethod": "gliner_relex", "llmVerified": False})
     relations = []
@@ -35,20 +41,20 @@ def convert_output(chunk, result, offset=0):
         target = positions.get((edge["tail"]["start"], edge["tail"]["end"]))
         if not subject or not target or subject == target:
             continue
+        if not endpoint_types_allowed(edge["relation"], types_by_key[subject], types_by_key[target], constraints or {}):
+            continue
         left = offset + min(edge["head"]["start"], edge["tail"]["start"])
         right = offset + max(edge["head"]["end"], edge["tail"]["end"])
-        boundary = chunk["text"].rfind(". ", 0, left)
-        left = boundary + 2 if boundary >= 0 else 0
-        ending = chunk["text"].find(". ", right)
-        right = ending + 1 if ending >= 0 else len(chunk["text"])
+        context = sentence_context(chunk["text"], left, right)
         span = source_span(chunk, left, right)
-        relations.append({"subject": subject, "predicate": edge["relation"], "object": target, "quote": chunk["text"][left:right], "conditions": [], "polarity": "unclassified", "confidence": float(edge["score"]), "sourceSpan": span, "sourceSpans": [span], "sourceSpanStatus": "exact", "extractionMethod": "gliner_relex", "llmVerified": False, "polarityStatus": "not_classified_by_local_model"})
+        relations.append({"subject": subject, "predicate": edge["relation"], "object": target, "quote": chunk["text"][left:right], **source_context(context), "confidence": float(edge["score"]), "sourceSpan": span, "sourceSpans": [span], "sourceSpanStatus": "exact", "extractionMethod": "gliner_relex", "llmVerified": False})
     return {"entities": entities, "relationships": relations}
 
 
 def extract_local(pipeline, job):
     document = pipeline.artifact(job["id"], "normalize")
     profile = pipeline.artifact(job["id"], "configure")
+    constraints = relation_constraints(job["configuration"].get("categories", []))
     counts = {"entities": 0, "relationships": 0}
     chunks = pipeline.artifact(job['id'], 'chunk')['chunks']
     for first in range(0, len(chunks), 16):
@@ -72,7 +78,7 @@ def extract_local(pipeline, job):
                 segments = prose_segments(document, c)
                 predictions = predictions_by_chunk[c["id"]]
                 for (offset, text), raw in zip(segments, predictions, strict=True):
-                    converted = convert_output(c, raw, offset)
+                    converted = convert_output(c, raw, offset, constraints)
                     output["entities"].extend(converted["entities"])
                     output["relationships"].extend(converted["relationships"])
                     windows += len(raw["windows"])
