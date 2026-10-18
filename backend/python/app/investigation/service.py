@@ -26,11 +26,15 @@ slots = threading.BoundedSemaphore(2)
 
 def configuration():
     config = processing_config()
-    chat_deployment = deployment("LLM2")
+    chat_deployment = deployment("LLM1")
     if not chat_deployment:
-        raise HTTPException(503, "Configure the LLM2 deployment before using chat")
+        raise HTTPException(503, "Configure the LLM1 deployment before using chat")
     config.update(chatModel=chat_deployment["model"], chatProvider="azure_openai", chatBaseUrl=chat_deployment["baseUrl"], chatApiVersion=None, chatApi=chat_deployment["api"], chatCredentialEnv=chat_deployment["credentialEnv"])
-    config["chatLimits"] = {"modelCalls": 8, "toolCalls": 8, "totalTokens": 64000, "contextTokens": 10000, "outputTokens": 2048, "elapsedMs": 180000, "costUsd": 0.25}
+    with connection() as conn:
+        count = conn.execute("SELECT count(*) AS n FROM ingestion_publications p JOIN ingestion_jobs j ON j.id=p.job_id JOIN published_documents d ON d.id=p.source_id WHERE p.active AND p.counts->>'graph'=%s AND j.project_id=%s AND d.metadata->>'revisionId'=j.revision AND d.metadata->>'processingVersion'=j.processing_version", (semantic_graph_name(config), config.get("projectId"))).fetchone()["n"]
+        legacy = conn.execute("SELECT count(*) AS n FROM legacy_documents").fetchone()["n"]
+    scale = math.ceil(math.log2(count + 1))
+    config["chatLimits"] = {"modelCalls": min(32, 8 + 2 * scale), "toolCalls": min(48, 10 + 4 * scale), "totalTokens": 180000, "contextTokens": 16000, "outputTokens": 4096, "elapsedMs": 300000, "costUsd": 2.0}
     for field, environment in (("modelCalls", "ARGUS_CHAT_MODEL_CALLS"), ("toolCalls", "ARGUS_CHAT_TOOL_CALLS"), ("totalTokens", "ARGUS_CHAT_TOTAL_TOKENS"), ("contextTokens", "ARGUS_CHAT_CONTEXT_TOKENS"), ("outputTokens", "ARGUS_CHAT_OUTPUT_TOKENS"), ("elapsedMs", "ARGUS_CHAT_ELAPSED_MS")):
         value = int(os.getenv(environment, config["chatLimits"][field]))
         if not 1 <= value <= config["chatLimits"][field]:
@@ -45,9 +49,6 @@ def configuration():
         if any(not math.isfinite(value) or value < 0 for value in prices.values()):
             raise HTTPException(400, "Chat token prices must be finite and nonnegative")
         config["chatPrices"] = prices
-    with connection() as conn:
-        count = conn.execute("SELECT count(*) AS n FROM ingestion_publications p JOIN ingestion_jobs j ON j.id=p.job_id JOIN published_documents d ON d.id=p.source_id WHERE p.active AND p.counts->>'graph'=%s AND d.metadata->>'revisionId'=j.revision AND d.metadata->>'processingVersion'=j.processing_version", (semantic_graph_name(config),)).fetchone()["n"]
-        legacy = conn.execute("SELECT count(*) AS n FROM legacy_documents").fetchone()["n"]
     config["coverage"] = {"publishedDocuments": count, "legacyDocuments": legacy, "searchScope": "Published semantic sources only. The legacy catalog is separate."}
     return config
 
@@ -99,7 +100,7 @@ def run_worker(run_id, updates):
             investigation = Investigation(row, emit)
             with PostgresSaver.from_conn_string(settings.database_url) as saver:
                 graph = investigation.graph(saver)
-                options = {"configurable": {"thread_id": "chat:" + run_id}, "recursion_limit": 40}
+                options = {"configurable": {"thread_id": "chat:" + run_id}, "recursion_limit": 2 * (row["configuration"]["chatLimits"]["toolCalls"] + row["configuration"]["chatLimits"]["modelCalls"]) + 8}
                 snapshot = graph.get_state(options)
                 initial = None if snapshot.values else {"messages": [], "pending": [], "sources": {}, "report": None, "tool_count": 0, "seen_calls": [], "draft": None}
                 state = graph.invoke(initial, options)

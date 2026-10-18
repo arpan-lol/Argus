@@ -6,7 +6,7 @@ import type { ImperativePanelHandle } from 'react-resizable-panels';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { Switch } from '@/components/ui/switch';
 import { ChatResponse } from './ChatResponse';
-import { streamChat, type ChatTurn, type ChatSource, type ChatResult, type ChatEvent, type SavedChat, type ChatCoverage } from '@/lib/chat';
+import { streamChat, type ChatTurn, type ChatSource, type ChatResult, type ChatEvent, type SavedChat, type ChatCoverage, type ChatConversation } from '@/lib/chat';
 import { ProjectSources } from '@/components/source-explorer/ProjectSources';
 import { ProcessingActivity } from '@/components/source-explorer/ProcessingActivity';
 import { projectApi, projectRoot, type Project, type ProcessingEvent } from '@/lib/projects';
@@ -59,6 +59,8 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const [nodeDetails, setNodeDetails] = useState<Record<string, unknown> | null>(null);
   const [query, setQuery] = useState('');
   const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [conversations, setConversations] = useState<ChatConversation[]>([]);
+  const [conversationId, setConversationId] = useState('');
   const [pipelineFocus, setPipelineFocus] = useState<ChatSource | null>(null);
   const [readerRequest, setReaderRequest] = useState<{ documentId: string; chunkId?: string; jobId?: string; nonce: number } | null>(null);
   const [chatConfig, setChatConfig] = useState<{model: string; coverage: ChatCoverage} | null>(null);
@@ -75,12 +77,32 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
 
   useEffect(() => {
     void workspaceApi<{model: string; coverage: ChatCoverage}>('/chat-config').then(setChatConfig).catch(() => undefined);
-    const saved = savedRuns(projectId);
-    void Promise.all(saved.slice(-12).map(id => workspaceApi<SavedChat>(`/chat/${id}`).catch(() => null))).then(runs => setTurns(runs.filter((run): run is SavedChat => !!run).map(run => ({id: run.runId, runId: run.runId, query: run.query, model: run.model, events: run.events, result: run.result || undefined, error: run.result ? undefined : run.error || 'This investigation has saved progress. Reconnect to continue.'}))));
+    const active = localStorage.getItem(`argus-conversation:${projectId}`);
+    void workspaceApi<{conversations: ChatConversation[]}>('/chat/history').then(async result => {
+      setConversations(result.conversations);
+      const chosen = result.conversations.find(item => item.id === active) || result.conversations[0];
+      if (!chosen) { setConversationId(active || crypto.randomUUID()); return; }
+      setConversationId(chosen.id);
+      localStorage.setItem(`argus-conversation:${projectId}`, chosen.id);
+      const runs = await Promise.all(chosen.runs.map(run => workspaceApi<SavedChat>(`/chat/${run.id}`).catch(() => null)));
+      setTurns(runs.filter((run): run is SavedChat => !!run).map(run => ({id: run.runId, runId: run.runId, query: run.query, model: run.model, events: run.events, result: run.result || undefined, error: run.result ? undefined : run.error || 'This investigation has saved progress. Reconnect to continue.'})));
+    }).catch(() => {
+      const saved = savedRuns(projectId);
+      setConversationId(active || crypto.randomUUID());
+      void Promise.all(saved.map(id => workspaceApi<SavedChat>(`/chat/${id}`).catch(() => null))).then(runs => setTurns(runs.filter((run): run is SavedChat => !!run).map(run => ({id: run.runId, runId: run.runId, query: run.query, model: run.model, events: run.events, result: run.result || undefined}))));
+    });
     const value = localStorage.getItem('falkor-theme') === 'dark';
     setDark(value);
     window.document.documentElement.classList.toggle('dark', value);
   }, []);
+
+  const openConversation = async (item: ChatConversation) => {
+    if (busy) return;
+    setConversationId(item.id);
+    localStorage.setItem(`argus-conversation:${projectId}`, item.id);
+    const runs = await Promise.all(item.runs.map(run => workspaceApi<SavedChat>(`/chat/${run.id}`).catch(() => null)));
+    setTurns(runs.filter((run): run is SavedChat => !!run).map(run => ({id: run.runId, runId: run.runId, query: run.query, model: run.model, events: run.events, result: run.result || undefined, error: run.result ? undefined : run.error || 'This investigation has saved progress. Reconnect to continue.'})));
+  };
 
   useEffect(() => {
     if (!documentId) return;
@@ -246,6 +268,7 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
     if (event.type === 'accepted' && event.runId) {
       const saved = savedRuns(projectId);
       sessionStorage.setItem(`argus-chat-runs:${projectId}`, JSON.stringify([...new Set([...saved, event.runId])].slice(-12)));
+      void workspaceApi<{conversations: ChatConversation[]}>('/chat/history').then(result => setConversations(result.conversations)).catch(() => undefined);
     }
     setTurns(previous => previous.map(turn => turn.id === id ? {
       ...turn, runId: event.runId || turn.runId, model: event.model || turn.model,
@@ -255,6 +278,7 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
     } : turn));
   };
   const resume = async (turn: ChatTurn) => {
+    if (/\b(limit|budget)\b/i.test(turn.error || '')) { await submit(undefined, turn.query); return; }
     if (!turn.runId || busy) return;
     setBusy(true); setActiveTurnId(turn.id);
     try {
@@ -279,7 +303,10 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
     ]);
     setTurns(previous => [...previous, {id, query: value, model: chatConfig?.model, events: []}]);
     setQuery(''); setBusy(true); setActiveTurnId(id);
-    try { await streamChat(`${root}/chat`, {query: value, history, graph_expansion: options.graphExpansion}, event => receive(id, event)); }
+    const activeConversation = conversationId || crypto.randomUUID();
+    if (!conversationId) setConversationId(activeConversation);
+    localStorage.setItem(`argus-conversation:${projectId}`, activeConversation);
+    try { await streamChat(`${root}/chat`, {query: value, history, graph_expansion: options.graphExpansion, conversation_id: activeConversation}, event => receive(id, event)); }
     catch (failure) { setTurns(previous => previous.map(turn => turn.id === id ? {...turn, error: failure instanceof Error ? failure.message : 'The request failed. Please retry.'} : turn)); }
     finally { setBusy(false); }
   };
@@ -294,16 +321,17 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
       <div className="ce-brand"><img src="/argus-logo.svg" alt="" width={29} height={29} /><strong>Argus</strong><button className="ce-icon" onClick={() => setSidebarOpen(false)} aria-label="Collapse sidebar"><PanelLeftClose size={17} /></button></div>
       <a className="ce-project-return" href="/"><ArrowLeft size={17} />Projects</a>
       <div className="ce-navigation-label ce-project-name">{project?.name || 'Workspace'}</div>
-      <button className="ce-session ce-new-chat" onClick={() => { setTurns([]); sessionStorage.removeItem(`argus-chat-runs:${projectId}`); setQuery(''); composer.current?.focus(); }} disabled={busy}><Plus size={17} /><span>New chat</span></button>
+      <button className="ce-session ce-new-chat" onClick={() => { const next = crypto.randomUUID(); setConversationId(next); localStorage.setItem(`argus-conversation:${projectId}`, next); setTurns([]); setQuery(''); composer.current?.focus(); }} disabled={busy}><Plus size={17} /><span>New chat</span></button>
       <button className="ce-session active" onClick={() => messages.current?.scrollTo({ top: 0, behavior: 'smooth' })}><MessageSquare size={16} /><span>Current conversation</span></button>
-      <div className="ce-sidebar-bottom"><div className="ce-engine"><button className={`ce-theme ${configurationOpen ? 'is-active' : ''}`} onClick={() => setConfigurationOpen(previous => !previous)} aria-label="Engine configuration" aria-controls="engine-configuration" aria-expanded={configurationOpen}><Settings2 size={16} /><span>Engine configuration</span></button>{configurationOpen && <section id="engine-configuration" className="ce-configuration" aria-label="Engine configuration"><div><strong>Engine configuration</strong><button className="ce-icon" onClick={() => setConfigurationOpen(false)} aria-label="Close engine configuration"><X size={16} /></button></div><label><span>Graph expansion<small>Follow shared connections after search</small></span><Switch checked={options.graphExpansion} onCheckedChange={checked => updateOptions({ graphExpansion: checked })} /></label><p>{chatConfig?.model.toUpperCase() || 'GPT-5'} · {chatConfig?.coverage.publishedDocuments ?? '…'} searchable sources in this project.</p><p>{project?.description || 'Add sources to describe this workspace.'}</p></section>}</div><div className="ce-user"><span className="ce-avatar"><img src="/argus-logo.svg" alt="" width={24} height={24} /></span><strong>Demo user</strong></div><div className="ce-sidebar-utility-row"><ProcessingActivity projectId={projectId} events={processingEvents} connected={streamConnected} /><button className="ce-theme ce-theme-compact" onClick={toggleTheme} aria-label={`Switch to ${dark ? 'light' : 'dark'} mode`} title={`Switch to ${dark ? 'light' : 'dark'} mode`}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button></div></div>
+      {!!conversations.length && <div className="ce-chat-history" aria-label="Saved conversations">{conversations.slice(0, 20).map(item => <button key={item.id} type="button" className={`ce-session ${item.id === conversationId ? 'active' : ''}`} onClick={() => void openConversation(item)} disabled={busy} title={item.title}><MessageSquare size={14} /><span>{item.title}</span></button>)}</div>}
+      <div className="ce-sidebar-bottom"><div className="ce-engine"><button className={`ce-theme ${configurationOpen ? 'is-active' : ''}`} onClick={() => setConfigurationOpen(previous => !previous)} aria-label="Engine configuration" aria-controls="engine-configuration" aria-expanded={configurationOpen}><Settings2 size={16} /><span>Engine configuration</span></button>{configurationOpen && <section id="engine-configuration" className="ce-configuration" aria-label="Engine configuration"><div><strong>Engine configuration</strong><button className="ce-icon" onClick={() => setConfigurationOpen(false)} aria-label="Close engine configuration"><X size={16} /></button></div><label><span>Graph expansion<small>Follow shared connections after search</small></span><Switch checked={options.graphExpansion} onCheckedChange={checked => updateOptions({ graphExpansion: checked })} /></label><p>{chatConfig?.model.toUpperCase() || 'GPT-5'} · {chatConfig?.coverage.publishedDocuments ?? '…'} searchable sources in this project.</p><p>{project?.description || 'Add sources to describe this workspace.'}</p></section>}</div><div className="ce-user"><span className="ce-avatar"><img src="/argus-logo.svg" alt="" width={24} height={24} /></span><strong>Test User</strong></div><div className="ce-sidebar-utility-row"><ProcessingActivity projectId={projectId} events={processingEvents} connected={streamConnected} /><button className="ce-theme ce-theme-compact" onClick={toggleTheme} aria-label={`Switch to ${dark ? 'light' : 'dark'} mode`} title={`Switch to ${dark ? 'light' : 'dark'} mode`}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button></div></div>
     </aside>
     <main className="ce-main">
       <ResizablePanelGroup direction="horizontal" className="ce-panels">
         <ResizablePanel defaultSize={52} minSize={30} className="ce-chat-panel">
           <div className="ce-chat-heading">{!sidebarOpen && <><button className="ce-icon" onClick={() => setSidebarOpen(true)} aria-label="Expand sidebar"><PanelLeftOpen size={18} /></button><span className="ce-mobile-brand">Argus</span></>}<span>Chat</span><button className="ce-icon ce-mobile-theme" onClick={toggleTheme} aria-label={`Switch to ${dark ? 'light' : 'dark'} mode`}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button><button className="ce-icon ce-mobile-source" onClick={() => window.document.querySelector('.ce-explorer-panel')?.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'})} aria-label="Open files and graph"><Network size={17} /></button></div>
           <div className="ce-messages" ref={messages}>
-            {!turns.length && <div className="ce-chat-empty"><img src="/argus-logo.svg" alt="" width={46} height={46} /><h1>Start with a question.</h1><p>Ask Argus a question and open its citations.<br />{chatConfig ? `${chatConfig.model.toUpperCase()} · ${chatConfig.coverage.publishedDocuments} published sources available` : 'Connecting to the assistant…'}</p><div className="ce-suggestions"><button onClick={() => void submit(undefined, 'Summarize a published source')}>Summarize a published source<ArrowUp size={14} /></button><button onClick={() => void submit(undefined, 'What sources can you search?')}>What can you search?<ArrowUp size={14} /></button></div></div>}
+            {!turns.length && <div className="ce-chat-empty"><img src="/argus-logo.svg" alt="" width={46} height={46} /><h1>Start with a question.</h1><p>Ask Argus a question and inspect every source it uses.</p><div className="ce-suggestions"><button onClick={() => void submit(undefined, 'Summarize a published source')}>Summarize a published source<ArrowUp size={14} /></button><button onClick={() => void submit(undefined, 'What sources can you search?')}>What can you search?<ArrowUp size={14} /></button></div></div>}
             {turns.map(turn => <div className="ce-turn" key={turn.id}><div className="ce-user-message">{turn.query}</div><ChatResponse turn={turn} pending={busy && turn.id === activeTurnId && !turn.result && !turn.error} onCitation={selectCitation} onToolSource={(nextDocumentId, chunkId, jobId) => { setGraphView('sources'); setDocumentId(nextDocumentId); setMapFocus({nodeId: chunkId || nextDocumentId, nonce: Date.now()}); setReaderRequest({documentId:nextDocumentId,chunkId,jobId,nonce:Date.now()}); }} onTrace={assertionIds => { setGraphTrace({assertionIds, nonce: Date.now()}); setGraphView('knowledge'); graphPanel.current?.resize(70); }} onResume={() => void resume(turn)} /></div>)}
           </div>
           <form className="ce-composer-wrap" onSubmit={submit}><div className="ce-composer"><button type="button" className="ce-icon" onClick={upload} aria-label="Add files"><Paperclip size={20} /></button><textarea ref={composer} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit(); } }} rows={1} placeholder="Ask about your sources…" aria-label="Message" disabled={busy} /><button type="submit" className="ce-send" disabled={busy || !query.trim()} aria-label="Send message">{busy ? <Loader2 size={18} className="spinning" /> : <ArrowUp size={19} />}</button></div></form>
@@ -316,12 +344,12 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
           {projectError && <p className="ce-inline-error" role="alert">{projectError} <a href="/">Return to projects</a></p>}
           <div className="ce-explorer-content">
             <ResizablePanelGroup direction="vertical" className="ce-source-panels" autoSaveId={`argus-source-split:${projectId}`}>
-              <ResizablePanel ref={filePanel} defaultSize={45} minSize={15} className="ce-project-file-panel">
-                {project ? <ProjectSources project={project} uploadRequest={uploadRequest} refreshVersion={dataVersion} focus={pipelineFocus} readerRequest={readerRequest} documentId={documentId} chunkId={selectedNode?.type === 'chunk' ? selectedNode.id : undefined} onProject={setProject} onJobsChange={setWorkspaceJobs} onUploaded={() => setDataVersion(version => version + 1)} onBackToGraph={() => { setDocumentId(undefined); setPipelineFocus(null); setGraphView('knowledge'); graphPanel.current?.resize(55); }} onFocus={(id, chunkId) => { focusSource(id, chunkId); setGraphView('sources'); setMapFocus({nodeId: chunkId || id, nonce: Date.now()}); }} /> : !projectError && <div className="ce-file-empty" role="status">Loading workspace…</div>}
+              <ResizablePanel ref={filePanel} defaultSize={30} minSize={15} className="ce-project-file-panel">
+                {project ? <ProjectSources project={project} uploadRequest={uploadRequest} refreshVersion={dataVersion} focus={pipelineFocus} readerRequest={readerRequest} documentId={documentId} chunkId={selectedNode?.type === 'chunk' ? selectedNode.id : undefined} onProject={setProject} onJobsChange={setWorkspaceJobs} onUploaded={() => setDataVersion(version => version + 1)} onBackToGraph={() => { setDocumentId(undefined); setPipelineFocus(null); setGraphView('knowledge'); graphPanel.current?.resize(70); }} onFocus={(id, chunkId) => { focusSource(id, chunkId); setGraphView('sources'); setMapFocus({nodeId: chunkId || id, nonce: Date.now()}); }} /> : !projectError && <div className="ce-file-empty" role="status">Loading workspace…</div>}
               </ResizablePanel>
               <ResizableHandle withHandle className="ce-source-resize" aria-label="Resize files and graph" />
-              <ResizablePanel ref={graphPanel} defaultSize={55} minSize={10} onResize={size => setGraphCompact(size < 20)} className={`ce-project-graph-panel ${graphCompact ? 'is-compact' : ''}`}>
-              <div className="ce-map-toolbar"><div className="ce-map-modes" role="group" aria-label="Graph view"><button aria-pressed={graphView === 'knowledge'} onClick={() => setGraphView('knowledge')}>Knowledge graph</button><button aria-pressed={graphView === 'sources'} onClick={() => setGraphView('sources')}>Source graph</button></div><button className="ce-icon" onClick={() => setExplorerExpanded(value => !value)} aria-label={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'} title={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'}>{explorerExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button></div>
+              <ResizablePanel ref={graphPanel} defaultSize={70} minSize={10} onResize={size => setGraphCompact(size < 20)} className={`ce-project-graph-panel ${graphCompact ? 'is-compact' : ''}`}>
+              <div className="ce-map-toolbar"><div className="ce-map-modes" role="group" aria-label="Graph view"><button aria-pressed={graphView === 'knowledge'} onClick={() => { setGraphView('knowledge'); graphPanel.current?.resize(70); }}>Knowledge graph</button><button aria-pressed={graphView === 'sources'} onClick={() => setGraphView('sources')}>Source graph</button></div><button className="ce-icon" onClick={() => setExplorerExpanded(value => !value)} aria-label={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'} title={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'}>{explorerExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button></div>
               <div className="ce-project-graph-content">{graphView === 'knowledge' ? <KnowledgeGraph apiRoot={root} refreshToken={graphVersion} focus={mapFocus} trace={graphTrace} onSource={target => { setGraphView('sources'); setMapFocus({nodeId: target.nodeId, nonce: Date.now()}); graphPanel.current?.resize(75); }} /> : <GraphMap apiRoot={root} refreshToken={graphVersion} focus={mapFocus} onSelect={selectNode} onFocus={target => { if (target.documentId) focusSource(target.documentId, target.chunkId); }} />}{chatConfig?.coverage.publishedDocuments === 0 && <div className="ce-project-graph-empty"><p>Your graph starts here.<br />Connections appear as source files finish ingestion.</p></div>}</div>
               </ResizablePanel>
             </ResizablePanelGroup>

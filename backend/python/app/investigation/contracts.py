@@ -14,6 +14,7 @@ class ChatRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
     history: list[HistoryMessage] = Field(default_factory=list, max_length=8)
     graph_expansion: bool = True
+    conversation_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
     @field_validator("query")
     @classmethod

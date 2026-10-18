@@ -20,8 +20,8 @@ def search_sources(session, args):
     if args.mode in ("vector", "hybrid"):
         try:
             vector = session.query_vector(args.query)
-            rows = session.cypher("CALL db.idx.vector.queryNodes('Chunk','embedding',$cap,vecf32($vector)) YIELD node,score WHERE node.active=true AND node.jobId IN $jobs AND ($document IS NULL OR node.documentId=$document) RETURN node.id,score ORDER BY score ASC,node.id LIMIT $limit", {"vector": vector, "cap": session.limits["annCandidates"], "document": args.document_id, "limit": candidates}, "published vector seeds")
-            ranked["cosine_distance"] = [(row[0], row[1]) for row in rows]
+            rows = session.cypher("CALL db.idx.vector.queryNodes('Chunk','embedding',$cap,vecf32($vector)) YIELD node,score WHERE node.active=true AND node.jobId IN $jobs AND ($document IS NULL OR node.documentId=$document) RETURN node.id,score ORDER BY score DESC,node.id LIMIT $limit", {"vector": vector, "cap": session.limits["annCandidates"], "document": args.document_id, "limit": candidates}, "published vector seeds")
+            ranked["cosine_similarity"] = [(row[0], row[1]) for row in rows]
             session.warnings.append("ANN searches at most 240 indexed candidates before publication/document filtering; returned neighbors can be underfilled and are not exhaustive.")
         except BudgetReached:
             raise
@@ -36,7 +36,7 @@ def search_sources(session, args):
         for rank, (chunk_id, score) in enumerate(rows, 1):
             item = fused.setdefault(chunk_id, {"id": chunk_id, "score": 0, "signals": []})
             item["score"] += 1 / (60 + rank)
-            item["signals"].append({"channel": channel, "rank": rank, "score": score, "interpretation": "lower distance is nearer" if channel == "cosine_distance" else "higher BM25 is more relevant"})
+            item["signals"].append({"channel": channel, "rank": rank, "score": score, "interpretation": "higher cosine similarity is nearer" if channel == "cosine_similarity" else "higher BM25 is more relevant"})
     ordered = sorted(fused.values(), key=lambda row: (-row["score"], row["id"]))[:limit]
     supported = session.chunks([item["id"] for item in ordered])
     items = [{**session.excerpt(supported[item["id"]]), "score": item["score"], "scoreType": "reciprocal_rank_fusion", "rank": rank, "signals": item["signals"]} for rank, item in enumerate(ordered, 1) if item["id"] in supported]
@@ -54,6 +54,17 @@ def find_entities(session, args):
         if entity:
             items.append({**entity, "assertionLinks": row[3]})
     return {"items": items, "ambiguous": len(items) > 1, "matchMeaning": "Exact names rank first; within a name, currently published assertion links rank first. Link count is structural connectivity, not identity certainty or factual confidence. Historical aliases are not searched"}
+
+
+def resolve_entities(session, args):
+    from .contracts import FindEntities
+    matches = {}
+    items = []
+    for name in args.names:
+        result = find_entities(session, FindEntities(query=name, limit=args.limit_per_name))
+        matches[name] = result["items"]
+        items.extend({**item, "matchedFor": name} for item in result["items"])
+    return {"items": items, "matches": matches, "unresolved": [name for name, found in matches.items() if not found], "matchMeaning": "Every returned ID was checked against active graph mentions. Multiple same-name identities remain ambiguous."}
 
 
 def read_chunks(session, args):
@@ -192,25 +203,26 @@ def find_paths(session, args):
         return {"items": [], "paths": [], "unknownEntityIds": [identifier for identifier, entity in ((args.source_entity_id, source), (args.target_entity_id, target)) if not entity]}
     if args.source_entity_id == args.target_entity_id:
         return {"items": [], "paths": [{"entities": [args.source_entity_id], "hops": [], "hopCount": 0}], "searchDepth": 0}
+    candidate_limit = min(128, max(16, args.limit * 8 + len(args.exclude_assertion_ids)))
     for depth in range(1, args.max_depth + 1):
         matches = ["MATCH (e0:Entity {id:$source})"]
         matches.extend(f"MATCH (e{index - 1})<-[:SUBJECT|OBJECT]-(a{index}:Assertion)-[:SUBJECT|OBJECT]->(e{index}:Entity)" for index in range(1, depth + 1))
         constraints = [f"e{depth}.id=$target"]
-        constraints.extend(f"a{index}.active=true AND a{index}.jobId IN $jobs" for index in range(1, depth + 1))
+        constraints.extend(f"a{index}.active=true AND a{index}.jobId IN $jobs AND NOT a{index}.id IN $excluded" for index in range(1, depth + 1))
         constraints.extend(f"a{left}.id<>a{right}.id" for left in range(1, depth + 1) for right in range(left + 1, depth + 1))
         constraints.extend(f"e{left}.id<>e{right}.id" for left in range(depth + 1) for right in range(left + 1, depth + 1))
         matches.append("WHERE " + " AND ".join(constraints))
-        matches.append("RETURN [" + ",".join(f"a{index}.id" for index in range(1, depth + 1)) + "] AS assertions,[" + ",".join(f"e{index}.id" for index in range(depth + 1)) + "] AS entities LIMIT 17")
-        candidates = session.cypher(" ".join(matches), {"source": args.source_entity_id, "target": args.target_entity_id}, "targeted path candidates")
-        if len(candidates) > 16:
+        matches.append("RETURN [" + ",".join(f"a{index}.id" for index in range(1, depth + 1)) + "] AS assertions,[" + ",".join(f"e{index}.id" for index in range(depth + 1)) + "] AS entities LIMIT $candidate_limit")
+        candidates = session.cypher(" ".join(matches), {"source": args.source_entity_id, "target": args.target_entity_id, "excluded": args.exclude_assertion_ids, "candidate_limit": candidate_limit + 1}, "targeted path candidates")
+        if len(candidates) > candidate_limit:
             session.truncate("Path candidate cap reached; returned paths may be incomplete")
-        identifiers = list(dict.fromkeys(identifier for candidate in candidates[:16] for identifier in candidate[0]))
+        identifiers = list(dict.fromkeys(identifier for candidate in candidates[:candidate_limit] for identifier in candidate[0]))
         if not identifiers:
             continue
         rows = session.cypher("MATCH (s:Entity)<-[:SUBJECT]-(a:Assertion)-[:OBJECT]->(o:Entity),(a)-[:SUPPORTED_BY]->(c:Chunk) WHERE a.id IN $ids AND a.active=true AND c.active=true AND a.jobId IN $jobs AND c.jobId=a.jobId RETURN a.id,a.jobId,a.predicate,a.polarity,a.conditions,a.quote,a.startOffset,a.endOffset,c.id,s.id,s.label,o.id,o.label,a.extractionMethod,a.confidence,a.resolution,a.llmVerified,a.polarityStatus,a.traversalStatus,a.context ORDER BY a.id", {"ids": identifiers}, "path assertion support")
         assertions = {item["id"]: item for item in supported_assertions(session, rows)}
         paths = []
-        for assertion_ids, entity_ids in candidates[:16]:
+        for assertion_ids, entity_ids in candidates[:candidate_limit]:
             hops = []
             for index, assertion_id in enumerate(assertion_ids):
                 assertion = assertions.get(assertion_id)
@@ -220,7 +232,7 @@ def find_paths(session, args):
                 backward = assertion["object"]["id"] == entity_ids[index] and assertion["subject"]["id"] == entity_ids[index + 1]
                 if not (forward or backward) or args.direction == "outgoing" and not forward or args.direction == "incoming" and not backward:
                     break
-                if assertion["extraction"].get("traversalStatus") in ("needs_context_review", "revoked", "deprecated"):
+                if assertion["extraction"].get("traversalStatus") in ("revoked", "deprecated"):
                     break
                 hops.append({"from": entity_ids[index], "to": entity_ids[index + 1], "assertionId": assertion_id, "traversedForward": forward})
             if len(hops) == depth:
@@ -229,8 +241,43 @@ def find_paths(session, args):
                 break
         if paths:
             chosen = {hop["assertionId"] for path in paths for hop in path["hops"]}
-            return {"items": [assertions[identifier] for identifier in chosen], "paths": paths, "discoveryTree": paths[0]["hops"], "exploredAssertionCount": len(identifiers), "searchDepth": depth, "direction": args.direction, "pathMeaning": "Paths compose source-supported assertions for inspection, not a new causal or scientific conclusion. Each hop preserves its recorded direction.", "coverage": "Bounded candidate search only; unreturned paths are not proof of absence"}
+            review_required = [identifier for identifier in chosen if assertions[identifier]["extraction"].get("traversalStatus") == "needs_context_review"]
+            return {"items": [assertions[identifier] for identifier in chosen], "paths": paths, "reviewRequiredAssertionIds": sorted(review_required), "discoveryTree": paths[0]["hops"], "exploredAssertionCount": len(identifiers), "searchDepth": depth, "direction": args.direction, "pathMeaning": "Paths are candidates, not verified conclusions. Run review_path; reject flagged or irrelevant hops and search again with exclude_assertion_ids. Each hop preserves its recorded direction.", "coverage": "Bounded candidate search only; unreturned paths are not proof of absence"}
     return {"items": [], "paths": [], "searchDepth": args.max_depth, "direction": args.direction, "coverage": "Bounded path search only; no path does not prove no connection"}
+
+
+def review_path(session, args):
+    requested = list(dict.fromkeys(args.assertion_ids))
+    rows = session.cypher("MATCH (s:Entity)<-[:SUBJECT]-(a:Assertion)-[:OBJECT]->(o:Entity),(a)-[:SUPPORTED_BY]->(c:Chunk) WHERE a.id IN $ids AND a.active=true AND c.active=true AND a.jobId IN $jobs AND c.jobId=a.jobId RETURN a.id,a.jobId,a.predicate,a.polarity,a.conditions,a.quote,a.startOffset,a.endOffset,c.id,s.id,s.label,o.id,o.label,a.extractionMethod,a.confidence,a.resolution,a.llmVerified,a.polarityStatus,a.traversalStatus,a.context ORDER BY a.id", {"ids": requested}, "review active path support")
+    items = supported_assertions(session, rows)
+    found = {item["id"] for item in items}
+    excluded = [identifier for identifier in requested if identifier not in found]
+    for item in items:
+        if item["extraction"].get("traversalStatus") in ("needs_context_review", "revoked", "deprecated"):
+            excluded.append(item["id"])
+    return {"items": items, "excludedAssertionIds": excluded, "reviewedAssertionIds": requested, "pathUsable": not excluded, "reviewMeaning": "Source spans and active publication were checked. Semantic truth remains unverified; inspect conditions and quoted context before relying on a hop."}
+
+
+def blast_radius(session, args):
+    result = expand_connections(session, args)
+    return {**result, "interpretation": "Recorded graph reachability only. The term blast radius does not establish downstream software breakage."}
+
+
+def path_between(session, args):
+    return find_paths(session, args)
+
+
+def load_bearing(session, args):
+    result = rank_entities(session, args.model_copy(update={"limit": min(args.limit, 5)}))
+    for item in result.get("items", []):
+        item["description"] = item.get("description", "")[:300]
+        item["supportingAssertions"] = [{key: assertion[key] for key in ("id", "predicate", "subject", "object", "quote", "citation", "conditions", "polarity") if key in assertion} for assertion in item.get("supportingAssertions", [])[:1]]
+    result["displayLimit"] = 5
+    return result
+
+
+def recent_changes(session, args):
+    return recent_source_updates(session, args)
 
 
 from .research import rank_entities, recent_source_updates, source_authors

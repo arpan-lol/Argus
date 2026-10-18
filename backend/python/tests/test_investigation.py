@@ -11,6 +11,7 @@ from openai import OpenAI
 
 from app.investigation.runtime import Investigation, RunBudgetReached, State, collect_sources, compact, deduplicate_tool_passages, validate_sources
 from app.investigation import service
+from app.retrieval.contracts import TOOLS
 
 
 class Ledger:
@@ -88,8 +89,9 @@ class InvestigationTest(TestCase):
         self.assertEqual(state["report"]["purpose"], "conversation")
         self.assertEqual(model.call_count, 1)
         messages, definitions = model.call_args.args
-        self.assertEqual(len(definitions), 10)
-        self.assertIn("rank_entities", [item["function"]["name"] for item in definitions])
+        self.assertGreaterEqual(len(definitions), 10)
+        self.assertIn("review_path", [item["function"]["name"] for item in definitions])
+        self.assertIn("load_bearing", [item["function"]["name"] for item in definitions])
         self.assertIn("inspect_available_tools", [item["function"]["name"] for item in definitions])
         self.assertIn("Materials research", messages[0]["content"])
         self.assertEqual(messages[-1]["content"], "hello")
@@ -125,7 +127,7 @@ class InvestigationTest(TestCase):
         self.assertEqual(state["report"]["purpose"], "conversation")
         self.assertEqual(state["tool_count"], 1)
         self.assertEqual(model.call_count, 2)
-        self.assertEqual(json.loads(model.call_args.args[0][-1]["content"])["retrievalToolCount"], 9)
+        self.assertEqual(json.loads(model.call_args.args[0][-1]["content"])["retrievalToolCount"], len(TOOLS))
         self.assertIn("rank_entities", json.dumps(model.call_args.args[0]))
         tool.assert_not_called()
 
@@ -477,7 +479,7 @@ class InvestigationTest(TestCase):
         self.assertEqual(body["temperature"], 0)
         self.assertFalse(body["store"])
 
-    def test_chat_configuration_uses_llm2_even_when_llm1_is_present(self):
+    def test_chat_configuration_uses_llm1_for_investigation(self):
         class Rows:
             def execute(self, *args):
                 return self
@@ -486,9 +488,9 @@ class InvestigationTest(TestCase):
         @contextmanager
         def database():
             yield Rows()
-        secondary = {"model": "gpt-4.1-mini", "baseUrl": "https://secondary.example/openai/v1", "api": "responses", "credentialEnv": "LLM2_DEPLOYMENT_KEY"}
-        with mock.patch("app.investigation.service.processing_config", return_value={"provider": "azure_openai", "extractionModel": "gpt-4.1-mini"}), mock.patch("app.investigation.service.deployment", side_effect=lambda role: secondary if role == "LLM2" else {"model": "gpt-5"}), mock.patch("app.investigation.service.semantic_graph_name", return_value="test-graph"), mock.patch("app.investigation.service.connection", database):
+        primary = {"model": "gpt-5", "baseUrl": "https://primary.example/openai/v1", "api": "responses", "credentialEnv": "LLM1_DEPLOYMENT_KEY"}
+        with mock.patch("app.investigation.service.processing_config", return_value={"provider": "azure_openai", "extractionModel": "gpt-4.1-mini"}), mock.patch("app.investigation.service.deployment", side_effect=lambda role: primary if role == "LLM1" else None), mock.patch("app.investigation.service.semantic_graph_name", return_value="test-graph"), mock.patch("app.investigation.service.connection", database):
             config = service.configuration()
-        self.assertEqual(config["chatModel"], "gpt-4.1-mini")
-        self.assertEqual(config["chatCredentialEnv"], "LLM2_DEPLOYMENT_KEY")
+        self.assertEqual(config["chatModel"], "gpt-5")
+        self.assertEqual(config["chatCredentialEnv"], "LLM1_DEPLOYMENT_KEY")
         self.assertEqual(config["chatApi"], "responses")
