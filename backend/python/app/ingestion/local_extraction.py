@@ -5,6 +5,7 @@ from .local_models import relex_many
 from .providers import Providers
 from .relation_schema import endpoint_types_allowed, relation_constraints
 from .semantic_context import sentence_context, source_context, valid_entity_mention
+from .native_records import extract_native_chunk
 
 
 def prose_segments(document, chunk):
@@ -45,9 +46,9 @@ def convert_output(chunk, result, offset=0, constraints=None):
             continue
         left = offset + min(edge["head"]["start"], edge["tail"]["start"])
         right = offset + max(edge["head"]["end"], edge["tail"]["end"])
-        context = sentence_context(chunk["text"], left, right)
-        span = source_span(chunk, left, right)
-        relations.append({"subject": subject, "predicate": edge["relation"], "object": target, "quote": chunk["text"][left:right], **source_context(context), "confidence": float(edge["score"]), "sourceSpan": span, "sourceSpans": [span], "sourceSpanStatus": "exact", "extractionMethod": "gliner_relex", "llmVerified": False})
+        context_start, context_end, context = sentence_context(chunk["text"], left, right)
+        span = source_span(chunk, context_start, context_end)
+        relations.append({"subject": subject, "predicate": edge["relation"], "object": target, "quote": context, **source_context(context), "confidence": float(edge["score"]), "sourceSpan": span, "sourceSpans": [span], "sourceSpanStatus": "exact", "extractionMethod": "gliner_relex", "llmVerified": False})
     return {"entities": entities, "relationships": relations}
 
 
@@ -57,6 +58,14 @@ def extract_local(pipeline, job):
     constraints = relation_constraints(job["configuration"].get("categories", []))
     counts = {"entities": 0, "relationships": 0}
     chunks = pipeline.artifact(job['id'], 'chunk')['chunks']
+    if document.get("metadata", {}).get("parser") == "stix_native_json":
+        known_objects = {block["structured"]["nativeRecordId"]: block["structured"]["nativeRecord"] for block in document["blocks"] if block.get("structured", {}).get("nativeRecord")}
+        for chunk in chunks:
+            output = pipeline.retry_call(job, "extract", chunk["id"], lambda c=chunk: {**extract_native_chunk(c, document, known_objects, chunks), "metadata": {"method": "stix_native", "windows": 0, "llmVerified": False, "fallback": False, "extractionLlmCalls": 0, "scoreMeaning": "Native STIX object identifiers and relationship references; no model score"}}, max_attempts=1)
+            pipeline.validate_extraction(chunk, output)
+            for key in counts:
+                counts[key] += len(output[key])
+        return {**counts, "quality": "native_structured", "method": "stix_native", "extractionLlmCalls": 0, "fallbackChunks": 0, "warnings": document.get("metadata", {}).get("warnings", []), "nativeRecordCount": document.get("metadata", {}).get("nativeRecordCount", 0), "danglingReferenceCount": document.get("metadata", {}).get("danglingReferenceCount", 0)}
     for first in range(0, len(chunks), 16):
         batch = chunks[first:first + 16]
         pending = [chunk for chunk in batch if pipeline.item(job['id'], 'extract', chunk['id']) is None]
@@ -112,6 +121,8 @@ def extract_early_mentions(pipeline, job):
     graph = document.get("codeGraph")
     if graph is not None:
         return {"entities": len(graph["entities"]), "method": "python_ast", "llmCalls": 0}
+    if document.get("metadata", {}).get("parser") == "stix_native_json":
+        return {"entities": 0, "method": "stix_native", "llmCalls": 0}
     config = job["configuration"]
     types = seed_settings(config["categories"])["entityTypes"]
     provider = Providers(config, stop_check=lambda: pipeline.check_paused(job["id"]))

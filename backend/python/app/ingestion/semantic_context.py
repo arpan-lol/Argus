@@ -67,4 +67,4 @@ def sentence_context(text, left, right):
     start = max(text.rfind(mark, 0, left) for mark in (".", "!", "?", ";", "\n")) + 1
     ends = [position for mark in (".", "!", "?", ";", "\n") if (position := text.find(mark, right)) >= 0]
     end = min(ends) + 1 if ends else len(text)
-    return text[start:end]
+    return start, end, text[start:end]

@@ -20,9 +20,12 @@ def resolve_basic(pipeline, job):
         for entity in extracted['entities']:
             mention_id = 'mention:' + fingerprint([chunk['id'], entity['key']])
             identifier = stable_identifier(entity['name'])
+            native_key = entity.get('nativeResolverKey')
             surface = entity['name'].strip().lower()
-            ambiguous_short = len(surface) <= 3 and identifier is None
+            ambiguous_short = len(surface) <= 3 and identifier is None and not native_key
             identity_key = ['identifier', identifier.lower(), entity['entity_type'].strip().lower()] if identifier else ['surface', surface, entity['entity_type'].strip().lower()]
+            if native_key:
+                identity_key = ['native_stix', native_key.lower(), entity['entity_type'].strip().lower()]
             if ambiguous_short:
                 identity_key.append(job['source_id'])
             canonical_id = 'entity:' + fingerprint([space, identity_key]) if not deferred else 'entity:' + fingerprint([job['id'], mention_id])
@@ -61,9 +64,9 @@ def resolve_basic(pipeline, job):
             raise ValueError('Entity vector is invalid')
         decision_id = 'resolution:' + fingerprint([job['id'], mention_id])
         verdict = 'deferred' if deferred else 'same'
-        rationale = 'GLiNER fallback mention kept separate.' if deferred else 'Exact qualified Python symbol, preserving case.' if entity['entity_type'].startswith('code_') else 'Stable identifier candidate grouping.' if stable_identifier(entity['name']) else 'Exact normalized name and type candidate grouping; identity is unverified and homonyms may remain.'
+        rationale = 'GLiNER fallback mention kept separate.' if deferred else 'STIX object ID and consistent native type key.' if entity.get('nativeResolverKey') else 'Exact qualified Python symbol, preserving case.' if entity['entity_type'].startswith('code_') else 'Stable identifier candidate grouping.' if stable_identifier(entity['name']) else 'Exact normalized name and type candidate grouping; identity is unverified and homonyms may remain.'
         decisions.append((decision_id, job['id'], mention_id, canonical_id, verdict, rationale, Jsonb([])))
-        items.append((job['id'], mention_id, Jsonb({'mentionId': mention_id, 'canonicalId': canonical_id, 'decisionId': decision_id, 'decision': verdict, 'deferred': deferred, 'reason': rationale, 'identityStatus': 'exact_symbol' if entity['entity_type'].startswith('code_') else 'stable_identifier' if stable_identifier(entity['name']) else 'source_scoped_short_surface_form' if len(entity['name'].strip()) <= 3 else 'unverified_surface_form'})))
+        items.append((job['id'], mention_id, Jsonb({'mentionId': mention_id, 'canonicalId': canonical_id, 'decisionId': decision_id, 'deferred': deferred, 'reason': rationale, 'identityStatus': 'native_stix_id' if entity.get('nativeResolverKey') else 'exact_symbol' if entity['entity_type'].startswith('code_') else 'stable_identifier' if stable_identifier(entity['name']) else 'source_scoped_short_surface_form' if len(entity['name'].strip()) <= 3 else 'unverified_surface_form', 'nativeResolverKey': entity.get('nativeResolverKey'), 'nativeFormat': entity.get('nativeFormat')})))
         mentions += 1
         deferred_count += int(deferred)
     with connection() as conn, conn.cursor() as cursor:

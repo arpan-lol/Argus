@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .code_parser import CODE_SUFFIXES, python_structure
 from .parsers import SUPPORTED, decode_source_text, parse
+from .native_records import parse_native_stix
 
 
 SOURCE_SUFFIXES = CODE_SUFFIXES | {".cjs", ".mts", ".cts", ".kt", ".kts", ".swift", ".scala", ".dart", ".vue", ".svelte", ".lua", ".r", ".pl", ".ex", ".exs", ".erl", ".hrl", ".clj", ".cljs", ".fs", ".fsx", ".vb", ".ps1", ".psm1", ".bat", ".cmd", ".zsh", ".bash", ".fish", ".groovy", ".gradle", ".cxx", ".cc", ".hh", ".hxx", ".mm", ".m", ".proto", ".graphql", ".gql", ".tf", ".hcl", ".sol"}
@@ -12,10 +13,23 @@ TEXT_SUFFIXES = SOURCE_SUFFIXES | {".mdx", ".rst", ".log", ".jsonl", ".ndjson", 
 
 
 def parse_source(path, config, filename=None):
+    from .document_adapters import parse_document_adapter
+
     path = Path(path)
     filename = filename or path.name
     suffix = Path(filename).suffix.lower()
     categories = config.get("categories", ["general_documents"])
+    adapted = parse_document_adapter(path, config, filename)
+    if adapted is not None:
+        return adapted
+    if suffix == ".json":
+        if path.stat().st_size > config["maxDecompressedBytes"]:
+            raise ValueError("JSON source exceeds configured raw-byte processing limit")
+        native = parse_native_stix(path.read_bytes(), config["maxExtractedTextCharacters"], config.get("maxArchiveMembers", 10000))
+        if native is not None:
+            native["metadata"]["filename"] = filename
+            native["metadata"]["parserRoute"] = {"categories": categories, "selected": "stix_native_json"}
+            return native
     if suffix in TEXT_SUFFIXES or suffix not in SUPPORTED | {".gz"} or Path(filename).name in {"LICENSE", "NOTICE", "Dockerfile"}:
         raw = path.read_bytes()
         text = decode_source_text(raw)
