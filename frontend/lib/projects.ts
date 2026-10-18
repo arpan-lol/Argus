@@ -4,6 +4,8 @@ export interface Project {
   id: string;
   name: string;
   description: string;
+  categories?: string[];
+  configurationLocked?: boolean;
   files?: number;
   published?: number;
   entity_types: string[];
@@ -25,6 +27,7 @@ export interface ProcessingEvent {
   kind?: string;
   model?: string;
   durationMs?: number;
+  rateWaitSeconds?: number;
   counts?: Record<string, number>;
   usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
 }

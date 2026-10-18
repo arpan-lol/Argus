@@ -10,7 +10,7 @@ interface Settings {
   relationshipTypes: string[];
   extractionInstructions: string;
   rationale?: string;
-  sampling?: { sampledDocuments?: number; availableDocuments?: number; excluded?: unknown[] };
+  sampling?: { sampledDocuments?: number; availableDocuments?: number; excluded?: unknown[]; callsThisRun?: number; startWindowSeconds?: number; tokenBudget?: number; stopReason?: string };
 }
 
 interface Profile {
@@ -18,6 +18,7 @@ interface Profile {
   status?: string;
   settings?: Settings | null;
   sampling?: Settings['sampling'];
+  tokensReserved?: number;
 }
 
 export function IngestionSettings({ job, apiRoot = '' }: { job: IngestionJob; apiRoot?: string }) {
@@ -59,7 +60,8 @@ export function IngestionSettings({ job, apiRoot = '' }: { job: IngestionJob; ap
           <dl><div><dt>Entity types</dt><dd>{settings.entityTypes.join(', ')}</dd></div><div><dt>Relationship types</dt><dd>{settings.relationshipTypes.length ? settings.relationshipTypes.join(', ') : 'Any relationship explicitly stated in the source'}</dd></div><div><dt>Extraction scope</dt><dd>{settings.extractionInstructions}</dd></div></dl>
           {settings.rationale && <><strong>Why these settings</strong><p>{settings.rationale}</p></>}
           {sampling?.sampledDocuments != null && <p>Based on {sampling.sampledDocuments.toLocaleString()} sampled {sampling.sampledDocuments === 1 ? 'file' : 'files'}{sampling.availableDocuments != null ? ` from ${sampling.availableDocuments.toLocaleString()}` : ''}.{sampling.excluded?.length ? ` ${sampling.excluded.length.toLocaleString()} could not be sampled.` : ''} These settings apply automatically.</p>}
-        </> : <p>Argus uses the SDK entity types and your workspace description as extraction context.</p>}
+          {sampling?.startWindowSeconds != null && <p>Label discovery starts calls for up to {sampling.startWindowSeconds} seconds; an active response can finish afterward. {sampling.callsThisRun ?? 0} calls started.{sampling.tokenBudget != null && ` Workspace token budget: ${sampling.tokenBudget.toLocaleString()}.`}{profile?.tokensReserved != null && ` Reserved: ${profile.tokensReserved.toLocaleString()} tokens, including response allowance. Reported usage appears in notifications.`}</p>}
+        </> : <p>Argus starts with your selected document categories, then samples source text to discover additional entity and relationship types.</p>}
       </>}
     </div>}
   </details>;

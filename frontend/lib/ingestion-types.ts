@@ -51,7 +51,7 @@ export interface IngestedDocument extends EvidenceDocument {
 }
 
 export function statusLabel(status: string) {
-  const stages: Record<string, string> = { register: 'Save original file', parse: 'Extract text', normalize: 'Check source coverage', chunk: 'Split into chunks', configure: 'Set entity types', embed: 'Embed chunks', extract: 'Extract entities and relationships', resolve: 'Resolve duplicate entities', prepare: 'Prepare graph records', validate: 'Validate source links', publish: 'Publish graph' };
+  const stages: Record<string, string> = { register: 'Save original file', parse: 'Parse source', normalize: 'Check source coverage', chunk: 'Split into chunks', mentions: 'Extract initial entities', local_ner: 'Extract initial entities', configure: 'Discover workspace labels', embed: 'Embed chunks', extract: 'Extract local relationships', resolve: 'Resolve duplicate entities', prepare: 'Prepare graph records', validate: 'Validate source links', publish: 'Publish graph' };
   if (stages[status]) return stages[status];
   if (status === 'waiting_configuration') return 'Configuration needed';
   if (['complete', 'completed', 'published', 'succeeded'].includes(status)) return 'Complete';

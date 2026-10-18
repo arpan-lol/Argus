@@ -1,0 +1,13 @@
+.argus-categories{border:0;padding:0;margin:0 0 24px;min-width:0;color:var(--ce-text)}
+.argus-categories legend{font-size:12px;font-weight:600;margin-bottom:8px;padding:0}
+.argus-categories>p{font-size:11px;line-height:1.6;color:var(--ce-muted);margin:0 0 12px;max-width:65ch}
+.argus-category-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:18px;row-gap:4px}
+.argus-category-options label{display:flex!important;align-items:center;gap:9px;min-height:36px;margin:0!important;font-size:12px;cursor:pointer}
+.argus-category-options input{width:16px;height:16px;flex:none;margin:0;accent-color:var(--ce-accent);cursor:pointer}
+.argus-category-options label:has(input:checked){color:var(--ce-text);font-weight:550}
+.argus-category-options label:hover{color:var(--ce-text);background:var(--ce-hover)}
+.argus-category-options input:focus-visible{outline:2px solid var(--ce-text);outline-offset:3px}
+.argus-categories:disabled label,.argus-categories:disabled input{cursor:default;opacity:.7}
+.argus-categories-error{font-size:12px;line-height:1.6}
+.argus-categories-error button{display:block;margin-top:8px;border:1px solid var(--ce-line);border-radius:6px;padding:6px 10px;background:var(--ce-surface);color:var(--ce-text);cursor:pointer}
+@media(max-width:420px){.argus-category-options{grid-template-columns:1fr}.argus-category-options label{min-height:44px}}

@@ -40,3 +40,10 @@
 .ce-project-return:hover{background:var(--ce-hover);color:var(--ce-text)}
 .ce-file-add-empty{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;min-height:180px;width:100%;margin:16px 0;border:1px dashed var(--ce-muted);border-radius:12px;background:transparent;color:var(--ce-muted);font-size:12px}
 .ce-file-add-empty:hover{background:var(--ce-surface);color:var(--ce-text)}
+.argus-source-report{padding:10px 14px;border-bottom:1px solid var(--ce-line);color:var(--ce-text);font-size:12px;line-height:1.6;flex:none}
+.argus-source-report>div{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.argus-source-report button{display:flex;padding:5px;border:0;background:transparent;color:var(--ce-muted);cursor:pointer}
+.argus-source-report summary{cursor:pointer;color:var(--ce-muted);padding-top:6px}
+.argus-source-report ul{margin:8px 0 0;padding:0;list-style:none;max-height:160px;overflow:auto}
+.argus-source-report li{display:flex;flex-direction:column;padding:5px 0;overflow-wrap:anywhere}
+.argus-source-report small{color:var(--ce-muted)}
