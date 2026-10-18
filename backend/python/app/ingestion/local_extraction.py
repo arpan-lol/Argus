@@ -57,6 +57,11 @@ def convert_output(chunk, result, offset=0, constraints=None):
         span = source_span(chunk, context_start, context_end)
         qualifiers = source_context(context)
         scope = relation_scope(chunk['text'], left, right, context)
+        supporting_blocks = entity_blocks[subject] | entity_blocks[target]
+        if any(blocks[index].get('kind') == 'citation' or blocks[index].get('role') in {'reference', 'references', 'bibliography'} for index in supporting_blocks):
+            scope['relationScopeSignals'].append('reference_or_bibliography_role')
+            scope['traversalStatus'] = 'needs_context_review'
+            scope['relationScopeStatus'] = 'needs_context_review'
         if blocks and not entity_blocks[subject].intersection(entity_blocks[target]):
             scope['relationScopeSignals'].append('cross_source_block_or_table_row')
             scope['traversalStatus'] = 'needs_context_review'
