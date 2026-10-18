@@ -27,12 +27,18 @@ pipeline = IngestionPipeline()
 class NewProject(BaseModel):
     model_config = ConfigDict(extra='forbid')
     name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default='', max_length=12000)
 
     @field_validator('name')
     @classmethod
     def name_present(cls, value):
         if not value.strip():
             raise ValueError('Enter a project name')
+        return value.strip()
+
+    @field_validator('description')
+    @classmethod
+    def description_text(cls, value):
         return value.strip()
 
 
@@ -56,7 +62,7 @@ def projects():
 def new_project(body: NewProject):
     project_id = str(uuid.uuid4())
     with connection() as conn:
-        row = conn.execute('INSERT INTO projects(id,name) VALUES(%s,%s) RETURNING *', (project_id, body.name)).fetchone()
+        row = conn.execute('INSERT INTO projects(id,name,description) VALUES(%s,%s,%s) RETURNING *', (project_id, body.name, body.description)).fetchone()
     return summary(row)
 
 
