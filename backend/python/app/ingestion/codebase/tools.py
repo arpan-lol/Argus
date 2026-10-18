@@ -58,7 +58,11 @@ class RepositoryTools:
         if chunk is None or chunk['id'] not in seen:
             raise ValueError('Citation must reference a chunk returned by read_sources or search_sources')
         if chunk['text'][citation['start']:citation['end']] != citation['quote'] or citation['end'] > len(chunk['text']) or citation['end'] <= citation['start']:
-            raise ValueError('Citation quote and exact chunk-relative offsets do not match')
+            start = chunk['text'].find(citation['quote'])
+            if start < 0 or chunk['text'].find(citation['quote'], start + 1) >= 0:
+                raise ValueError('Citation quote is missing or ambiguous in the read chunk; use one exact citation_spans entry')
+            citation['start'] = start
+            citation['end'] = start + len(citation['quote'])
         return {**citation, 'revision': self.manifest[citation['source_id']]['revision'], 'startOffset': chunk['startOffset'] + citation['start'], 'endOffset': chunk['startOffset'] + citation['end']}
 
     def execute(self, action, state):
