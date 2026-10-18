@@ -13,7 +13,7 @@ export type MapNode = {
 };
 type Bounds = { minX: number; minY: number; maxX: number; maxY: number };
 type MapEdge = { id: string; source: string; target: string; type: string; derived?: boolean; [key: string]: unknown };
-type MapView = { nodes: MapNode[]; edges: MapEdge[]; level: string; truncated?: boolean; source?: string; status?: string };
+type MapView = { nodes: MapNode[]; edges: MapEdge[]; level: string; truncated?: boolean; summaryTruncated?: boolean; source?: string; status?: string };
 type Camera = { x: number; y: number; zoom: number };
 type Neighborhood = { nodes: MapNode[]; edges: MapEdge[]; paths: ConnectionPath[]; truncated?: boolean; status?: string; note?: string };
 type ScreenEdge = { edge: MapEdge; points: { x: number; y: number }[]; minX: number; maxX: number; minY: number; maxY: number };
@@ -36,6 +36,20 @@ const mergeViews = (previous: MapView, next: MapView): MapView => {
   const ids = new Set(nodes.map(node => node.id));
   const edges = [...new Map([...previous.edges, ...next.edges].map(edge => [edge.id, edge])).values()].filter(edge => ids.has(edge.source) && ids.has(edge.target)).slice(-12000);
   return { ...next, nodes, edges };
+};
+const boundedView = (view: MapView, camera: Camera, dimensions: { width: number; height: number }, keep: Set<string> = new Set()) => {
+  const marginX = dimensions.width * .9 / camera.zoom, marginY = dimensions.height * .9 / camera.zoom;
+  const visible = view.nodes.filter(node => keep.has(node.id) || (Math.abs(node.x - camera.x) <= marginX && Math.abs(node.y - camera.y) <= marginY));
+  visible.sort((a, b) => Number(keep.has(b.id)) - Number(keep.has(a.id)) || Math.hypot(a.x - camera.x, a.y - camera.y) - Math.hypot(b.x - camera.x, b.y - camera.y));
+  const nodeLimit = Math.max(400, Math.min(1600, Math.floor(dimensions.width * dimensions.height / 170)));
+  const nodes = visible.slice(0, nodeLimit);
+  const ids = new Set(nodes.map(node => node.id));
+  const edges = view.edges.filter(edge => ids.has(edge.source) && ids.has(edge.target)).sort((a, b) => {
+    const score = (edge: MapEdge) => (edge.type === 'RELATES' ? 0 : edge.type === 'SHARES_TERM' || edge.derived ? 2 : 1) + (keep.has(edge.source) || keep.has(edge.target) ? -1 : 0);
+    return score(a) - score(b);
+  });
+  const edgeLimit = Math.max(900, Math.min(3600, nodeLimit * 2));
+  return { ...view, nodes, edges: edges.slice(0, edgeLimit), truncated: !!view.truncated || visible.length > nodes.length || edges.length > edgeLimit };
 };
 const viewQuery = (target: Camera, width: number, height: number) => new URLSearchParams({
   minX: String(Math.floor(target.x - width * .7 / target.zoom)), maxX: String(Math.ceil(target.x + width * .7 / target.zoom)),
@@ -88,6 +102,8 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
   const animation = useRef(0);
   const revealAnimation = useRef(0);
   const appeared = useRef(new Map<string, number>());
+  const appearanceUntil = useRef(0);
+  const renderLimitReached = useRef(false);
   const navigating = useRef(false);
   const travelingUntil = useRef(0);
   const [navigatingTo, setNavigatingTo] = useState(false);
@@ -102,6 +118,8 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
   const [zoomLabel, setZoomLabel] = useState('Overview');
   const [reload, setReload] = useState(0);
   const [truncated, setTruncated] = useState(false);
+  const [renderTruncated, setRenderTruncated] = useState(false);
+  const [summaryTruncated, setSummaryTruncated] = useState(false);
   const [accessible, setAccessible] = useState<MapNode[]>([]);
   const [connections, setConnections] = useState<Neighborhood | null>(null);
   const [connectionsLoading, setConnectionsLoading] = useState(false);
@@ -130,18 +148,41 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     const now = performance.now();
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     const opacity = (id: string) => {
-      if (!appeared.current.has(id)) appeared.current.set(id, now);
+      if (!appeared.current.has(id)) {
+        appeared.current.set(id, now);
+        appearanceUntil.current = Math.max(appearanceUntil.current, now + 340);
+        if (appeared.current.size > 8192) appeared.current.delete(appeared.current.keys().next().value!);
+      }
       return reducedMotion ? 1 : Math.min(1, .2 + (now - appeared.current.get(id)!) / 320);
     };
     const linked = neighborhood.current;
-    const nodes = [...new Map([...view.nodes, ...(linked?.nodes || [])].map(node => [node.id, node])).values()];
+    const allNodes = [...new Map([...view.nodes, ...(linked?.nodes || [])].map(node => [node.id, node])).values()];
     const linkIds = new Set(linked?.nodes.map(node => node.id) || []);
     const path = activePath.current;
     const pathIds = new Set(path ? [path.sourceChunkId, path.entityId, path.targetChunkId] : []);
-    const projected = new Map(nodes.map(node => [node.id, { node, x: (node.x - c.x) * c.zoom + width / 2, y: (node.y - c.y) * c.zoom + height / 2 }]));
+    const renderLimit = Math.max(400, Math.min(1600, Math.floor(width * height / 170)));
+    const forcedIds = new Set([...pathIds, ...linkIds, selected.current, hovered.current].filter((id): id is string => !!id));
+    const candidates = allNodes.filter(node => forcedIds.has(node.id) || ((node.x - c.x) * c.zoom + width / 2 >= -100 && (node.x - c.x) * c.zoom + width / 2 <= width + 100 && (node.y - c.y) * c.zoom + height / 2 >= -70 && (node.y - c.y) * c.zoom + height / 2 <= height + 70));
+    candidates.sort((a, b) => Number(forcedIds.has(b.id)) - Number(forcedIds.has(a.id)) || Math.hypot(a.x - c.x, a.y - c.y) - Math.hypot(b.x - c.x, b.y - c.y));
+    const visibleNodes = candidates.filter(node => forcedIds.has(node.id)).concat(candidates.filter(node => !forcedIds.has(node.id)).slice(0, Math.max(0, renderLimit - candidates.filter(node => forcedIds.has(node.id)).length)));
+    const projected = new Map(visibleNodes.map(node => [node.id, { node, x: (node.x - c.x) * c.zoom + width / 2, y: (node.y - c.y) * c.zoom + height / 2 }]));
+    const onScreen = (point: { x: number; y: number }) => point.x >= -100 && point.x <= width + 100 && point.y >= -70 && point.y <= height + 70;
     context.lineCap = 'round';
     screenEdges.current = [];
-    for (const edge of new Map([...view.edges, ...(linked?.edges || [])].map(edge => [edge.id, edge])).values()) {
+    const allEdges = [...new Map([...view.edges, ...(linked?.edges || [])].map(edge => [edge.id, edge])).values()];
+    const eligibleEdges = allEdges.filter(edge => {
+      const a = projected.get(edge.source), b = projected.get(edge.target);
+      return !!a && !!b && (onScreen(a) || pathIds.has(edge.source)) && (onScreen(b) || pathIds.has(edge.target));
+    });
+    const priority = (edge: MapEdge) => edge.type === 'MENTIONS' && pathIds.has(edge.source) && pathIds.has(edge.target) ? 0 : forcedIds.has(edge.source) && forcedIds.has(edge.target) ? 1 : edge.type === 'RELATES' ? 2 : edge.type === 'SHARES_TERM' || edge.derived ? 4 : 3;
+    eligibleEdges.sort((a, b) => priority(a) - priority(b));
+    const edgeLimit = Math.max(900, Math.min(3600, renderLimit * 2));
+    const atRenderLimit = candidates.length > renderLimit || eligibleEdges.length > edgeLimit;
+    if (atRenderLimit !== renderLimitReached.current) {
+      renderLimitReached.current = atRenderLimit;
+      setRenderTruncated(atRenderLimit);
+    }
+    for (const edge of eligibleEdges.slice(0, edgeLimit)) {
       const a = projected.get(edge.source), b = projected.get(edge.target);
       if (!a || !b) continue;
       if ((a.x < -30 && b.x < -30) || (a.x > width + 30 && b.x > width + 30) || (a.y < -30 && b.y < -30) || (a.y > height + 30 && b.y > height + 30)) continue;
@@ -219,7 +260,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       }
     }
     context.globalAlpha = 1;
-    if (!reducedMotion && [...appeared.current.values()].some(start => now - start < 340)) {
+    if (!reducedMotion && now < appearanceUntil.current) {
       cancelAnimationFrame(revealAnimation.current);
       revealAnimation.current = requestAnimationFrame(draw);
     }
@@ -306,7 +347,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
         node.type === 'chunk' ? loadConnections(node.id) : Promise.resolve(),
       ]);
       if (disposed.current || sequence !== navigationSequence.current) return;
-      current.current = mergeViews(current.current, detail);
+      current.current = boundedView(mergeViews(current.current, detail), target, dimensions.current, new Set([node.id]));
       if (node.type !== 'chunk') clearConnections();
       draw();
       travel(target);
@@ -343,7 +384,8 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     disposed.current = false;
     readyMode.current = null; ++navigationSequence.current;
     setLoading(true); setError(null); clearConnections();
-    world.current = null; overview.current = empty; current.current = empty; appeared.current.clear();
+    world.current = null; overview.current = empty; current.current = empty; appeared.current.clear(); appearanceUntil.current = 0;
+    renderLimitReached.current = false; setRenderTruncated(false); setSummaryTruncated(false);
     setAccessible([]); setTooltip(null); setEdgeTooltip(null); hovered.current = null; hoveredEdge.current = null;
     let active = true;
     const element = host.current;
@@ -367,9 +409,11 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     resize.observe(element);
     const theme = new MutationObserver(draw); theme.observe(window.document.documentElement, { attributes: true, attributeFilter: ['class'] });
     const controller = new AbortController();
-    mapRequest<{ bounds: Bounds; nodes?: MapNode[]; groups?: MapNode[]; edges?: MapEdge[] }>('/overview', controller.signal).then(result => {
+    mapRequest<{ bounds: Bounds; nodes?: MapNode[]; groups?: MapNode[]; edges?: MapEdge[]; truncated?: boolean; summaryTruncated?: boolean }>('/overview', controller.signal).then(result => {
       if (!active) return;
-      world.current = result.bounds; overview.current = { nodes: result.nodes || result.groups || [], edges: result.edges || [], level: 'overview' };
+      world.current = result.bounds; overview.current = { nodes: result.nodes || result.groups || [], edges: result.edges || [], level: 'overview', truncated: result.truncated, summaryTruncated: result.summaryTruncated };
+      setTruncated(!!result.truncated);
+      setSummaryTruncated(!!result.summaryTruncated);
       const saved = modeCameras.current[mode];
       if (saved) move(saved); else fit();
       readyMode.current = mode; setLoading(false);
@@ -394,7 +438,8 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       const requestNumber = ++sequence;
       mapRequest<MapView>(`/view?${query}`, controller.signal).then(view => {
         if (!active || sequence !== requestNumber) return;
-        current.current = mergeViews(current.current, view); setTruncated(!!view.truncated); setAccessible(view.nodes.slice(0, 200)); setError(null); setLoading(false); draw();
+        current.current = boundedView(mergeViews(current.current, view), c, dimensions.current, new Set([selected.current, hovered.current, ...((neighborhood.current?.nodes || []).map(node => node.id))].filter((id): id is string => !!id)));
+        setTruncated(!!view.truncated || !!overview.current.truncated || !!current.current.truncated); setSummaryTruncated(!!view.summaryTruncated); setAccessible(view.nodes.slice(0, 200)); setError(null); setLoading(false); draw();
       }).catch(failure => { if (active && failure.name !== 'AbortError') { setError(failure.message); previous = ''; } }).finally(() => { pending = false; });
     };
     const interval = window.setInterval(load, 180); load();
@@ -403,9 +448,10 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
 
   useEffect(() => { if (!loading && readyMode.current === mode && focus?.nodeId) void fly(focus.nodeId); }, [focus?.nodeId, focus?.nonce, fly, loading, mode]);
 
-  const hit = (x: number, y: number) => [...screenNodes.current].reverse().find(point => Math.hypot(point.x - x, point.y - y) <= point.radius)?.node;
+  const hit = (x: number, y: number) => { for (let index = screenNodes.current.length - 1; index >= 0; index--) { const point = screenNodes.current[index]; if (Math.hypot(point.x - x, point.y - y) <= point.radius) return point.node; } return undefined; };
   const hitEdge = (x: number, y: number) => {
-    for (const item of [...screenEdges.current].reverse()) {
+    for (let edgeIndex = screenEdges.current.length - 1; edgeIndex >= 0; edgeIndex--) {
+      const item = screenEdges.current[edgeIndex];
       if (x < item.minX || x > item.maxX || y < item.minY || y > item.maxY) continue;
       for (let index = 1; index < item.points.length; index++) {
         const a = item.points[index - 1], b = item.points[index], dx = b.x - a.x, dy = b.y - a.y;
@@ -469,9 +515,10 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     {tooltip && <div className={styles.tooltip} style={{ left: tooltip.x, top: tooltip.y }}><small>{names[tooltip.node.type]}</small><strong>{clip(tooltip.node.preview || tooltip.node.label, 100)}</strong></div>}
     {edgeTooltip && <div className={styles.tooltip} role="tooltip" style={{ left: edgeTooltip.x, top: edgeTooltip.y }}><strong>{edgeMeaning(edgeTooltip.edge)[0]}</strong><p>{edgeMeaning(edgeTooltip.edge)[1]}</p></div>}
     {loading && <div className={styles.notice} role="status"><Loader2 size={15} className={styles.spin} />Opening source map…</div>}
-    {navigatingTo && !loading && <div className={styles.navigationStatus} role="status"><Loader2 size={14} className={styles.spin} />Loading destination connections�</div>}
+    {navigatingTo && !loading && <div className={styles.navigationStatus} role="status"><Loader2 size={14} className={styles.spin} />Loading destination connections…</div>}
     {error && <div className={styles.error} role="alert"><span>{error}</span><button onClick={() => { setError(null); setReload(value => value + 1); }}><RotateCcw size={13} />Retry</button></div>}
-    {truncated && !error && !connectionsOpen && <div className={styles.limit}>Zoom in to reveal more sources</div>}
+    {(truncated || renderTruncated) && !error && !connectionsOpen && <div className={styles.limit}>Zoom in to reveal more sources</div>}
+    {summaryTruncated && !error && !connectionsOpen && <div className={`${styles.limit} ${truncated || renderTruncated ? styles.limitSecondary : ''}`}>Some shared-name links are hidden in this summary</div>}
     {connectionsOpen && <ConnectionPaths paths={connections?.paths || []} loading={connectionsLoading} error={connectionsError} truncated={connections?.truncated} activeTargetChunkId={activeConnection?.targetChunkId} onFollow={followConnection} onClose={clearConnections} />}
     <div className={styles.controls}><button aria-label="Zoom in" onClick={() => zoomBy(1.7)}><Plus size={16} /></button><button aria-label="Zoom out" onClick={() => zoomBy(1 / 1.7)}><Minus size={16} /></button>{onExpand && <button aria-label={expanded ? 'Collapse Source Explorer' : 'Expand Source Explorer'} onClick={onExpand}>{expanded ? <Minimize2 size={15} /> : <Expand size={15} />}</button>}<button aria-label="Show whole source map" onClick={fit}><LocateFixed size={15} /></button><button aria-label="About the source map" aria-expanded={help} onClick={() => setHelp(value => !value)}><HelpCircle size={16} /></button></div>
     {help && <div className={styles.help}><strong>Your sources, connected</strong><p>{mode === 'grouped' ? 'Groups organize documents for navigation. Zoom in for document trees; group membership is not a topic classification.' : 'Each point is a document. Their arrangement follows shared names; it is not a topic classification.'}</p><dl className={styles.edgeMeanings}><div><dt>Contains</dt><dd>Document → heading → chunk.</dd></div><div><dt>Next chunk</dt><dd>Reading order within a section.</dd></div><div><dt>Mentions</dt><dd>A chunk names this entity.</dd></div><div><dt>Shared name · dashed</dt><dd>A summarized shared-mention path.</dd></div></dl><p>These links describe structure and mentions. They do not establish agreement, contradiction, or a scientific relationship.</p></div>}
