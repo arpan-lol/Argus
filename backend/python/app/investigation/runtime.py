@@ -135,11 +135,27 @@ class Investigation:
         query = self.request["query"].casefold().strip(" \t\n.!?")
         return query in {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "what do you have in context", "what you have in context", "what you have in contex", "what context do you have", "what is in your context"}
 
+    def capability_question(self):
+        query = self.request["query"].casefold()
+        return any(phrase in query for phrase in ("tool", "capabilit", "what can you do", "how do you work", "agentic"))
+
+    def tool_inventory_question(self):
+        query = self.request["query"].casefold()
+        return any(phrase in query for phrase in ("tools you have", "tools do you have", "your tools", "argus tools", "tools available to you", "tools can you use"))
+
+    def tool_names(self):
+        return [name for name in TOOLS if self.request["graph_expansion"] or name not in ("expand_connections", "find_paths", "rank_entities")]
+
     def messages(self, state, context_limit, direct=False):
         sources = [{"reference": ref, "title": source["documentTitle"], "text": source["text"][:600]} for ref, source in state["sources"].items()]
         if direct:
             description = (self.config.get("workspaceDescription") or "")[:500]
             policy = NO_SOURCE_POLICY if not self.config["coverage"]["publishedDocuments"] else CONVERSATION_POLICY
+            if self.capability_question():
+                names = self.tool_names()
+                policy += f"\nArgus has {len(names)} retrieval tools configured for this request: {', '.join(names)}. Answer questions about available tools from this list. finish_report is an internal output action, not a retrieval tool."
+                if not self.config["coverage"]["publishedDocuments"]:
+                    policy += " This project has no published semantic sources, so those retrieval tools cannot return project source results yet. Include this availability limit in the answer and do not claim to have run them."
             base = [{"role": "system", "content": policy + "\nProject context: " + json.dumps({"coverage": self.config["coverage"], "workspaceDescription": description}, ensure_ascii=False)}]
         else:
             base = [{"role": "system", "content": POLICY + "\nCurrent coverage and execution limits: " + json.dumps({"coverage": self.config["coverage"], "limits": self.limits})}]
@@ -276,6 +292,13 @@ class Investigation:
         return report
 
     def synthesize(self, state):
+        if self.tool_inventory_question():
+            names = self.tool_names()
+            answer = f"Argus has {len(names)} retrieval tools configured for this chat: {', '.join(names)}."
+            if not self.config["coverage"]["publishedDocuments"]:
+                answer += " This project has no published semantic sources, so the retrieval tools cannot return project source results yet."
+            report = Report.model_validate({"purpose": "conversation", "paragraphs": [{"text": answer, "citations": []}], "comparison": [], "gaps": []})
+            return {**state, "report": report.model_dump()}
         schema_tokens = len(self.encoding.encode(json.dumps(pydantic_function_tool(Report)))) + 256
         direct = not self.config["coverage"]["publishedDocuments"] or self.direct_conversation()
         messages = self.messages(state, self.limits["contextTokens"] - schema_tokens, direct=direct)
@@ -329,7 +352,7 @@ class Investigation:
         builder.add_node("plan", self.plan)
         builder.add_node("tools", self.tools)
         builder.add_node("synthesize", self.synthesize)
-        builder.add_conditional_edges(START, lambda state: "synthesize" if not self.config["coverage"]["publishedDocuments"] or self.direct_conversation() else "plan", {"synthesize": "synthesize", "plan": "plan"})
+        builder.add_conditional_edges(START, lambda state: "synthesize" if not self.config["coverage"]["publishedDocuments"] or self.direct_conversation() or self.tool_inventory_question() else "plan", {"synthesize": "synthesize", "plan": "plan"})
         builder.add_conditional_edges("plan", lambda state: "tools" if state["pending"] else "synthesize", {"tools": "tools", "synthesize": "synthesize"})
         builder.add_edge("synthesize", END)
         builder.add_conditional_edges("tools", lambda state: "done" if state["report"] else "next", {"done": END, "next": "plan"})

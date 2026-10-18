@@ -91,6 +91,33 @@ class InvestigationTest(TestCase):
         self.assertNotIn("rank_entities", json.dumps(messages))
         tool.assert_not_called()
 
+    def test_empty_project_tool_question_receives_live_catalog(self):
+        self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
+        self.row["request"]["query"] = "How many tools do you have and what are their names?"
+        self.row["request"]["graph_expansion"] = True
+        runtime = self.runtime(mock.Mock())
+        prompt = runtime.messages(initial(), 10000, direct=True)[0]["content"]
+        self.assertIn("9 retrieval tools", prompt)
+        self.assertIn("rank_entities", prompt)
+        self.assertIn("search_sources", prompt)
+        self.assertIn("no published semantic sources", prompt)
+        self.row["request"]["graph_expansion"] = False
+        prompt = runtime.messages(initial(), 10000, direct=True)[0]["content"]
+        self.assertIn("6 retrieval tools", prompt)
+        self.assertNotIn("rank_entities", prompt)
+
+    def test_tool_inventory_answer_comes_from_registry_without_model_call(self):
+        self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
+        self.row["request"]["query"] = "tell me how many tools you have & also their names"
+        self.row["request"]["graph_expansion"] = True
+        model = mock.Mock(side_effect=AssertionError("tool inventory should not use the model"))
+        state = self.runtime(model).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "tool-inventory"}})
+        answer = state["report"]["paragraphs"][0]["text"]
+        self.assertIn("9 retrieval tools", answer)
+        self.assertIn("rank_entities", answer)
+        self.assertIn("no published semantic sources", answer)
+        model.assert_not_called()
+
     def test_checkpoint_resume_keeps_sources_tools_and_budget(self):
         self.row["request"]["query"] = "Find the published hello source"
         model = mock.Mock(side_effect=[(call("search_sources", {"query": "hello", "mode": "lexical"}), None), RuntimeError("interrupted")])
