@@ -48,6 +48,7 @@ def install(model, maximum_spans=64):
                     continue
                 end_prefix = inside_prefix[batch_index, :, class_index]
                 end_probabilities = probabilities[batch_index, :, class_index, 1]
+                end_values = ends.detach().cpu().tolist()
                 for start_group in starts.split(32):
                     start_grid = start_group[:, None]
                     end_grid = ends[None, :]
@@ -67,9 +68,10 @@ def install(model, maximum_spans=64):
                         continue
                     values = values[valid_top].detach().cpu().tolist()
                     flat_indices = flat_indices[valid_top].detach().cpu().tolist()
+                    start_values = start_group.detach().cpu().tolist()
                     for value, flat_index in zip(values, flat_indices, strict=True):
                         start_index, end_index = divmod(flat_index, ends.numel())
-                        ranked_candidates.append((float(value), int(start_group[start_index]), int(ends[end_index])))
+                        ranked_candidates.append((float(value), start_values[start_index], end_values[end_index]))
             unique = {}
             for score, start, end in ranked_candidates:
                 key = (start, end)
