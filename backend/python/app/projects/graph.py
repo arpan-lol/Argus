@@ -127,24 +127,41 @@ def shared_document_connections(nodes):
         labels_by_entity[entity_id] = label
     truncated = len(rows) > 12000
     scores = {}
-    for entity_id, documents in pairs_by_entity.items():
+    pair_budget = 20000
+    pair_work = 0
+    ordered_entities = sorted(pairs_by_entity.items(), key=lambda item: (len(item[1]), item[0]))
+    for entity_id, documents in ordered_entities:
         if len(documents) > 40:
             truncated = True
             documents = set(sorted(documents)[:40])
         if len(documents) < 2:
             continue
         ordered = sorted(documents)
+        pair_count = len(ordered) * (len(ordered) - 1) // 2
+        if pair_work + pair_count > pair_budget:
+            remaining = pair_budget - pair_work
+            bounded_count = max(0, math.floor((1 + math.sqrt(1 + 8 * remaining)) / 2))
+            ordered = ordered[:bounded_count]
+            pair_count = len(ordered) * (len(ordered) - 1) // 2
+            truncated = True
+        if len(ordered) < 2:
+            break
+        pair_work += pair_count
+        contribution = 1 / (len(documents) - 1)
         for index, source in enumerate(ordered):
             for target in ordered[index + 1:]:
-                score = scores.setdefault((source, target), {'shared': 0, 'labels': [], 'entityIds': []})
+                score = scores.setdefault((source, target), {'shared': 0, 'score': 0.0, 'labels': [], 'entityIds': []})
                 score['shared'] += 1
+                score['score'] += contribution
                 if len(score['labels']) < 6:
                     score['labels'].append(labels_by_entity[entity_id])
                     score['entityIds'].append(entity_id)
-    ranked = sorted(scores.items(), key=lambda item: (-item[1]['shared'], item[0]))
+        if pair_work >= pair_budget:
+            break
+    ranked = sorted(scores.items(), key=lambda item: (-item[1]['score'], -item[1]['shared'], item[0]))
     if len(ranked) > 1200:
         truncated = True
-    edges = [{'id': a + '|SHARES_TERM|' + b, 'source': a, 'target': b, 'type': 'SHARES_TERM', 'derived': True, 'sharedEntities': score['shared'], 'labels': score['labels'], 'entityIds': score['entityIds']} for (a, b), score in ranked[:1200]]
+    edges = [{'id': a + '|SHARES_TERM|' + b, 'source': a, 'target': b, 'type': 'SHARES_TERM', 'derived': True, 'sharedEntities': score['shared'], 'sharedScore': round(score['score'], 6), 'labels': score['labels'], 'entityIds': score['entityIds']} for (a, b), score in ranked[:1200]]
     if len(_summary_cache) >= 64:
         _summary_cache.pop(next(iter(_summary_cache)))
     _summary_cache[key] = (time.monotonic(), edges, truncated)
