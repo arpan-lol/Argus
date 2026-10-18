@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, ArrowUpRight, ChevronDown, CircleHelp, Focus, List, Loader2, Minus, Network, Plus, Search, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ArrowUpRight, CircleHelp, Focus, List, Loader2, Minus, Network, Plus, Search, X } from 'lucide-react';
 import { api } from '@/lib/evidence-types';
 import styles from './KnowledgeGraph.module.css';
 
@@ -51,7 +51,6 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
   const [hoverId, setHoverId] = useState<string | null>(null);
-  const [relationFilter, setRelationFilter] = useState('all');
   const [help, setHelp] = useState(false);
   const [catalogOpen, setCatalogOpen] = useState(false);
   const [reload, setReload] = useState(0);
@@ -59,7 +58,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
   const fitPending = useRef(true);
   const externalSelection = useRef<string | null>(null);
   const nodes = useMemo(() => new Map(view.nodes.map(node => [node.id, node])), [view.nodes]);
-  const edges = useMemo(() => view.edges.filter(edge => nodes.has(edge.source) && nodes.has(edge.target) && (relationFilter === 'all' || (relationFilter === 'native' ? native(edge) && !review(edge) : review(edge)))), [view.edges, nodes, relationFilter]);
+  const edges = useMemo(() => view.edges.filter(edge => nodes.has(edge.source) && nodes.has(edge.target)), [view.edges, nodes]);
   const tracedEdges = useMemo(() => new Set(trace?.assertionIds || []), [trace]);
   const tracedNodes = useMemo(() => new Set(view.edges.filter(edge => tracedEdges.has(edge.id)).flatMap(edge => [edge.source, edge.target])), [view.edges, tracedEdges]);
   const related = useMemo(() => selected ? view.edges.filter(edge => edge.source === selected.id || edge.target === selected.id) : [], [selected, view.edges]);
@@ -87,7 +86,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
     const maxX = Math.max(...view.nodes.map(node => node.x)) + 110;
     const minY = Math.min(...view.nodes.map(node => node.y)) - 55;
     const maxY = Math.max(...view.nodes.map(node => node.y)) + 55;
-    moveCamera({ x: (minX + maxX) / 2, y: (minY + maxY) / 2, zoom: Math.min(1.25, Math.max(.035, Math.min((size.width - 48) / (maxX - minX), (size.height - 60) / (maxY - minY)))) }, animate);
+    moveCamera({ x: (minX + maxX) / 2, y: (minY + maxY) / 2, zoom: Math.min(1.25, Math.max(.005, Math.min((size.width - 48) / (maxX - minX), (size.height - 60) / (maxY - minY)))) }, animate);
   }, [view.nodes, size, moveCamera]);
 
   useEffect(() => {
@@ -147,7 +146,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
     const maxX = Math.max(...pathNodes.map(node => node.x)) + 90;
     const minY = Math.min(...pathNodes.map(node => node.y)) - 90;
     const maxY = Math.max(...pathNodes.map(node => node.y)) + 90;
-    moveCamera({ x: (minX + maxX) / 2, y: (minY + maxY) / 2, zoom: Math.min(1.6, Math.max(.035, Math.min((size.width - 50) / (maxX - minX), (size.height - 60) / (maxY - minY)))) }, true);
+    moveCamera({ x: (minX + maxX) / 2, y: (minY + maxY) / 2, zoom: Math.min(1.6, Math.max(.005, Math.min((size.width - 50) / (maxX - minX), (size.height - 60) / (maxY - minY)))) }, true);
   }, [trace?.nonce, loading, view.nodes, tracedNodes, size, moveCamera]);
 
   useEffect(() => {
@@ -162,7 +161,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
     return () => controller.abort();
   }, [selected, mentionOffset, apiRoot, refreshToken, reload]);
 
-  const zoom = useCallback((factor: number) => moveCamera({ ...cameraRef.current, zoom: Math.min(4, Math.max(.025, cameraRef.current.zoom * factor)) }, true), [moveCamera]);
+  const zoom = useCallback((factor: number) => moveCamera({ ...cameraRef.current, zoom: Math.min(4, Math.max(.005, cameraRef.current.zoom * factor)) }, true), [moveCamera]);
   useEffect(() => {
     const element = host.current;
     if (!element) return;
@@ -170,7 +169,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
       event.preventDefault();
       const bounds = element.getBoundingClientRect();
       const current = cameraRef.current;
-      const nextZoom = Math.min(4, Math.max(.025, current.zoom * Math.exp(-event.deltaY * .0015)));
+      const nextZoom = Math.min(4, Math.max(.005, current.zoom * Math.exp(-event.deltaY * .0015)));
       const x = event.clientX - bounds.left - bounds.width / 2, y = event.clientY - bounds.top - bounds.height / 2;
       moveCamera({ x: current.x + x / current.zoom - x / nextZoom, y: current.y + y / current.zoom - y / nextZoom, zoom: nextZoom });
     };
@@ -214,7 +213,6 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
       <div className={styles.tools}>
         <button type="button" className={`${styles.iconButton} ${catalogOpen ? styles.activeTool : ''}`} title="Browse all entities" aria-label="Browse all entities" aria-expanded={catalogOpen} onClick={() => setCatalogOpen(value => !value)}><List size={16} /></button>
         <label className={styles.find}><Search size={14} aria-hidden="true" /><input aria-label="Search workspace entities" placeholder="Search entities" value={search} onChange={event => setSearch(event.target.value)} /></label>
-        <label className={styles.filter}><span className={styles.srOnly}>Relationship filter</span><select value={relationFilter} onChange={event => setRelationFilter(event.target.value)}><option value="all">All relationships</option><option value="native">Source-defined</option><option value="review">Needs review</option></select><ChevronDown size={12} aria-hidden="true" /></label>
       </div>
       {help && <div className={styles.help}><strong>A knowledge graph, with sources one click away</strong><p>Nodes are extracted entities. Arrows show directed, labelled semantic relationships. Documents and chunks are available through each entity’s source mentions.</p><p>Solid arrows come from structured source records. Dashed arrows are unverified model extractions. Dotted arrows need review. A model score is not a probability of truth.</p><p>This is a bounded graph page. Browse more entities or explore one entity’s relationships without loading the whole corpus.</p></div>}
     </div>
@@ -258,7 +256,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
       {loading && <div className={styles.loading} role="status"><Loader2 size={15} className={styles.spin} />Loading entities & relationships…</div>}
       {error && <div className={styles.empty} role="alert"><strong>Knowledge graph unavailable</strong><p>{error}</p><button type="button" onClick={() => setReload(value => value + 1)}>Retry graph</button></div>}
       {!loading && !error && !view.nodes.length && <div className={styles.empty}><Network size={26} /><strong>{view.pagination.entityTotal ? 'No semantic relationships in this view' : 'No entities to display yet'}</strong><p>{view.pagination.entityTotal ? 'Search or browse the entity catalog, then select an entity to explore its relationships and source mentions.' : 'Published entities will appear here after ingestion. Source files remain available in the Sources view.'}</p>{!!view.pagination.entityTotal && <button type="button" onClick={() => setCatalogOpen(true)}>Browse entities</button>}</div>}
-      {!loading && !error && !!view.nodes.length && !edges.length && <div className={styles.noEdges}>{relationFilter !== 'all' ? 'No relationships match this filter on this page' : 'No semantic relationships on this page · select an entity to explore its neighborhood'}</div>}
+      {!loading && !error && !!view.nodes.length && !edges.length && <div className={styles.noEdges}>No semantic relationships on this page · select an entity to explore its neighborhood</div>}
       <div className={styles.controls} aria-label="Graph camera controls"><button type="button" aria-label="Zoom in" onClick={() => zoom(1.35)}><Plus size={16} /></button><button type="button" aria-label="Zoom out" onClick={() => zoom(1 / 1.35)}><Minus size={16} /></button><button type="button" aria-label="Fit graph" onClick={() => fit()}><Focus size={16} /></button></div>
     </div>
     {(selected || selectedEdge) && <section className={styles.details} aria-label={selected ? `${selected.label} details` : 'Relationship details'}>
@@ -274,6 +272,5 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
       {selectedEdge && <div className={styles.detailBody}><div className={styles.triple}><span>{sourceEntity?.label || 'Source entity'}</span><ArrowRight size={15} /><b>{human(selectedEdge.label)}</b><ArrowRight size={15} /><span>{targetEntity?.label || 'Target entity'}</span></div>{selectedEdge.quote && <blockquote>{selectedEdge.quote}</blockquote>}<p className={styles.mentionSummary}>{native(selectedEdge) ? 'Recorded explicitly in structured source data. This is source attribution, not independent verification.' : codebaseAgent(selectedEdge) ? 'Proposed by the GPT-4.1 mini codebase agent from the cited source line. The source match was checked; the relationship meaning was not independently verified.' : 'Extracted by a local model. Check the source passage and its context before relying on this relationship.'}{typeof selectedEdge.confidence === 'number' ? ` Model score: ${selectedEdge.confidence.toFixed(3)} · uncalibrated` : ''}</p>{selectedEdge.chunkId && onSource && <button type="button" className={styles.sourceLink} onClick={() => openSource(selectedEdge.chunkId, sourceEntity?.label)}>Open source passage<ArrowUpRight size={13} /></button>}</div>}
     </section>}
     <footer className={styles.footer}><div className={styles.pageStatus} role="status"><span>{view.nodes.length.toLocaleString()} entities · {edges.length.toLocaleString()} relationships shown</span><small>{view.pagination.entityTotal.toLocaleString()} entities in workspace{focusId ? ` · ${view.pagination.relationshipTotal.toLocaleString()} relationships in neighborhood` : ''}</small></div><div className={styles.paging}>{focusId && <button type="button" title="Return to the graph overview" onClick={browse}>Overview</button>}<button type="button" aria-label={focusId ? 'Previous relationships' : 'Previous entities'} disabled={!hasPrevious || loading} onClick={() => page(-1)}><ArrowLeft size={14} /></button><button type="button" aria-label={focusId ? 'Next relationships' : 'Next entities'} disabled={!hasNext || loading} onClick={() => page(1)}><ArrowRight size={14} /></button></div></footer>
-    <div className={styles.legend}><span><i className={styles.solid} />Source-defined</span><span><i className={styles.dashed} />Model · unverified</span><span><i className={styles.dotted} />Needs review</span></div>
   </section>;
 }

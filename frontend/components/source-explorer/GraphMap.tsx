@@ -199,10 +199,10 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       const pathEdge = edge.type === 'MENTIONS' && (path ? pathIds.has(edge.source) && pathIds.has(edge.target) : linkIds.has(edge.source) && linkIds.has(edge.target));
       const active = pathEdge || edge.id === hoveredEdge.current || [path ? null : selected.current, hovered.current].some(id => id && (edge.source === id || edge.target === id));
       const branch = edge.type === 'HAS_SECTION' || edge.type === 'HAS_CHUNK';
-      context.strokeStyle = active ? (dark ? '#dfc374' : '#88702c') : branch ? (dark ? '#9aa79e' : '#c4bdae') : (dark ? '#a5afa8' : '#cbc4b8');
-      context.lineWidth = pathEdge ? 2.3 : active ? 1.9 : desired === 'overview' ? .6 : branch ? 1.25 : 1;
+      context.strokeStyle = active ? (dark ? '#e4c46f' : '#785d18') : edge.type === 'RELATES' ? (dark ? '#c7977a' : '#7a4c32') : edge.type === 'NEXT_CHUNK' ? (dark ? '#c8ac70' : '#806633') : edge.type === 'MENTIONS' ? (dark ? '#86b6ae' : '#486f69') : edge.type === 'SHARES_ENTITY' || edge.type === 'SHARED_MENTION' ? (dark ? '#a4a4cc' : '#66628e') : branch ? (dark ? '#a5b1aa' : '#777f76') : (dark ? '#9eada5' : '#65756b');
+      context.lineWidth = pathEdge ? 2.4 : active ? 2 : desired === 'overview' ? .85 : branch ? 1.4 : 1.15;
       const derived = edge.derived || edge.type === 'SHARES_ENTITY' || edge.type === 'SHARED_MENTION';
-      context.globalAlpha = (active ? 1 : derived ? (dark ? .34 : .34) : branch ? (dark ? .4 : .4) : (dark ? .38 : .38)) * opacity(edge.id);
+      context.globalAlpha = (active ? 1 : derived ? .53 : branch ? .68 : .72) * opacity(edge.id);
       context.setLineDash(edge.derived || edge.type === 'SHARES_ENTITY' || edge.type === 'SHARED_MENTION' ? [3, 4] : []);
       context.beginPath(); context.moveTo(a.x, a.y);
       if (branch) {
@@ -377,7 +377,6 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
   };
 
   const activate = (node: MapNode) => {
-    if (node.type === 'document' && camera.current.zoom < .45) { void fly(node.id); return; }
     selected.current = node.id;
     if (node.type === 'chunk' || node.type === 'entity') void loadConnections(node.id);
     callbacks.current.onSelect(node); draw();
@@ -577,8 +576,9 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     {loading && <div className={styles.notice} role="status"><Loader2 size={15} className={styles.spin} />Opening source map…</div>}
     {navigatingTo && !loading && <div className={styles.navigationStatus} role="status"><Loader2 size={14} className={styles.spin} />Loading destination connections…</div>}
     {error && <div className={styles.error} role="alert"><span>{error}</span><button onClick={() => { setError(null); setReload(value => value + 1); }}><RotateCcw size={13} />Retry</button></div>}
-    {(truncated || renderTruncated) && !error && !connectionsOpen && <div className={styles.limit}>Zoom in to reveal more sources</div>}
+    {(truncated || renderTruncated) && !error && !connectionsOpen && <div className={styles.limit}>Zoom in to see more</div>}
     {summaryTruncated && !error && !connectionsOpen && <div className={`${styles.limit} ${truncated || renderTruncated ? styles.limitSecondary : ''}`}>Some derived shared-entity links are hidden in this overview</div>}
+    {zoomLabel !== 'Inside sources' && !loading && !error && !connectionsOpen && !truncated && !renderTruncated && <div className={styles.zoomTip}>Zoom in to see more</div>}
     {connectionsOpen && <ConnectionPaths paths={connections?.paths || []} loading={connectionsLoading} error={connectionsError} truncated={connections?.truncated} activeTargetChunkId={activeConnection?.targetChunkId} onFollow={followConnection} onClose={clearConnections} />}
     <div className={styles.controls}><button aria-label="Zoom in" onClick={() => zoomBy(1.7)}><Plus size={16} /></button><button aria-label="Zoom out" onClick={() => zoomBy(1 / 1.7)}><Minus size={16} /></button>{onExpand && <button aria-label={expanded ? 'Collapse Source Explorer' : 'Expand Source Explorer'} onClick={onExpand}>{expanded ? <Minimize2 size={15} /> : <Expand size={15} />}</button>}<button aria-label="Show whole source map" onClick={fit}><LocateFixed size={15} /></button><button aria-label="About the source map" aria-expanded={help} onClick={() => setHelp(value => !value)}><HelpCircle size={16} /></button></div>
     {help && <div className={styles.help}><strong>Your sources, connected</strong><p>Each point is a document. Positions remain stable as documents arrive. Dashed edges summarize common entities.</p><dl className={styles.edgeMeanings}><div><dt>HAS_SECTION / HAS_CHUNK</dt><dd>Document → Section → Chunk.</dd></div><div><dt>NEXT_CHUNK</dt><dd>Reading order within a document.</dd></div><div><dt>MENTIONS</dt><dd>A chunk contains a mention of this entity.</dd></div><div><dt>Shared entity · derived</dt><dd>Both documents mention a common entity.</dd></div></dl><p>Containment and mention edges describe source structure. RELATES edges show extracted semantic predicates; inspect their source and status.</p></div>}

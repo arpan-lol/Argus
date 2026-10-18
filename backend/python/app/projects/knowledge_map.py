@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import time
 from collections import defaultdict, deque
 
@@ -72,19 +73,27 @@ def _coordinates(graph, jobs, namespace):
                     frontier.append((neighbor, depth + 1))
         components.append((root, layers, len(visited)))
     positions = {}
-    cursor_x = cursor_y = row_height = 0
+    cursor_x = cursor_y = row_height = 0.0
     for root, layers, count in sorted(components, key=lambda item: (-item[2], item[0])):
-        width = max(360, max(len(nodes) for nodes in layers.values()) * 150)
-        height = max(240, len(layers) * 165)
-        if cursor_x and cursor_x + width > 3600:
-            cursor_x = 0
-            cursor_y += row_height + 240
-            row_height = 0
-        for depth, nodes in layers.items():
-            for ordinal, identifier in enumerate(nodes):
-                positions[identifier] = (cursor_x + width / 2 + (ordinal - (len(nodes) - 1) / 2) * 150, cursor_y + depth * 165)
-        cursor_x += width + 240
-        row_height = max(row_height, height)
+        radius = max(80.0, 50.0 * math.sqrt(count))
+        diameter = 2 * radius
+        if cursor_x and cursor_x + diameter > max(3000.0, diameter * 1.6):
+            cursor_x = 0.0
+            cursor_y += row_height + 120.0
+            row_height = 0.0
+        center_x, center_y = cursor_x + radius, cursor_y + radius
+        ordinal = 0
+        for depth in sorted(layers):
+            for identifier in layers[depth]:
+                if ordinal == 0:
+                    positions[identifier] = (center_x, center_y)
+                else:
+                    angle = ordinal * math.pi * (3 - math.sqrt(5))
+                    distance = 50.0 * math.sqrt(ordinal)
+                    positions[identifier] = (center_x + math.cos(angle) * distance, center_y + math.sin(angle) * distance)
+                ordinal += 1
+        cursor_x += diameter + 120.0
+        row_height = max(row_height, diameter)
     cached = {'positions': positions, 'created': time.monotonic(), 'truncated': len(links) > 20000, 'orphanY': cursor_y + row_height + 300}
     if len(_layouts) >= 8:
         _layouts.pop(next(iter(_layouts)))
@@ -115,7 +124,7 @@ def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(
     if q.strip():
         relation_filter += " AND (toLower(s.label) CONTAINS toLower($q) OR toLower(o.label) CONTAINS toLower($q) OR toLower(s.type) CONTAINS toLower($q) OR toLower(o.type) CONTAINS toLower($q))"
     relationship_total = _query(graph, _relationship_pattern + relation_filter + " RETURN count(r)", jobs, focus=focus, q=q)[0][0]
-    rows = _query(graph, _relationship_pattern + relation_filter + " RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset ORDER BY CASE WHEN a.extractionMethod='stix_native' THEN 0 ELSE 1 END,a.id SKIP $offset LIMIT $limit", jobs, focus=focus, q=q, offset=relationOffset, limit=relationLimit)
+    rows = _query(graph, _relationship_pattern + relation_filter + " RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset ORDER BY s.id,a.id SKIP $offset LIMIT $limit", jobs, focus=focus, q=q, offset=relationOffset, limit=relationLimit)
     if path:
         path_rows = _query(graph, _relationship_pattern + " AND a.id IN $path RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset LIMIT 8", jobs, path=list(dict.fromkeys(path)))
         rows = list({row[2]: row for row in [*rows, *path_rows]}.values())
@@ -147,7 +156,7 @@ def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(
     xs = [node['x'] for node in nodes] or [0]
     ys = [node['y'] for node in nodes] or [0]
     _verify_snapshot(project_id, jobs, namespace)
-    return {'nodes': nodes, 'entityPage': entity_page, 'edges': edges, 'bounds': {'minX': min(xs) - 120, 'maxX': max(xs) + 120, 'minY': min(ys) - 100, 'maxY': max(ys) + 100}, 'pagination': {'entityTotal': entity_total, 'entityOffset': offset, 'entityLimit': limit, 'hasMoreEntities': offset + limit < entity_total, 'relationshipTotal': relationship_total, 'relationshipOffset': relationOffset, 'relationshipLimit': relationLimit, 'hasMoreRelationships': relationOffset + relationLimit < relationship_total}, 'focusId': focus, 'source': 'falkordb', 'status': 'ready', 'layout': 'Static connected-component breadth-first layout; isolated entities use deterministic positions', 'layoutTruncated': layout['truncated'], 'note': 'Edges are stored semantic relationships. Local model scores are uncalibrated; source-structured records and review statuses remain distinct. Source containment is available in the source graph view.'}
+    return {'nodes': nodes, 'entityPage': entity_page, 'edges': edges, 'bounds': {'minX': min(xs) - 120, 'maxX': max(xs) + 120, 'minY': min(ys) - 100, 'maxY': max(ys) + 100}, 'pagination': {'entityTotal': entity_total, 'entityOffset': offset, 'entityLimit': limit, 'hasMoreEntities': offset + limit < entity_total, 'relationshipTotal': relationship_total, 'relationshipOffset': relationOffset, 'relationshipLimit': relationLimit, 'hasMoreRelationships': relationOffset + relationLimit < relationship_total}, 'focusId': focus, 'source': 'falkordb', 'status': 'ready', 'layout': 'Static connected-component radial layout; isolated entities use deterministic positions', 'layoutTruncated': layout['truncated'], 'note': 'Edges are stored semantic relationships. Local model scores are uncalibrated; source-structured records and review statuses remain distinct. Source containment is available in the source graph view.'}
 
 
 @router.get('/entity/{identifier}/mentions')
