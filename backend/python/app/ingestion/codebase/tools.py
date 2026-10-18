@@ -20,7 +20,7 @@ class RepositoryTools:
         self.cache = OrderedDict()
         self.encoding = tiktoken.get_encoding(job['configuration']['profileTokenEncoding'])
         self.maximum = job['configuration']['profileBatchTokens']
-        self.changed = set(changed or self.manifest)
+        self.changed = set(self.manifest if changed is None else changed)
 
     def present(self, identifier, chunk):
         anchors = []

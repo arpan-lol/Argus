@@ -418,7 +418,7 @@ class IngestionPipeline:
 
     def stage_mentions(self, job):
         from .codebase import selected
-        if selected(job):
+        if selected(job, self.artifact(job['id'], 'configure')):
             return {'method': 'codebase_graph_builder', 'mentions': 0, 'localInferenceSkipped': True}
         from .local_extraction import extract_early_mentions
         return extract_early_mentions(self, job)
