@@ -1,5 +1,5 @@
 .argus-projects{--project-bg:var(--ce-bg);--project-surface:var(--ce-surface);--project-text:var(--ce-text);--project-muted:var(--ce-muted);--project-line:var(--ce-line);--project-accent:var(--ce-accent);min-height:100dvh;background:var(--project-bg);color:var(--project-text);font-family:var(--font-geist-sans),sans-serif;padding:32px clamp(20px,5vw,80px)}
-.dark .argus-projects{--project-bg:#171918;--project-surface:#202421;--project-text:#edf0e9;--project-muted:#afb8aa;--project-line:#3c443b;--project-accent:#31edae}
+.dark .argus-projects{--project-bg:#171918;--project-surface:#202421;--project-text:#edf0e9;--project-muted:#afb8aa;--project-line:#3c443b;--project-accent:#a2c3a6}
 .argus-projects button,.argus-projects a{cursor:pointer}
 .argus-projects button:disabled{cursor:wait;opacity:.55}
 .argus-projects :is(button,input,textarea):focus-visible{outline:2px solid var(--project-accent);outline-offset:4px}
