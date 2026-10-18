@@ -1,5 +1,6 @@
 import hashlib
 import math
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from psycopg.types.json import Jsonb
@@ -9,6 +10,9 @@ from app.ingestion.config import processing_config
 from app.ingestion.publication import graph_connection
 from app.ingestion.structure import sections_for, chunk_sections
 from .scope import project_scope
+
+
+_summary_cache = {}
 
 
 router = APIRouter(prefix='/projects/{project_id}/map', dependencies=[Depends(project_scope)])
@@ -83,7 +87,7 @@ def nodes_for(project_id, mode, bounds=None, limit=800, documents_only=False, id
     if identifiers is not None:
         query += ' AND l.node_id=ANY(%s)'
         parameters.append(identifiers)
-    query += ' ORDER BY l.node_id LIMIT %s'
+    query += " ORDER BY CASE l.payload->>'type' WHEN 'document' THEN 0 WHEN 'section' THEN 1 WHEN 'chunk' THEN 2 ELSE 3 END,l.node_id LIMIT %s"
     parameters.append(limit + 1)
     with connection() as conn:
         rows = conn.execute(query, parameters).fetchall()
@@ -100,17 +104,38 @@ def connections(nodes):
     return [{'id': a + '|' + kind + '|' + b + '|' + (assertion or predicate or ''), 'source': a, 'target': b, 'type': kind, 'predicate': predicate, 'assertionId': assertion, 'extractionMethod': method, 'confidence': score} for a, b, kind, predicate, assertion, method, score in rows]
 
 
+def shared_document_connections(nodes):
+    ids = [node['id'] for node in nodes if node['type'] == 'document']
+    if len(ids) < 2:
+        return []
+    config = processing_config()
+    key = (config['semanticGraph'], tuple(sorted(ids)))
+    cached = _summary_cache.get(key)
+    if cached and time.monotonic() - cached[0] < 5:
+        return cached[1]
+    graph = graph_connection(config)
+    rows = graph.ro_query("MATCH (c:Chunk)-[:MENTIONS]->(e:Entity) WHERE c.active=true AND e.active=true AND c.documentId IN $ids WITH e,collect(DISTINCT c.documentId) AS documents WHERE size(documents)>1 UNWIND documents AS source UNWIND documents AS target WITH e,source,target WHERE source<target WITH source,target,count(e) AS shared,collect(e.label) AS labels RETURN source,target,shared,labels ORDER BY shared DESC LIMIT 1200", {'ids': ids}, timeout=2000).result_set
+    edges = [{'id': a + '|SHARES_TERM|' + b, 'source': a, 'target': b, 'type': 'SHARES_TERM', 'derived': True, 'sharedEntities': count, 'labels': labels[:6]} for a, b, count, labels in rows]
+    if len(_summary_cache) >= 64:
+        _summary_cache.pop(next(iter(_summary_cache)))
+    _summary_cache[key] = (time.monotonic(), edges)
+    return edges
+
+
 @router.get('/overview')
 def overview(project_id: str, mode: str = Query('network', pattern='^(network|grouped)$')):
     nodes, truncated = nodes_for(project_id, mode, limit=2000, documents_only=True)
     bounds = {'minX': min((node['x'] for node in nodes), default=0) - 500, 'maxX': max((node['x'] for node in nodes), default=0) + 500, 'minY': min((node['y'] for node in nodes), default=0) - 500, 'maxY': max((node['y'] for node in nodes), default=0) + 500}
-    return {'nodes': nodes, 'edges': [], 'bounds': bounds, 'source': 'published semantic sources', 'truncated': truncated}
+    return {'nodes': nodes, 'edges': shared_document_connections(nodes), 'bounds': bounds, 'source': 'published semantic sources', 'truncated': truncated}
 
 
 @router.get('/view')
 def view(project_id: str, minX: float, maxX: float, minY: float, maxY: float, zoom: float, mode: str = Query('network', pattern='^(network|grouped)$'), limit: int = Query(800, ge=1, le=1000)):
-    nodes, truncated = nodes_for(project_id, mode, {'minX': minX, 'maxX': maxX, 'minY': minY, 'maxY': maxY}, limit, zoom < .45)
-    return {'nodes': nodes, 'edges': connections(nodes), 'level': 'documents' if zoom < .45 else 'detail', 'truncated': truncated, 'source': 'falkordb', 'status': 'ready'}
+    bounds = {'minX': minX, 'maxX': maxX, 'minY': minY, 'maxY': maxY}
+    documents, _ = nodes_for(project_id, mode, bounds, limit, True)
+    documents_only = zoom < .12 and len(documents) > 16
+    nodes, truncated = nodes_for(project_id, mode, bounds, limit, documents_only)
+    return {'nodes': nodes, 'edges': [*shared_document_connections(documents), *connections(nodes)], 'level': 'documents' if documents_only else 'detail', 'truncated': truncated, 'source': 'falkordb', 'status': 'ready'}
 
 
 @router.get('/locate/{identifier}')
@@ -133,5 +158,9 @@ def neighborhood(project_id: str, identifier: str, mode: str = Query('network', 
     focus = locate(project_id, identifier, mode)['node']
     graph = graph_connection(processing_config())
     rows = graph.ro_query("MATCH p=(a {id:$id})-[:MENTIONS|RELATES|HAS_SECTION|HAS_CHUNK*1..2]-(b) WHERE all(n IN nodes(p) WHERE n.active=true) AND all(r IN relationships(p) WHERE type(r)<>'RELATES' OR r.active=true) RETURN DISTINCT b.id LIMIT 201", {'id': identifier}, timeout=1500).result_set
-    nodes, truncated = nodes_for(project_id, mode, identifiers=[identifier, *[row[0] for row in rows[:200]]])
-    return {'nodes': nodes, 'edges': connections(nodes), 'paths': [], 'truncated': truncated or len(rows) > 200, 'note': 'Published local connections. Shared mentions are navigation, not agreement between sources.', 'focusId': focus['id']}
+    shared = graph.ro_query("MATCH (a:Chunk {id:$id})-[:MENTIONS]->(e:Entity)<-[:MENTIONS]-(b:Chunk) WHERE a.active=true AND e.active=true AND b.active=true AND a.documentId<>b.documentId RETURN DISTINCT e.id,e.label,b.id,b.documentId LIMIT 41", {'id': identifier}, timeout=1500).result_set if focus['type'] == 'chunk' else []
+    identifiers = [identifier, *[row[0] for row in rows[:200]], *[value for entity, label, chunk, document in shared[:40] for value in (entity, chunk, document)]]
+    nodes, truncated = nodes_for(project_id, mode, identifiers=identifiers)
+    titles = {node['id']: node['label'] for node in nodes if node['type'] == 'document'}
+    paths = [{'sourceChunkId': identifier, 'targetChunkId': chunk, 'entityId': entity, 'label': label, 'documentId': document, 'documentTitle': titles.get(document, 'Connected source')} for entity, label, chunk, document in shared[:40]]
+    return {'nodes': nodes, 'edges': connections(nodes), 'paths': paths, 'truncated': truncated or len(rows) > 200 or len(shared) > 40, 'note': 'Published local connections. Shared mentions are navigation, not agreement between sources.', 'focusId': focus['id']}

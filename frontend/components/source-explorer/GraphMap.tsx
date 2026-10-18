@@ -31,6 +31,17 @@ type Props = {
 const names = { group: 'Source group', document: 'File', section: 'Heading', chunk: 'Chunk', entity: 'Shared name' };
 const colors = { group: '#b99540', document: '#c6a34f', section: '#869ab2', chunk: '#5b9b88', entity: '#a187b5' };
 const empty: MapView = { nodes: [], edges: [], level: 'overview' };
+const mergeViews = (previous: MapView, next: MapView): MapView => {
+  const nodes = [...new Map([...previous.nodes, ...next.nodes].map(node => [node.id, node])).values()].slice(-3000);
+  const ids = new Set(nodes.map(node => node.id));
+  const edges = [...new Map([...previous.edges, ...next.edges].map(edge => [edge.id, edge])).values()].filter(edge => ids.has(edge.source) && ids.has(edge.target)).slice(-12000);
+  return { ...next, nodes, edges };
+};
+const viewQuery = (target: Camera, width: number, height: number) => new URLSearchParams({
+  minX: String(Math.floor(target.x - width * .7 / target.zoom)), maxX: String(Math.ceil(target.x + width * .7 / target.zoom)),
+  minY: String(Math.floor(target.y - height * .7 / target.zoom)), maxY: String(Math.ceil(target.y + height * .7 / target.zoom)),
+  zoom: String(target.zoom), limit: '1000',
+}).toString();
 const clip = (text: string, size = 34) => text.length > size ? `${text.slice(0, size - 1)}…` : text;
 const scale = (zoom: number) => Math.max(.003, Math.min(7, zoom));
 const edgeMeaning = (edge: MapEdge) => {
@@ -75,6 +86,11 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
   const hovered = useRef<string | null>(null);
   const dragging = useRef<{ x: number; y: number; startX: number; startY: number; moved: boolean } | null>(null);
   const animation = useRef(0);
+  const revealAnimation = useRef(0);
+  const appeared = useRef(new Map<string, number>());
+  const navigating = useRef(false);
+  const travelingUntil = useRef(0);
+  const [navigatingTo, setNavigatingTo] = useState(false);
   const disposed = useRef(false);
   const callbacks = useRef({ onSelect, onFocus });
   callbacks.current = { onSelect, onFocus };
@@ -109,8 +125,14 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     for (let x = ((-c.x * c.zoom) % step + step) % step; x < width; x += step) {
       for (let y = ((-c.y * c.zoom) % step + step) % step; y < height; y += step) context.fillRect(x, y, 1, 1);
     }
-    const desired = c.zoom < .08 ? 'overview' : c.zoom < .45 ? 'documents' : 'detail';
-    const view = desired === 'overview' ? overview.current : current.current;
+    const desired = c.zoom < .025 ? 'overview' : c.zoom < .12 ? 'documents' : 'detail';
+    const view = mergeViews(overview.current, current.current);
+    const now = performance.now();
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const opacity = (id: string) => {
+      if (!appeared.current.has(id)) appeared.current.set(id, now);
+      return reducedMotion ? 1 : Math.min(1, .2 + (now - appeared.current.get(id)!) / 320);
+    };
     const linked = neighborhood.current;
     const nodes = [...new Map([...view.nodes, ...(linked?.nodes || [])].map(node => [node.id, node])).values()];
     const linkIds = new Set(linked?.nodes.map(node => node.id) || []);
@@ -128,7 +150,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       const branch = edge.type === 'HAS_SECTION' || edge.type === 'HAS_CHUNK';
       context.strokeStyle = active ? (dark ? '#dfc374' : '#88702c') : branch ? (dark ? '#80968a' : '#7c9284') : (dark ? '#64796b' : '#92a497');
       context.lineWidth = pathEdge ? 2.3 : active ? 1.9 : desired === 'overview' ? .6 : branch ? 1.25 : 1;
-      context.globalAlpha = desired === 'overview' && !active ? .32 : 1;
+      context.globalAlpha = (desired === 'overview' && !active ? .68 : 1) * opacity(edge.id);
       context.setLineDash(edge.derived || edge.type === 'SHARES_TERM' || edge.type === 'SHARED_MENTION' ? [3, 4] : []);
       context.beginPath(); context.moveTo(a.x, a.y);
       if (branch) {
@@ -167,7 +189,8 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       if (x < -100 || y < -70 || x > width + 100 || y > height + 70) continue;
       const active = node.id === selected.current || node.id === hovered.current || pathIds.has(node.id);
       const group = node.type === 'group';
-      const coarse = desired === 'overview' && !group && !(path ? pathIds.has(node.id) : linkIds.has(node.id)) && !active;
+      context.globalAlpha = opacity(node.id);
+      const coarse = projected.size > 160 && desired === 'overview' && !group && !(path ? pathIds.has(node.id) : linkIds.has(node.id)) && !active;
       const radius = group ? Math.max(7, Math.min(17, c.zoom * 4096 * .33)) : coarse ? 1 : node.type === 'document' ? 7 : node.type === 'entity' ? 6 : 4.5;
       screenNodes.current.push({ node, x, y, radius: radius + (coarse ? 2 : 7) });
       if (coarse) {
@@ -195,12 +218,17 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
         context.fillText(label, x, y + radius + 15);
       }
     }
+    context.globalAlpha = 1;
+    if (!reducedMotion && [...appeared.current.values()].some(start => now - start < 340)) {
+      cancelAnimationFrame(revealAnimation.current);
+      revealAnimation.current = requestAnimationFrame(draw);
+    }
   }, []);
 
   const move = useCallback((next: Camera) => {
     fitted.current = false;
     camera.current = { ...next, zoom: scale(next.zoom) };
-    setZoomLabel(next.zoom < .08 ? 'Overview' : next.zoom < .45 ? 'Files' : 'Inside sources');
+    setZoomLabel(next.zoom < .025 ? 'Overview' : next.zoom < .12 ? 'Files' : 'Inside sources');
     draw();
   }, [draw]);
 
@@ -218,10 +246,11 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { move(target); return; }
       const distance = Math.hypot(target.x - from.x, target.y - from.y);
       const travelZoom = scale(Math.min(from.zoom, target.zoom, Math.min(dimensions.current.width, dimensions.current.height) / Math.max(distance * 1.4, 1)));
-      const zoomOutMs = distance > 600 ? 480 : 210;
-      const panMs = distance > 600 ? Math.min(2400, 1200 + Math.sqrt(distance) * 5) : 650;
-      const zoomInMs = distance > 600 ? 560 : 245;
+      const zoomOutMs = distance > 600 ? 180 : 100;
+      const panMs = distance > 600 ? Math.min(650, 320 + Math.sqrt(distance) * 2) : 220;
+      const zoomInMs = distance > 600 ? 620 : 460;
       const started = performance.now(), duration = zoomOutMs + panMs + zoomInMs;
+      travelingUntil.current = started + duration;
       const ease = (n: number) => 1 - Math.pow(1 - n, 3);
       const smooth = (n: number) => n * n * (3 - 2 * n);
       const interpolate = (a: number, b: number, amount: number) => a + (b - a) * amount;
@@ -247,9 +276,9 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
   const loadConnections = useCallback(async (nodeId: string) => {
     neighborhoodRequest.current?.abort();
     const controller = new AbortController(); neighborhoodRequest.current = controller;
-    neighborhood.current = null; activePath.current = null;
+    activePath.current = null;
     setActiveConnection(null);
-    setConnections(null); setConnectionsError(null); setConnectionsOpen(true); setConnectionsLoading(true);
+    setConnectionsError(null); setConnectionsOpen(true); setConnectionsLoading(true);
     try {
       const result = await mapRequest<Neighborhood>(`/neighborhood/${encodeURIComponent(nodeId)}`, controller.signal);
       if (disposed.current || controller.signal.aborted) return;
@@ -263,16 +292,27 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
 
   const fly = useCallback(async (nodeId: string) => {
     const sequence = ++navigationSequence.current;
+    navigating.current = true; setNavigatingTo(true);
     try {
       const destination = await mapRequest<{ node: MapNode; zoom: number; documentId?: string; sectionId?: string; chunkId?: string }>(`/locate/${encodeURIComponent(nodeId)}`);
       if (disposed.current || sequence !== navigationSequence.current) return;
       const node = destination.node;
       callbacks.current.onFocus?.({ documentId: destination.documentId || node.documentId, sectionId: destination.sectionId || node.sectionId, chunkId: destination.chunkId || node.chunkId });
       selected.current = node.id;
-      if (node.type === 'chunk') void loadConnections(node.id); else clearConnections();
-      travel({ x: node.x, y: node.y, zoom: destination.zoom });
-    } catch (failure) { if (!disposed.current) setError(failure instanceof Error ? failure.message : 'Unable to find this source.'); }
-  }, [travel, loadConnections, clearConnections, mapRequest]);
+      const target = { x: node.x, y: node.y, zoom: destination.zoom };
+      const { width, height } = dimensions.current;
+      const [detail] = await Promise.all([
+        mapRequest<MapView>(`/view?${viewQuery(target, width, height)}`),
+        node.type === 'chunk' ? loadConnections(node.id) : Promise.resolve(),
+      ]);
+      if (disposed.current || sequence !== navigationSequence.current) return;
+      current.current = mergeViews(current.current, detail);
+      if (node.type !== 'chunk') clearConnections();
+      draw();
+      travel(target);
+    } catch (failure) { if (!disposed.current && sequence === navigationSequence.current) setError(failure instanceof Error ? failure.message : 'Unable to find this source.'); }
+    finally { if (sequence === navigationSequence.current) { navigating.current = false; setNavigatingTo(false); } }
+  }, [travel, loadConnections, clearConnections, mapRequest, draw]);
 
   const connectionCamera = useCallback((path: ConnectionPath): Camera | null => {
     const ids = new Set([path.sourceChunkId, path.entityId, path.targetChunkId]);
@@ -303,7 +343,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     disposed.current = false;
     readyMode.current = null; ++navigationSequence.current;
     setLoading(true); setError(null); clearConnections();
-    world.current = null; overview.current = empty; current.current = empty;
+    world.current = null; overview.current = empty; current.current = empty; appeared.current.clear();
     setAccessible([]); setTooltip(null); setEdgeTooltip(null); hovered.current = null; hoveredEdge.current = null;
     let active = true;
     const element = host.current;
@@ -334,19 +374,19 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       if (saved) move(saved); else fit();
       readyMode.current = mode; setLoading(false);
     }).catch(failure => { if (active) { setError(failure.message); setLoading(false); } });
-    return () => { modeCameras.current[mode] = { ...camera.current }; active = false; disposed.current = true; controller.abort(); neighborhoodRequest.current?.abort(); resize.disconnect(); theme.disconnect(); cancelAnimationFrame(animation.current); };
+    return () => { modeCameras.current[mode] = { ...camera.current }; active = false; disposed.current = true; controller.abort(); neighborhoodRequest.current?.abort(); resize.disconnect(); theme.disconnect(); cancelAnimationFrame(animation.current); cancelAnimationFrame(revealAnimation.current); };
   }, [draw, fit, move, connectionCamera, clearConnections, mapRequest, mode, reload]);
 
   useEffect(() => {
     let active = true, controller: AbortController | null = null, previous = '', sequence = 0, pending = false;
     const load = () => {
-      if (!world.current || pending) return;
+      if (!world.current || pending || navigating.current || performance.now() < travelingUntil.current) return;
       const c = camera.current, { width, height } = dimensions.current;
       const bounds = { minX: Math.floor(c.x - width * .65 / c.zoom), maxX: Math.ceil(c.x + width * .65 / c.zoom), minY: Math.floor(c.y - height * .65 / c.zoom), maxY: Math.ceil(c.y + height * .65 / c.zoom) };
       const query = new URLSearchParams({ ...Object.fromEntries(Object.entries(bounds).map(([key, value]) => [key, String(value)])), zoom: String(c.zoom), limit: '800' }).toString();
       if (query === previous) return;
-      if (c.zoom < .08) {
-        previous = query; current.current = overview.current; setTruncated(false);
+      if (c.zoom < .025 && overview.current.nodes.length > 100) {
+        previous = query; setTruncated(false);
         const nearest = overview.current.nodes.filter(node => node.x >= bounds.minX && node.x <= bounds.maxX && node.y >= bounds.minY && node.y <= bounds.maxY).sort((a, b) => Math.hypot(a.x - c.x, a.y - c.y) - Math.hypot(b.x - c.x, b.y - c.y));
         setAccessible(nearest.slice(0, 100)); draw(); return;
       }
@@ -354,7 +394,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       const requestNumber = ++sequence;
       mapRequest<MapView>(`/view?${query}`, controller.signal).then(view => {
         if (!active || sequence !== requestNumber) return;
-        current.current = view; setTruncated(!!view.truncated); setAccessible(view.nodes.slice(0, 200)); setError(null); setLoading(false); draw();
+        current.current = mergeViews(current.current, view); setTruncated(!!view.truncated); setAccessible(view.nodes.slice(0, 200)); setError(null); setLoading(false); draw();
       }).catch(failure => { if (active && failure.name !== 'AbortError') { setError(failure.message); previous = ''; } }).finally(() => { pending = false; });
     };
     const interval = window.setInterval(load, 180); load();
@@ -380,12 +420,12 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
   return <div className={styles.map} ref={host}>
     <canvas ref={canvas} className={styles.canvas} aria-label="Interactive source graph. Drag to pan, scroll to zoom. Select a node to read its details." role="application" tabIndex={0}
       onWheel={event => {
-        event.preventDefault(); cancelAnimationFrame(animation.current);
+        event.preventDefault(); travelingUntil.current = 0; cancelAnimationFrame(animation.current);
         const rect = event.currentTarget.getBoundingClientRect(), x = event.clientX - rect.left, y = event.clientY - rect.top;
         const c = camera.current, zoom = scale(c.zoom * Math.exp(-event.deltaY * .0015));
         move({ x: c.x + (x - dimensions.current.width / 2) * (1 / c.zoom - 1 / zoom), y: c.y + (y - dimensions.current.height / 2) * (1 / c.zoom - 1 / zoom), zoom });
       }}
-      onPointerDown={event => { cancelAnimationFrame(animation.current); event.currentTarget.setPointerCapture(event.pointerId); dragging.current = { x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, moved: false }; }}
+      onPointerDown={event => { travelingUntil.current = 0; cancelAnimationFrame(animation.current); event.currentTarget.setPointerCapture(event.pointerId); dragging.current = { x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, moved: false }; }}
       onPointerMove={event => {
         const rect = event.currentTarget.getBoundingClientRect(), x = event.clientX - rect.left, y = event.clientY - rect.top;
         const drag = dragging.current;
@@ -429,6 +469,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     {tooltip && <div className={styles.tooltip} style={{ left: tooltip.x, top: tooltip.y }}><small>{names[tooltip.node.type]}</small><strong>{clip(tooltip.node.preview || tooltip.node.label, 100)}</strong></div>}
     {edgeTooltip && <div className={styles.tooltip} role="tooltip" style={{ left: edgeTooltip.x, top: edgeTooltip.y }}><strong>{edgeMeaning(edgeTooltip.edge)[0]}</strong><p>{edgeMeaning(edgeTooltip.edge)[1]}</p></div>}
     {loading && <div className={styles.notice} role="status"><Loader2 size={15} className={styles.spin} />Opening source map…</div>}
+    {navigatingTo && !loading && <div className={styles.navigationStatus} role="status"><Loader2 size={14} className={styles.spin} />Loading destination connections�</div>}
     {error && <div className={styles.error} role="alert"><span>{error}</span><button onClick={() => { setError(null); setReload(value => value + 1); }}><RotateCcw size={13} />Retry</button></div>}
     {truncated && !error && !connectionsOpen && <div className={styles.limit}>Zoom in to reveal more sources</div>}
     {connectionsOpen && <ConnectionPaths paths={connections?.paths || []} loading={connectionsLoading} error={connectionsError} truncated={connections?.truncated} activeTargetChunkId={activeConnection?.targetChunkId} onFollow={followConnection} onClose={clearConnections} />}
