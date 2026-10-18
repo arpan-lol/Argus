@@ -42,6 +42,8 @@ export interface ChatEvent {
   count?: number;
   durationMs?: number;
   outcome?: string;
+  warnings?: string[];
+  truncations?: string[];
   message?: string;
   coverage?: ChatCoverage;
   result?: {
