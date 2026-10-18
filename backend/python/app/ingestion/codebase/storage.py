@@ -51,8 +51,9 @@ def find_entities(project, query, limit=20):
 
 def save_entity(project, entity, conn):
     prior = conn.execute('SELECT payload FROM ingestion_codebase_entities WHERE project_id=%s AND entity_key=%s FOR UPDATE', (project, entity['key'])).fetchone()
-    if prior and (prior['payload']['name'], prior['payload']['entity_type']) != (entity['name'], entity['entity_type']):
-        raise ValueError('Existing entity key has a different name/type; reuse its identity or choose a qualified key')
+    if prior:
+        entity['name'] = prior['payload']['name']
+        entity['entity_type'] = prior['payload']['entity_type']
     duplicate = conn.execute('SELECT entity_key FROM ingestion_codebase_entities WHERE project_id=%s AND name=%s AND entity_type=%s AND entity_key<>%s LIMIT 1', (project, entity['name'], entity['entity_type'], entity['key'])).fetchone()
     if duplicate:
         raise ValueError('Reuse existing matching entity key: ' + duplicate['entity_key'])

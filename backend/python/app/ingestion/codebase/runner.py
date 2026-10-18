@@ -150,7 +150,8 @@ def build_workspace(pipeline, job):
                 graph = agent.graph().compile(checkpointer=saver)
                 options = {'recursion_limit': 2 * job['configuration'].get('codeAgentMaxSteps', 96) + 4, 'configurable': {'thread_id': run, 'checkpoint_ns': ''}}
                 checkpoint = graph.get_state(options)
-                initial = {'step': 0, 'history': [{'tool': 'incremental_context', 'result': {'changed_or_incomplete_files': len(changed), 'reused_claims': len(initial_claims), 'instruction': 'Prioritize changed_or_incomplete files in list_files. Read dependencies to verify behavior. Unchanged source claims are retained.'}}], 'action': {}, 'seen': seed.get('seen', []), 'claims': initial_claims, 'entities': seed.get('entities', {}), 'done': False, 'stop_reason': ''}
+                registered = storage.find_entities(job['project_id'], '', limit=32)
+                initial = {'step': 0, 'history': [{'tool': 'incremental_context', 'result': {'changed_or_incomplete_files': len(changed), 'reused_claims': len(initial_claims), 'instruction': 'Prioritize changed_or_incomplete files in list_files. Read dependencies to verify behavior. Unchanged source claims are retained.'}}], 'action': {}, 'seen': seed.get('seen', []), 'claims': initial_claims, 'entities': {**{item['key']: item for item in registered}, **seed.get('entities', {})}, 'done': False, 'stop_reason': ''}
                 if not checkpoint.values and len(manifest) <= 8 and sum(Path(row['original_path']).stat().st_size for row in manifest) <= 100000:
                     action = {'tool': 'read_sources', 'source_ids': [row['source_id'] for row in manifest], 'chunk_offset': 0}
                     result, seen, _, _ = agent.tools.execute(action, initial)
