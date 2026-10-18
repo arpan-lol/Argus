@@ -1,5 +1,7 @@
 import argparse
+import hashlib
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -80,8 +82,8 @@ def build(text, config):
             found = spans(chunk, entity["name"])
             if not found:
                 continue
-            for index, occurrence in enumerate(found, 1):
-                mentions.append({"id": "mention:" + fingerprint([chunk["id"], f"{entity['key']}-{index}"]), "chunkId": chunk["id"], "key": entity["key"], "quote": entity["name"], "startOffset": occurrence["startOffset"], "endOffset": occurrence["endOffset"], "sourceSpans": found, "sourceSpanStatus": "multiple_occurrences" if len(found) > 1 else "exact"})
+            primary = found[0]
+            mentions.append({"id": "mention:" + fingerprint([chunk["id"], entity["key"]]), "chunkId": chunk["id"], "key": entity["key"], "quote": entity["name"], "startOffset": primary["startOffset"], "endOffset": primary["endOffset"], "sourceSpans": found, "sourceSpanStatus": "multiple_occurrences" if len(found) > 1 else "exact"})
     assertions = []
     for ordinal, assertion in enumerate(ASSERTIONS, 1):
         holder = next(chunk for chunk in chunks if spans(chunk, assertion["quote"]))
@@ -153,6 +155,44 @@ def publish(project_id):
     graph.query("MATCH (e:Entity) WHERE e.id IN $ids SET e.active=true", {"ids": [canonical(graph_name, entity["key"])[0] for entity in ENTITIES]})
     graph.query("MATCH (d:Document {id:$source}) SET d.active=true,d.activeJobId=$job,d.title=$title,d.extractionQuality=$quality,d.sourceCoverage=$coverage", {"source": source_id, "job": job_id, "title": TITLE, "quality": json.dumps(QUALITY), "coverage": json.dumps({"sourceCoverage": COVERAGE})})
     graph.query("MATCH (r:SourceRevision {id:$job}) SET r.graphComplete=true", {"job": job_id})
+    if project_id:
+        with connection() as conn:
+            for mode in ("network", "grouped"):
+                conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("project-layout:" + project_id + mode,))
+                root = conn.execute("SELECT x,y FROM project_layouts WHERE project_id=%s AND mode=%s AND node_id=%s", (project_id, mode, source_id)).fetchone()
+                count = conn.execute("SELECT count(*) AS n FROM project_layouts WHERE project_id=%s AND mode=%s AND payload->>'type'='document'", (project_id, mode)).fetchone()["n"]
+                angle = count * math.pi * (3 - math.sqrt(5))
+                radius = 1200 * math.sqrt(count)
+                location = (root["x"], root["y"]) if root else (radius * math.cos(angle), radius * math.sin(angle))
+
+                def put(identifier, kind, px, py, label, **metadata):
+                    record = {"id": identifier, "type": kind, "label": label[:100], "preview": label[:180], "jobId": job_id, **metadata}
+                    conn.execute("INSERT INTO project_layouts(project_id,mode,node_id,x,y,payload) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(project_id,mode,node_id) DO UPDATE SET payload=excluded.payload", (project_id, mode, identifier, px, py, Jsonb(record)))
+
+                put(source_id, "document", location[0], location[1], TITLE, documentId=source_id)
+                section = sections[0]
+                position = 0
+                if mode == "grouped":
+                    sx, sy = location[0] + (position - len(sections) / 2) * 130, location[1] + 150
+                else:
+                    spread = math.tau * position / max(1, len(sections))
+                    sx, sy = location[0] + 250 * math.cos(spread), location[1] + 250 * math.sin(spread)
+                put(section["id"], "section", sx, sy, section["title"], documentId=source_id, sectionId=section["id"])
+                for ordinal, chunk in enumerate(chunks):
+                    golden = ordinal * math.pi * (3 - math.sqrt(5))
+                    if mode == "grouped":
+                        cx, cy = sx + (ordinal % 9 - 4) * 28, sy + 90 + ordinal // 9 * 30
+                    else:
+                        cx, cy = sx + 55 * math.sqrt(ordinal + 1) * math.cos(golden), sy + 55 * math.sqrt(ordinal + 1) * math.sin(golden)
+                    put(chunk["id"], "chunk", cx, cy, chunk["text"], documentId=source_id, sectionId=section["id"], chunkId=chunk["id"])
+                    mentioned = {mention["key"]: mention for mention in mentions if mention["chunkId"] == chunk["id"]}
+                    for key in mentioned:
+                        entity_id, _ = canonical(graph_name, key)
+                        head = int(hashlib.sha256(entity_id.encode()).hexdigest()[:12], 16)
+                        ea = head / (16 ** 12) * math.tau
+                        put(entity_id, "entity", cx + 80 * math.cos(ea), cy + 80 * math.sin(ea), next(entity["name"] for entity in ENTITIES if entity["key"] == key), entityType=next(entity["type"] for entity in ENTITIES if entity["key"] == key))
+            for mention in mentions:
+                conn.execute("INSERT INTO ingestion_resolution_decisions(id,job_id,mention_id,canonical_id,decision,rationale,votes) VALUES(%s,%s,%s,%s,'same',%s,%s) ON CONFLICT(id) DO UPDATE SET canonical_id=excluded.canonical_id,decision=excluded.decision,rationale=excluded.rationale WHERE NOT ingestion_resolution_decisions.reverted", ("resolution:" + fingerprint([job_id, mention["id"]]), job_id, mention["id"], canonical(graph_name, mention["key"])[0], "Authored fixture resolution; no duplicate-check judgment was performed.", "[]"))
     return {"sourceId": source_id, "jobId": job_id, "revision": revision, "processingVersion": version, "graph": graph_name, "path": str(original), "counts": counts, "project": project_id or "workspace"}
 
 
