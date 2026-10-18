@@ -55,6 +55,11 @@ class Description(BaseModel):
     categories: list[str] | None = Field(default=None, max_length=8)
 
 
+class IngestionControl(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    action: str = Field(pattern='^(pause|resume)$')
+
+
 def summary(row):
     return {**serialize({key: row[key] for key in ('id', 'name', 'description', 'categories', 'created_at', 'updated_at', 'entity_types', 'relationship_types')}), 'configurationLocked': bool(row.get('profile_id'))}
 
@@ -90,6 +95,21 @@ def project(project_id: str):
 def metrics(project_id: str):
     from app.ingestion.metrics import project_metrics
     return project_metrics(project_id)
+
+
+@scoped.post('/ingestion-control')
+def ingestion_control(project_id: str, body: IngestionControl):
+    with connection() as conn:
+        if body.action == 'pause':
+            queued = conn.execute("UPDATE ingestion_jobs SET status='paused',queued_through=NULL,stop_requested=false,updated_at=now() WHERE project_id=%s AND status='queued'", (project_id,)).rowcount
+            active = conn.execute("UPDATE ingestion_jobs SET stop_requested=true,updated_at=now() WHERE project_id=%s AND status='running'", (project_id,)).rowcount
+            result = {'action': body.action, 'paused': queued, 'pausing': active, 'message': 'Queued files paused. Active batches finish before their saved checkpoint.'}
+        else:
+            contract = processing_config(project_id)['contract']
+            resumed = conn.execute("WITH eligible AS (SELECT id FROM ingestion_jobs WHERE project_id=%s AND status IN ('paused','interrupted') AND configuration->>'contract'=%s),locked AS (SELECT id FROM eligible WHERE pg_try_advisory_xact_lock(hashtextextended(id,0))) UPDATE ingestion_jobs j SET status='queued',queued_through='publish',stop_requested=false,error=NULL,updated_at=now() FROM locked WHERE j.id=locked.id AND j.status IN ('paused','interrupted')", (project_id, contract)).rowcount
+            result = {'action': body.action, 'resumed': resumed, 'message': 'Resumed saved checkpoints. Failed files and earlier pipeline versions require individual attention.'}
+    emit(project_id, 'queue_updated', result)
+    return result
 
 
 @scoped.put('/description')
