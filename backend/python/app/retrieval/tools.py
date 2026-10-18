@@ -45,15 +45,15 @@ def search_sources(session, args):
 
 
 def find_entities(session, args):
-    rows = session.cypher("MATCH (c:Chunk)-[:HAS_MENTION]->(m:Mention)-[:RESOLVED_TO]->(e:Entity) WHERE c.active=true AND m.active=true AND c.jobId IN $jobs AND m.jobId=c.jobId AND (toLower(e.label) CONTAINS toLower($query) OR toLower(m.text) CONTAINS toLower($query)) RETURN DISTINCT e.id,e.label ORDER BY e.label,e.id LIMIT $limit", {"query": args.query, "limit": args.limit + 1}, "published entity names")
+    rows = session.cypher("MATCH (c:Chunk)-[:HAS_MENTION]->(m:Mention)-[:RESOLVED_TO]->(e:Entity) WHERE c.active=true AND m.active=true AND c.jobId IN $jobs AND m.jobId=c.jobId AND (toLower(e.label) CONTAINS toLower($query) OR toLower(m.text) CONTAINS toLower($query)) WITH DISTINCT e,CASE WHEN toLower(e.label)=toLower($query) THEN 0 ELSE 1 END AS priority ORDER BY priority,e.label,e.id LIMIT 80 OPTIONAL MATCH (e)<-[:SUBJECT|OBJECT]-(a:Assertion) WHERE a.active=true AND a.jobId IN $jobs RETURN e.id,e.label,priority,count(DISTINCT a) AS links ORDER BY priority,links DESC,e.label,e.id LIMIT $limit", {"query": args.query, "limit": args.limit + 1}, "published entity names")
     if len(rows) > args.limit:
         session.truncate("Entity lookup result limit reached; refine the name")
     items = []
     for row in rows[:args.limit]:
         entity = session.entity(row[0])
         if entity:
-            items.append(entity)
-    return {"items": items, "ambiguous": len(items) > 1, "matchMeaning": "Literal canonical name/current source mention lookup; historical aliases are not searched. Multiple matches are not automatically resolved"}
+            items.append({**entity, "assertionLinks": row[3]})
+    return {"items": items, "ambiguous": len(items) > 1, "matchMeaning": "Exact names rank first; within a name, currently published assertion links rank first. Link count is structural connectivity, not identity certainty or factual confidence. Historical aliases are not searched"}
 
 
 def read_chunks(session, args):
@@ -186,7 +186,51 @@ def expand_connections(session, args):
 
 
 def find_paths(session, args):
-    return traverse(session, [args.source_entity_id], args.max_depth, args.direction, args.predicates, 100, args.target_entity_id, args.limit)
+    source = session.entity(args.source_entity_id)
+    target = session.entity(args.target_entity_id)
+    if not source or not target:
+        return {"items": [], "paths": [], "unknownEntityIds": [identifier for identifier, entity in ((args.source_entity_id, source), (args.target_entity_id, target)) if not entity]}
+    if args.source_entity_id == args.target_entity_id:
+        return {"items": [], "paths": [{"entities": [args.source_entity_id], "hops": [], "hopCount": 0}], "searchDepth": 0}
+    for depth in range(1, args.max_depth + 1):
+        matches = ["MATCH (e0:Entity {id:$source})"]
+        matches.extend(f"MATCH (e{index - 1})<-[:SUBJECT|OBJECT]-(a{index}:Assertion)-[:SUBJECT|OBJECT]->(e{index}:Entity)" for index in range(1, depth + 1))
+        constraints = [f"e{depth}.id=$target"]
+        constraints.extend(f"a{index}.active=true AND a{index}.jobId IN $jobs" for index in range(1, depth + 1))
+        constraints.extend(f"a{left}.id<>a{right}.id" for left in range(1, depth + 1) for right in range(left + 1, depth + 1))
+        constraints.extend(f"e{left}.id<>e{right}.id" for left in range(depth + 1) for right in range(left + 1, depth + 1))
+        matches.append("WHERE " + " AND ".join(constraints))
+        matches.append("RETURN [" + ",".join(f"a{index}.id" for index in range(1, depth + 1)) + "] AS assertions,[" + ",".join(f"e{index}.id" for index in range(depth + 1)) + "] AS entities LIMIT 17")
+        candidates = session.cypher(" ".join(matches), {"source": args.source_entity_id, "target": args.target_entity_id}, "targeted path candidates")
+        if len(candidates) > 16:
+            session.truncate("Path candidate cap reached; returned paths may be incomplete")
+        identifiers = list(dict.fromkeys(identifier for candidate in candidates[:16] for identifier in candidate[0]))
+        if not identifiers:
+            continue
+        rows = session.cypher("MATCH (s:Entity)<-[:SUBJECT]-(a:Assertion)-[:OBJECT]->(o:Entity),(a)-[:SUPPORTED_BY]->(c:Chunk) WHERE a.id IN $ids AND a.active=true AND c.active=true AND a.jobId IN $jobs AND c.jobId=a.jobId RETURN a.id,a.jobId,a.predicate,a.polarity,a.conditions,a.quote,a.startOffset,a.endOffset,c.id,s.id,s.label,o.id,o.label,a.extractionMethod,a.confidence,a.resolution,a.llmVerified,a.polarityStatus,a.traversalStatus,a.context ORDER BY a.id", {"ids": identifiers}, "path assertion support")
+        assertions = {item["id"]: item for item in supported_assertions(session, rows)}
+        paths = []
+        for assertion_ids, entity_ids in candidates[:16]:
+            hops = []
+            for index, assertion_id in enumerate(assertion_ids):
+                assertion = assertions.get(assertion_id)
+                if not assertion or (args.predicates and assertion["predicate"] not in args.predicates):
+                    break
+                forward = assertion["subject"]["id"] == entity_ids[index] and assertion["object"]["id"] == entity_ids[index + 1]
+                backward = assertion["object"]["id"] == entity_ids[index] and assertion["subject"]["id"] == entity_ids[index + 1]
+                if not (forward or backward) or args.direction == "outgoing" and not forward or args.direction == "incoming" and not backward:
+                    break
+                if assertion["extraction"].get("traversalStatus") in ("needs_context_review", "revoked", "deprecated"):
+                    break
+                hops.append({"from": entity_ids[index], "to": entity_ids[index + 1], "assertionId": assertion_id, "traversedForward": forward})
+            if len(hops) == depth:
+                paths.append({"entities": entity_ids, "hops": hops, "hopCount": depth})
+            if len(paths) >= args.limit:
+                break
+        if paths:
+            chosen = {hop["assertionId"] for path in paths for hop in path["hops"]}
+            return {"items": [assertions[identifier] for identifier in chosen], "paths": paths, "discoveryTree": paths[0]["hops"], "exploredAssertionCount": len(identifiers), "searchDepth": depth, "direction": args.direction, "pathMeaning": "Paths compose source-supported assertions for inspection, not a new causal or scientific conclusion. Each hop preserves its recorded direction.", "coverage": "Bounded candidate search only; unreturned paths are not proof of absence"}
+    return {"items": [], "paths": [], "searchDepth": args.max_depth, "direction": args.direction, "coverage": "Bounded path search only; no path does not prove no connection"}
 
 
 from .research import rank_entities, recent_source_updates, source_authors
