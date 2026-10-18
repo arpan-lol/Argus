@@ -9,6 +9,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from openai import OpenAI
 
 from app.investigation.runtime import Investigation, RunBudgetReached, collect_sources, validate_sources
+from app.investigation import service
 
 
 class Ledger:
@@ -185,3 +186,36 @@ class InvestigationTest(TestCase):
         self.assertEqual(message["tool_calls"][0]["id"], "stable-call")
         self.assertEqual(message["response_items"][0]["call_id"], "stable-call")
         self.assertEqual(usage["total_tokens"], 30)
+
+    def test_llm2_responses_request_omits_reasoning_options(self):
+        self.row["configuration"]["chatModel"] = "gpt-4.1-mini"
+        requests = []
+        def transport(request):
+            requests.append(request)
+            return httpx.Response(200, json={"id": "resp-2", "object": "response", "created_at": 1, "model": "gpt-4.1-mini", "status": "completed", "output": [{"id": "fc-2", "type": "function_call", "call_id": "llm2-call", "name": "finish_report", "arguments": json.dumps(report()), "status": "completed"}], "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}})
+        def client(**kwargs):
+            return OpenAI(**kwargs, http_client=httpx.Client(transport=httpx.MockTransport(transport)))
+        runtime = self.runtime(mock.Mock())
+        with mock.patch.dict(os.environ, {"AZURE_OPENAI_API_KEY": "test-key"}), mock.patch("app.investigation.runtime.OpenAI", side_effect=client):
+            runtime.invoke_model([{"role": "user", "content": "hello"}], runtime.definitions(initial()))
+        body = json.loads(requests[0].content)
+        self.assertEqual(body["model"], "gpt-4.1-mini")
+        self.assertNotIn("reasoning", body)
+        self.assertNotIn("include", body)
+        self.assertFalse(body["store"])
+
+    def test_chat_configuration_uses_llm2_even_when_llm1_is_present(self):
+        class Rows:
+            def execute(self, *args):
+                return self
+            def fetchone(self):
+                return {"n": 0}
+        @contextmanager
+        def database():
+            yield Rows()
+        secondary = {"model": "gpt-4.1-mini", "baseUrl": "https://secondary.example/openai/v1", "api": "responses", "credentialEnv": "LLM2_DEPLOYMENT_KEY"}
+        with mock.patch("app.investigation.service.processing_config", return_value={"provider": "azure_openai", "extractionModel": "gpt-4.1-mini"}), mock.patch("app.investigation.service.deployment", side_effect=lambda role: secondary if role == "LLM2" else {"model": "gpt-5"}), mock.patch("app.investigation.service.semantic_graph_name", return_value="test-graph"), mock.patch("app.investigation.service.connection", database):
+            config = service.configuration()
+        self.assertEqual(config["chatModel"], "gpt-4.1-mini")
+        self.assertEqual(config["chatCredentialEnv"], "LLM2_DEPLOYMENT_KEY")
+        self.assertEqual(config["chatApi"], "responses")

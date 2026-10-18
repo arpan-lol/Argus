@@ -218,7 +218,8 @@ class Investigation:
                     response_options["text"] = {"format": {"type": "json_schema", "name": "ArgusReport", "schema": definition["parameters"], "strict": True}}
                 else:
                     response_options.update(tools=[{"type": "function", **definition["function"]} for definition in definitions], tool_choice="auto", parallel_tool_calls=False)
-                response = client.responses.create(model=self.config["chatModel"], input=inputs, max_output_tokens=self.limits["outputTokens"], reasoning={"effort": "minimal"}, store=False, include=["reasoning.encrypted_content"], **response_options)
+                reasoning_options = {"reasoning": {"effort": "minimal"}, "include": ["reasoning.encrypted_content"]} if self.config["chatModel"].lower().startswith("gpt-5") else {}
+                response = client.responses.create(model=self.config["chatModel"], input=inputs, max_output_tokens=self.limits["outputTokens"], store=False, **reasoning_options, **response_options)
                 if response.status != "completed":
                     raise ValueError("The model could not complete its response within this request's limits")
                 calls = [{"id": item.call_id, "type": "function", "function": {"name": item.name, "arguments": item.arguments}} for item in response.output if item.type == "function_call"]
