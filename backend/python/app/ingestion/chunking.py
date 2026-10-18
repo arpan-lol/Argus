@@ -67,7 +67,7 @@ def chunk_document(document, scope, config):
             "startOffset": left, "endOffset": right, "tokenCount": tokens,
             "offsetUnit": "unicode_code_point", "blockOrdinals": [block["ordinal"] for block in related],
             "sourceLocations": [block["location"] for block in related],
-            "sourceContext": [{"kind": block["kind"], "role": block.get("role", "content"), "location": block["location"], "structured": block.get("structured")} for block in related],
+            "sourceContext": [{"kind": block["kind"], "role": block.get("role", "content"), "location": block["location"], "startOffset": block['startOffset'], "endOffset": block['endOffset'], "structured": block.get("structured")} for block in related],
             "headingContext": next((block['location']['sectionPath'] for block in related if block.get('location', {}).get('sectionPath')), []),
             "actualTokenCount": len(encoding.encode(text[left:right], disallowed_special=())),
             "oversizedSentence": tokens > config["chunkTokens"],
