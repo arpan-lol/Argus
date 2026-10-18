@@ -3,9 +3,12 @@ import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from .code_parser import CODE_SUFFIXES
-from .parser_routing import TEXT_SUFFIXES
-from .parsers import SUPPORTED
+from .parsers import decode_source_text
+
+
+EXCLUDED_DIRECTORIES = {'.git', '.hg', '.svn', 'node_modules', '.venv', 'venv', '__pycache__', '.next', '.nuxt', '.turbo', '.cache', '.pytest_cache', '.mypy_cache', '.ruff_cache', 'dist', 'build', 'coverage', '.idea', '.vscode'}
+EXCLUDED_SUFFIXES = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.tif', '.tiff', '.avif', '.heic', '.mp3', '.mp4', '.wav', '.ogg', '.webm', '.mov', '.avi', '.mkv', '.flac', '.woff', '.woff2', '.ttf', '.otf', '.eot', '.pyc', '.pyo', '.class', '.o', '.obj', '.so', '.dll', '.exe', '.bin', '.wasm', '.db', '.sqlite', '.sqlite3', '.pt', '.pth', '.safetensors', '.onnx', '.pem', '.key', '.p12', '.pfx', '.crt', '.cer', '.map', '.7z', '.rar', '.tar', '.tgz', '.bz2', '.xz'}
+EXCLUDED_NAMES = {'.gitignore', '.gitattributes', '.gitmodules', '.npmrc', '.pypirc', '.netrc', '.ds_store', 'thumbs.db', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'poetry.lock', 'uv.lock', 'pipfile.lock', 'id_rsa', 'id_ed25519'}
 
 
 def source_name(value):
@@ -17,13 +20,27 @@ def source_name(value):
 
 def skip_reason(filename):
     path = PurePosixPath(filename)
-    if any(part in {'.git', 'node_modules', '.venv', '__pycache__'} for part in path.parts) or path.name == '.env':
+    name = path.name.lower()
+    if any(part.lower() in EXCLUDED_DIRECTORIES for part in path.parts) or name == '.env' or name.startswith('.env.') and not name.endswith(('.example', '.sample', '.template')) or name in EXCLUDED_NAMES:
         return 'repository generated/private metadata'
     suffix = path.suffix.lower()
     if suffix == '.gz':
         suffix = PurePosixPath(path.stem).suffix.lower()
-    if suffix not in SUPPORTED | TEXT_SUFFIXES | CODE_SUFFIXES and path.name not in {'LICENSE', 'NOTICE', 'Dockerfile', '.gitignore'}:
-        return 'unsupported file format'
+    if suffix in EXCLUDED_SUFFIXES:
+        return 'image, media, generated output, private material or unsupported binary archive'
+    return None
+
+
+def content_skip_reason(path, filename):
+    suffix = PurePosixPath(filename).suffix.lower()
+    if suffix in {'.pdf', '.docx', '.xlsx', '.gz'}:
+        return None
+    try:
+        with Path(path).open('rb') as source:
+            raw = source.read(65536)
+        decode_source_text(raw, partial=True)
+    except (ValueError, OSError) as error:
+        return str(error)
     return None
 
 
@@ -58,5 +75,9 @@ def expand_archive(path, filename, config, temporary):
                 target.write(raw)
                 location = Path(target.name)
             temporary.append(location)
+            reason = content_skip_reason(location, str(relative))
+            if reason:
+                skipped.append({"filename": str(relative), "reason": reason})
+                continue
             extracted.append((location, str(relative)))
     return extracted, {"archive": filename, "extracted": len(extracted), "skipped": skipped}

@@ -1,4 +1,5 @@
 import csv
+import codecs
 import gzip
 import hashlib
 import io
@@ -11,6 +12,18 @@ from defusedxml import ElementTree
 
 
 SUPPORTED = {".txt", ".md", ".markdown", ".xml", ".jats", ".nxml", ".html", ".htm", ".pdf", ".docx", ".csv", ".tsv", ".xlsx", ".json"}
+
+
+def decode_source_text(raw, partial=False):
+    encoding = "utf-16" if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else "utf-8-sig"
+    try:
+        text = codecs.getincrementaldecoder(encoding)(errors="strict").decode(raw, final=not partial)
+    except UnicodeError as error:
+        raise ValueError("File is not readable UTF-8 or BOM-marked UTF-16 text; no binary-format parser is available") from error
+    controls = sum(ord(character) < 32 and character not in "\t\n\r\f" for character in text)
+    if "\x00" in text or controls > max(1, len(text) // 200):
+        raise ValueError("Binary content cannot be processed by the text reader")
+    return text
 
 
 def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_archive_members=10000):
@@ -164,7 +177,7 @@ def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_a
                 cells = ["" if cell is None else str(cell) for cell in row]
                 add("\t".join(cells), "table", {"sheetName": sheet.title, "cellRange": f"A{index}:{get_column_letter(sheet.max_column)}{index}"}, {"cells": cells})
     elif suffix in {".csv", ".tsv"}:
-        for index, row in enumerate(csv.reader(io.StringIO(raw.decode("utf-8-sig")), delimiter="\t" if suffix == ".tsv" else ",")):
+        for index, row in enumerate(csv.reader(io.StringIO(decode_source_text(raw)), delimiter="\t" if suffix == ".tsv" else ",")):
             add("\t".join(row), "table", {"structuralPath": f"row/{index + 1}"}, {"cells": row})
     elif suffix in {".html", ".htm"}:
         from bs4 import BeautifulSoup
@@ -177,7 +190,7 @@ def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_a
                 continue
             add(element.get_text(" ", strip=True), "heading" if re.fullmatch("h[1-6]", element.name) else "paragraph", {"structuralPath": f"{element.name}/{index}"})
     else:
-        text = raw.decode("utf-8-sig")
+        text = decode_source_text(raw)
         if suffix == ".json":
             json.loads(text)
         for index, paragraph in enumerate(re.split(r"\n\s*\n", text)):

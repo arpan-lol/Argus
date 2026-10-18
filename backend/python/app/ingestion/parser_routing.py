@@ -4,10 +4,11 @@ import re
 from pathlib import Path
 
 from .code_parser import CODE_SUFFIXES, python_structure
-from .parsers import parse
+from .parsers import SUPPORTED, decode_source_text, parse
 
 
-TEXT_SUFFIXES = CODE_SUFFIXES | {".mdx", ".rst", ".log", ".jsonl", ".ndjson", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".example"}
+SOURCE_SUFFIXES = CODE_SUFFIXES | {".cjs", ".mts", ".cts", ".kt", ".kts", ".swift", ".scala", ".dart", ".vue", ".svelte", ".lua", ".r", ".pl", ".ex", ".exs", ".erl", ".hrl", ".clj", ".cljs", ".fs", ".fsx", ".vb", ".ps1", ".psm1", ".bat", ".cmd", ".zsh", ".bash", ".fish", ".groovy", ".gradle", ".cxx", ".cc", ".hh", ".hxx", ".mm", ".m", ".proto", ".graphql", ".gql", ".tf", ".hcl", ".sol"}
+TEXT_SUFFIXES = SOURCE_SUFFIXES | {".mdx", ".rst", ".log", ".jsonl", ".ndjson", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".example"}
 
 
 def parse_source(path, config, filename=None):
@@ -15,16 +16,16 @@ def parse_source(path, config, filename=None):
     filename = filename or path.name
     suffix = Path(filename).suffix.lower()
     categories = config.get("categories", ["general_documents"])
-    if suffix in TEXT_SUFFIXES or Path(filename).name in {"LICENSE", "NOTICE", "Dockerfile", ".gitignore"}:
+    if suffix in TEXT_SUFFIXES or suffix not in SUPPORTED | {".gz"} or Path(filename).name in {"LICENSE", "NOTICE", "Dockerfile"}:
         raw = path.read_bytes()
-        text = raw.decode("utf-8-sig")
+        text = decode_source_text(raw)
         if len(text) > config["maxExtractedTextCharacters"]:
             raise ValueError("Source text exceeds configured text limit")
         if not text.strip():
             raise ValueError("Source contains no readable text")
-        code = suffix in CODE_SUFFIXES
+        code = suffix in SOURCE_SUFFIXES
         blocks = [{"ordinal": 0, "kind": "code" if code else "paragraph", "role": "code" if code else "content", "text": text, "location": {"structuralPath": filename, "language": suffix[1:]}, "structured": None}]
-        parser = "python_ast" if suffix in {".py", ".pyi"} else "source_text" if code else "structured_text"
+        parser = "python_ast" if suffix in {".py", ".pyi"} else "source_text" if code else "structured_text" if suffix in TEXT_SUFFIXES else "generic_text"
         if suffix == '.mdx':
             blocks = [{"ordinal": index, "kind": "heading" if paragraph.lstrip().startswith('#') else "paragraph", "role": "content", "text": paragraph, "location": {"structuralPath": filename + '/block/' + str(index)}, "structured": None} for index, paragraph in enumerate(re.split(r'\n\s*\n', text)) if paragraph.strip()]
             parser = 'mdx_text'
