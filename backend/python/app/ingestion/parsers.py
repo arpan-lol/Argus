@@ -238,8 +238,12 @@ def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_a
         for element in soup(["script", "style", "nav"]):
             element.decompose()
         metadata["title"] = soup.title.get_text() if soup.title else path.stem
+        canonical = soup.find('link', rel='canonical')
+        if canonical and canonical.get('href', '').startswith(('https://', 'http://')):
+            metadata['sourceUrl'] = canonical['href']
+        content = soup.find('main') or soup.find(attrs={'role': 'main'}) or soup.body or soup
         section_path = []
-        for index, element in enumerate(soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "pre", "table", "li"])):
+        for index, element in enumerate(content.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "pre", "table", "li"])):
             if element.find_parent(["table", "li", "pre"]):
                 continue
             is_heading = bool(re.fullmatch("h[1-6]", element.name))
@@ -249,8 +253,12 @@ def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_a
             location = {"structuralPath": f"{element.name}/{index}", "sectionPath": list(section_path)}
             if element.name == "table":
                 rows = [[cell.get_text(" ", strip=True) for cell in row.find_all(["th", "td"], recursive=False)] for row in element.find_all("tr")]
-                rendered, structured = _table_text(rows)
-                add(rendered, "table", location, structured)
+                rows = [row for row in rows if any(row)]
+                headers = rows[0] if rows else []
+                for row_index, row in enumerate(rows):
+                    rendered, structured = _table_text([row], headers=headers if row_index else None)
+                    structured.update({'isHeader': row_index == 0, 'headerStatus': 'aligned' if len(row) == len(headers) else 'ambiguous', 'rowIndex': row_index})
+                    add(rendered, "table", {**location, 'structuralPath': location['structuralPath'] + '/row/' + str(row_index), 'rowNumber': row_index + 1}, structured)
             else:
                 add(element.get_text(" ", strip=True), "heading" if is_heading else "preformatted" if element.name == "pre" else "list_item" if element.name == "li" else "paragraph", location)
     elif suffix in {".md", ".markdown"}:
