@@ -313,7 +313,7 @@ class IngestionPipeline:
                         conn.execute("UPDATE ingestion_jobs SET status=%s,updated_at=now() WHERE id=%s", ("complete" if complete else "paused", job_id))
                 else:
                     with connection() as conn:
-                        failure = conn.execute("SELECT stage,status,error FROM ingestion_attempts WHERE job_id=%s AND status IN ('failed','waiting_configuration') ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+                        failure = conn.execute("SELECT a.stage,a.status,a.error FROM ingestion_attempts a WHERE a.job_id=%s AND a.status IN ('failed','waiting_configuration') AND NOT EXISTS(SELECT 1 FROM ingestion_attempts newer WHERE newer.job_id=a.job_id AND newer.stage=a.stage AND newer.id>a.id) ORDER BY a.id DESC LIMIT 1", (job_id,)).fetchone()
                         if failure:
                             conn.execute("UPDATE ingestion_jobs SET status=%s,current_stage=%s,error=%s,updated_at=now() WHERE id=%s", (failure["status"], failure["stage"], failure["error"], job_id))
             finally:
