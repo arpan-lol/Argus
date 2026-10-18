@@ -28,8 +28,15 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
   }, []);
 
   function select(event: ChangeEvent<HTMLInputElement>) {
-    setFiles(current => mergeFiles(current, Array.from(event.target.files || [])));
-    event.target.value = '';
+    const selected = Array.from(event.currentTarget.files || []);
+    event.currentTarget.value = '';
+    if (selected.length) setFiles(current => mergeFiles(current, selected));
+  }
+
+  function choose(input: React.RefObject<HTMLInputElement | null>) {
+    if (!input.current) return;
+    input.current.value = '';
+    input.current.click();
   }
 
   async function create(event: FormEvent<HTMLFormElement>) {
@@ -51,7 +58,7 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
 
   return <dialog ref={dialog} className="argus-project-modal" aria-labelledby="project-modal-title" aria-describedby="project-modal-intro" onCancel={event => { if (busy) event.preventDefault(); else onClose(); }}>
     <form onSubmit={event => void create(event)}>
-      <div className="argus-project-modal-top"><div className="argus-project-modal-symbol"><FolderUp size={20} strokeWidth={1.6} /></div><button type="button" className="argus-project-modal-close" disabled={busy} onClick={onClose} aria-label="Close new project"><X size={18} /></button></div>
+      <div className="argus-project-modal-top"><button type="button" className="argus-project-modal-close" disabled={busy} onClick={onClose} aria-label="Close new project"><X size={18} /></button></div>
       <header className="argus-project-modal-heading"><h2 id="project-modal-title">Create a project</h2><p id="project-modal-intro">Bring your files together in one workspace</p></header>
 
       <div className="argus-project-modal-field"><label htmlFor="new-project-name">Project name</label><input id="new-project-name" ref={nameInput} value={name} onChange={event => setName(event.target.value)} maxLength={120} disabled={busy} required placeholder="e.g. Materials research" /></div>
@@ -61,13 +68,13 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
       <section className="argus-project-modal-files" aria-labelledby="new-project-files-title"><div className="argus-project-modal-section-heading"><h3 id="new-project-files-title">Files <span>Optional</span></h3>{files.length > 0 && <span>{files.length.toLocaleString()} selected · {formatBytes(totalBytes)}</span>}</div>
         <input ref={fileInput} hidden type="file" multiple onChange={select} disabled={busy} />
         <input ref={folderInput} hidden type="file" multiple onChange={select} disabled={busy} />
-        <div className="argus-project-modal-pickers"><button type="button" disabled={busy} onClick={() => fileInput.current?.click()}><Plus size={19} /><span><strong>Choose files</strong><small>Pick individual documents</small></span></button><button type="button" disabled={busy} onClick={() => folderInput.current?.click()}><Upload size={19} /><span><strong>Choose a folder</strong><small>Add a complete corpus</small></span></button></div>
+        <div className="argus-project-modal-pickers"><button type="button" disabled={busy} onClick={() => choose(fileInput)}><Plus size={19} /><span><strong>Choose files</strong></span></button><button type="button" disabled={busy} onClick={() => choose(folderInput)}><Upload size={19} /><span><strong>Choose a folder</strong></span></button></div>
+        <p className="argus-project-modal-file-types">Supported: XML/JATS, TXT, Markdown, HTML, text-based PDF, DOCX, CSV, TSV, XLSX, JSON, and gzip-compressed XML. Scanned PDFs need OCR.</p>
         {files.length > 0 && <><ul className="argus-project-modal-file-list">{files.slice(0, 60).map((file, index) => <li key={fileIdentity(file)}><span title={file.webkitRelativePath || file.name}>{file.webkitRelativePath || file.name}</span><small>{formatBytes(file.size)}</small><button type="button" disabled={busy} onClick={() => setFiles(current => current.filter((_, position) => position !== index))} aria-label={`Remove ${file.name}`}><X size={14} /></button></li>)}</ul>{files.length > 60 && <p className="argus-project-modal-file-overflow">Showing 60 of {files.length.toLocaleString()} selected files</p>}</>}
-        <p className="argus-project-modal-local-note">Your files stay on this device until you press Next</p>
       </section>
 
       {error && <p className="argus-project-modal-error" role="alert">{error}</p>}
-      <footer className="argus-project-modal-footer"><button type="button" className="argus-project-modal-cancel" disabled={busy} onClick={onClose}>Cancel</button><button type="submit" className="argus-project-modal-next" disabled={!name.trim() || busy}>{busy ? <Loader2 size={16} className="animate-spin" /> : <ArrowRight size={16} />}{busy ? 'Creating project…' : 'Next'}</button></footer>
+      <footer className="argus-project-modal-footer"><button type="button" className="argus-project-modal-cancel" disabled={busy} onClick={onClose}>Cancel</button><button type="submit" className="argus-project-modal-next" disabled={!name.trim() || busy}>{busy ? 'Creating project…' : 'Next'}{busy ? <Loader2 size={16} className="animate-spin" /> : <ArrowRight size={16} />}</button></footer>
     </form>
   </dialog>;
 }

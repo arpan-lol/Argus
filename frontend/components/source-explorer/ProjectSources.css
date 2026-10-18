@@ -36,7 +36,7 @@
 .ce-project-graph-empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--ce-muted);pointer-events:none;padding:30px;font-size:12px;line-height:1.8}
 .ce-project-file-panel>.ce-file-explorer{flex:1;min-height:0}
 .ce-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ce-project-return{display:flex;align-items:center;gap:8px;color:var(--ce-muted);font-size:12px;text-decoration:none;padding:8px 12px;margin:0 12px 14px;border-radius:6px}
+.ce-project-return{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;box-sizing:border-box;color:var(--ce-muted);font-size:13px;text-decoration:none;padding:10px 12px;margin:0;border-radius:6px}
 .ce-project-return:hover{background:var(--ce-hover);color:var(--ce-text)}
 .ce-file-add-empty{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;min-height:180px;width:100%;margin:16px 0;border:1px dashed var(--ce-muted);border-radius:12px;background:transparent;color:var(--ce-muted);font-size:12px}
 .ce-file-add-empty:hover{background:var(--ce-surface);color:var(--ce-text)}

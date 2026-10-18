@@ -155,10 +155,11 @@ button:disabled { cursor:not-allowed; }
 .ce-brand { display:flex; align-items:center; gap:9px; padding:0 4px 25px; }
 .ce-brand strong { font-size:22px; letter-spacing:-.035em; font-weight:600; }
 .ce-brand .ce-icon { margin-left:auto; }
-.ce-new-chat { display:flex; align-items:center; gap:10px; border:1px solid var(--ce-line); background:var(--ce-bg); padding:11px 12px; border-radius:9px; font-size:13px; text-align:left; }
+.ce-new-chat { display:flex; align-items:center; gap:10px; width:100%; min-height:40px; box-sizing:border-box; border:0; background:transparent; padding:10px; border-radius:7px; font-size:13px; text-align:left; }
+.ce-new-chat svg,.ce-project-return svg { width:17px; height:17px; flex:0 0 17px; }
 .ce-new-chat:hover { background:var(--ce-hover); }
 .ce-navigation-label { color:var(--ce-muted); font-size:11px; margin:30px 10px 10px; }
-.ce-session { display:flex; align-items:center; gap:10px; padding:10px; border:0; border-radius:7px; background:transparent; text-align:left; }
+.ce-session { display:flex; align-items:center; gap:10px; width:100%; box-sizing:border-box; min-height:40px; padding:10px; border:0; border-radius:7px; background:transparent; text-align:left; }
 .ce-session.active { background:var(--ce-hover); }
 .ce-session span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .ce-sidebar-bottom { margin-top:auto; padding-top:24px; }

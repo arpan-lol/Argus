@@ -210,8 +210,9 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   return <div className={`ce-workspace ${sidebarOpen ? '' : 'ce-sidebar-collapsed'}`}>
     <aside className="ce-sidebar">
       <div className="ce-brand"><img src="/argus-logo.svg" alt="" width={29} height={29} /><strong>Argus</strong><button className="ce-icon" onClick={() => setSidebarOpen(false)} aria-label="Collapse sidebar"><PanelLeftClose size={17} /></button></div>
-      <button className="ce-new-chat" onClick={() => { setTurns([]); sessionStorage.removeItem(`argus-chat-runs:${projectId}`); setQuery(''); composer.current?.focus(); }} disabled={busy}><Plus size={17} />New chat</button>
-      <a className="ce-project-return" href="/"><ArrowLeft size={14} />Projects</a><div className="ce-navigation-label ce-project-name">{project?.name || 'Workspace'}</div>
+      <a className="ce-project-return" href="/"><ArrowLeft size={17} />Projects</a>
+      <div className="ce-navigation-label ce-project-name">{project?.name || 'Workspace'}</div>
+      <button className="ce-session ce-new-chat" onClick={() => { setTurns([]); sessionStorage.removeItem(`argus-chat-runs:${projectId}`); setQuery(''); composer.current?.focus(); }} disabled={busy}><Plus size={17} /><span>New chat</span></button>
       <button className="ce-session active" onClick={() => messages.current?.scrollTo({ top: 0, behavior: 'smooth' })}><MessageSquare size={16} /><span>Current conversation</span></button>
       <div className="ce-sidebar-bottom"><div className="ce-user"><span className="ce-avatar">AT</span><span><strong>Arpan Taneja</strong><small>Local workspace · demo profile</small></span></div><button className="ce-theme" onClick={toggleTheme} aria-label={`Switch to ${dark ? 'light' : 'dark'} mode`}>{dark ? <Sun size={16} /> : <Moon size={16} />}<span>{dark ? 'Light mode' : 'Dark mode'}</span></button></div>
     </aside>

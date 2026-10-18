@@ -45,5 +45,6 @@ export function IngestionUpload({ onClose, onUploaded }: IngestionUploadProps) {
     <p id={`${id}-help`}>Argus reads a sample and chooses extraction settings automatically. Leave this blank to extract the things and connections stated in the source.</p>
     {error && <p className="ce-ingestion-setup-error" role="alert">{error}</p>}
     <div className="ce-ingestion-setup-actions"><span>{busy ? 'Uploading source…' : 'Processing starts after upload.'}</span><button className="ce-ingestion-submit" type="submit" disabled={!file || busy}>{busy ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}{busy ? 'Uploading…' : 'Process file'}</button></div>
+    <p className="ce-ingestion-formats">Supported: XML/JATS, TXT, Markdown, HTML, text-based PDF, DOCX, CSV, TSV, XLSX, JSON, and gzip-compressed XML. Scanned PDFs need OCR.</p>
   </form>;
 }

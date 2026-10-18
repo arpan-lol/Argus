@@ -35,6 +35,18 @@ export function ProjectSources({ project, uploadRequest, refreshVersion, focus, 
   const handledRequest = useRef(uploadRequest);
   const uploadActive = useRef(false);
 
+  function selectFiles(event: React.ChangeEvent<HTMLInputElement>) {
+    const selected = Array.from(event.currentTarget.files || []);
+    event.currentTarget.value = '';
+    if (selected.length) setFiles(previous => mergeFiles(previous, selected));
+  }
+
+  function chooseFiles(target: React.RefObject<HTMLInputElement | null>) {
+    if (!target.current) return;
+    target.current.value = '';
+    target.current.click();
+  }
+
   useEffect(() => {
     if (uploadRequest !== handledRequest.current) { handledRequest.current = uploadRequest; setOpen(true); }
   }, [uploadRequest]);
@@ -107,15 +119,15 @@ export function ProjectSources({ project, uploadRequest, refreshVersion, focus, 
     <FileExplorer projectId={project.id} focusDocumentId={focus?.documentId || documentId} focusChunkId={focus?.chunkId || chunkId} focusJobId={focus?.jobId} focusCollection="pipeline" refreshToken={refreshVersion} onUpload={() => setOpen(true)} onDocumentFocus={onFocus} />
     <dialog ref={dialog} className="argus-source-onboarding" onCancel={event => { if (busy) event.preventDefault(); else setOpen(false); }} aria-labelledby="source-onboarding-title">
       <div className="argus-source-onboarding-heading"><h2 id="source-onboarding-title">{project.description ? 'Add data sources' : files.length ? 'What is the data in this workspace about?' : 'Start by adding data sources.'}</h2><button disabled={busy} onClick={() => setOpen(false)} aria-label="Close source upload"><X size={18} /></button></div>
-      <input ref={input} hidden type="file" multiple disabled={busy} onChange={event => { setFiles(previous => mergeFiles(previous, Array.from(event.target.files || []))); event.target.value = ''; }} />
-      <input ref={folderInput} hidden type="file" multiple disabled={busy} onChange={event => { setFiles(previous => mergeFiles(previous, Array.from(event.target.files || []))); event.target.value = ''; }} />
-      {!files.length ? <div className="argus-source-pickers"><button className="argus-source-add-large" disabled={busy} onClick={() => input.current?.click()}><Plus size={30} strokeWidth={1.4} /><strong>Choose files</strong><span>Add individual documents</span></button><button className="argus-source-add-large" disabled={busy} onClick={() => folderInput.current?.click()}><Upload size={29} strokeWidth={1.4} /><strong>Choose a folder</strong><span>Select a corpus folder from your device</span></button></div> : <>
+      <input ref={input} hidden type="file" multiple disabled={busy} onChange={selectFiles} />
+      <input ref={folderInput} hidden type="file" multiple disabled={busy} onChange={selectFiles} />
+      {!files.length ? <div className="argus-source-pickers"><button type="button" className="argus-source-add-large" disabled={busy} onClick={() => chooseFiles(input)}><Plus size={30} strokeWidth={1.4} /><strong>Choose files</strong><span>Add individual documents</span></button><button type="button" className="argus-source-add-large" disabled={busy} onClick={() => chooseFiles(folderInput)}><Upload size={29} strokeWidth={1.4} /><strong>Choose a folder</strong><span>Select a corpus folder from your device</span></button></div> : <>
         <div className="argus-source-selection-summary"><strong>{files.length.toLocaleString()} {files.length === 1 ? 'file' : 'files'} selected</strong><span>{formatBytes(totalBytes)} total</span></div>
         <ul className="argus-source-pending">{files.slice(0, 60).map((file, index) => <li key={fileIdentity(file)}><span title={file.webkitRelativePath || file.name}>{file.webkitRelativePath || file.name}</span><small>{formatBytes(file.size)}</small><button disabled={busy} onClick={() => setFiles(previous => previous.filter((_, item) => item !== index))} aria-label={`Remove ${file.name}`}><X size={14} /></button></li>)}</ul>
         {files.length > 60 && <p className="argus-source-local-note">Showing the first 60 names. All {files.length.toLocaleString()} selected files will be sent.</p>}
         {!project.description ? <><label htmlFor="workspace-data-description">Describe the data and what you want to find</label><textarea id="workspace-data-description" value={description} onChange={event => setDescription(event.target.value)} disabled={busy} maxLength={12000} rows={4} placeholder="What do these documents cover? What things and connections matter to your work?" aria-describedby="workspace-description-hint" /><p id="workspace-description-hint" className="argus-source-description-hint">Saved for this entire workspace and any files you add later.</p></> : <p className="argus-source-saved-description">Uses this workspace’s saved description: {project.description}</p>}
         {!project.description && <p className="argus-source-local-note">These files are still on your device. Nothing is sent until you start ingestion.</p>}
-        <div className="argus-source-upload-actions"><button className="argus-source-more" disabled={busy} onClick={() => input.current?.click()}><Plus size={15} />Add files</button><button className="argus-source-more" disabled={busy} onClick={() => folderInput.current?.click()}><Plus size={15} />Add folder</button><button className="argus-source-upload" disabled={busy || !description.trim()} onClick={() => void upload()}>{busy ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />}{busy ? 'Starting ingestion…' : 'Start ingestion'}</button></div>
+        <div className="argus-source-upload-actions"><button type="button" className="argus-source-more" disabled={busy} onClick={() => chooseFiles(input)}><Plus size={15} />Add files</button><button type="button" className="argus-source-more" disabled={busy} onClick={() => chooseFiles(folderInput)}><Plus size={15} />Add folder</button><button type="button" className="argus-source-upload" disabled={busy || !description.trim()} onClick={() => void upload()}>{busy ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />}{busy ? 'Starting ingestion…' : 'Start ingestion'}</button></div>
         {busy && transfer && <div className="argus-source-transfer" role="status"><div><span>Sending {files.length.toLocaleString()} files</span><span>{transfer.total ? `${Math.round(transfer.loaded / transfer.total * 100)}%` : formatBytes(transfer.loaded)}</span></div><progress max={transfer.total || undefined} value={transfer.total ? transfer.loaded : undefined} /></div>}
       </>}
       {error && <p className="argus-source-upload-error" role="alert">{error}</p>}

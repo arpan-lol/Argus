@@ -21,9 +21,8 @@
 .argus-project-add:hover{background:var(--project-surface);color:var(--project-text)}
 .argus-project-modal{width:min(640px,calc(100vw - 32px));max-height:min(92dvh,900px);margin:auto;padding:0;border:1px solid var(--project-line);border-radius:16px;background:var(--project-bg);color:var(--project-text);box-shadow:0 24px 90px #0d171833;overflow:auto;scrollbar-width:thin;scrollbar-color:var(--project-muted) transparent}
 .argus-project-modal::backdrop{background:#111a18a6;backdrop-filter:blur(3px)}
-.argus-project-modal form{padding:30px}
-.argus-project-modal-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
-.argus-project-modal-symbol{display:grid;place-items:center;width:42px;height:42px;border:1px solid var(--project-line);border-radius:11px;background:var(--project-surface);color:var(--project-accent)}
+.argus-project-modal form{padding:22px 30px 30px}
+.argus-project-modal-top{display:flex;align-items:center;justify-content:flex-end;margin-bottom:6px}
 .argus-project-modal-close{display:grid;place-items:center;width:36px;height:36px;border:0;border-radius:7px;background:transparent;color:var(--project-muted)}
 .argus-project-modal-close:hover,.argus-project-modal-file-list button:hover{background:var(--project-surface);color:var(--project-text)}
 .argus-project-modal-heading{margin-bottom:26px}
@@ -44,6 +43,7 @@
 .argus-project-modal-pickers button>svg{flex:none;color:var(--project-accent)}
 .argus-project-modal-pickers button span{display:grid;gap:3px;min-width:0}
 .argus-project-modal-pickers strong{font-size:12px;font-weight:550}
+.argus-project-modal-file-types{margin:9px 0 0;font-size:10px;line-height:1.6;color:var(--project-muted)}
 .argus-project-modal-pickers small{font-size:10px;color:var(--project-muted)}
 .argus-project-modal-file-list{list-style:none;padding:0;margin:12px 0 0;max-height:156px;overflow:auto}
 .argus-project-modal-file-list li{display:flex;align-items:center;gap:10px;min-height:34px;border-bottom:1px solid var(--project-line);font-size:11px}
@@ -53,7 +53,7 @@
 .argus-project-modal-file-overflow,.argus-project-modal-local-note{margin:9px 0 0;font-size:11px;line-height:1.6;color:var(--project-muted)}
 .argus-project-modal-local-note{margin-top:13px}
 .argus-project-modal-error{margin:16px 0 0;color:#c86d64;font-size:12px;line-height:1.6}
-.argus-project-modal-footer{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:26px;padding-top:20px;border-top:1px solid var(--project-line)}
+.argus-project-modal-footer{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding-top:20px;}
 .argus-project-modal-footer button{display:flex;align-items:center;justify-content:center;gap:8px;min-width:90px;min-height:40px;padding:9px 15px;border-radius:7px;font:inherit;font-size:12px}
 .argus-project-modal-cancel{border:1px solid var(--project-line);background:transparent;color:var(--project-text)}
 .argus-project-modal-cancel:hover{background:var(--project-surface)}
