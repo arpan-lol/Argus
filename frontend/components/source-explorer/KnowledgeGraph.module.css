@@ -32,14 +32,14 @@
 .edge { cursor:pointer; outline:none; }
 .edgeLine { fill:none; stroke:var(--muted-foreground); stroke-width:1.4; vector-effect:non-scaling-stroke; opacity:.8; }
 .native .edgeLine { stroke:var(--foreground); opacity:.7; }
-.review .edgeLine { stroke-dasharray:2 5; stroke:var(--warm-brown, #856030); }
+.review .edgeLine { stroke-dasharray:2 5; stroke:var(--warm-brown, #31edae); }
 .unverified .edgeLine { stroke-dasharray:7 5; }
 .edgeHit { stroke:transparent; stroke-width:15; fill:none; vector-effect:non-scaling-stroke; }
 .edgeLabel { font:10px var(--font-geist-sans), sans-serif; fill:var(--muted-foreground); paint-order:stroke; stroke:var(--background); stroke-width:5px; stroke-linejoin:round; pointer-events:none; }
 .edge:hover .edgeLine, .edge:focus-visible .edgeLine, .activeEdge .edgeLine { stroke-width:2.5; opacity:1; }
 .edge:hover .edgeLabel, .edge:focus-visible .edgeLabel, .activeEdge .edgeLabel { fill:var(--foreground); font-weight:600; }
-.node { cursor:pointer; outline:none; --node-color:#af8c3a; }
-.hue0 { --node-color:#b5923e; }
+.node { cursor:pointer; outline:none; --node-color:#31edae; }
+.hue0 { --node-color:#31edae; }
 .hue1 { --node-color:#6d9b8b; }
 .hue2 { --node-color:#9992b5; }
 .hue3 { --node-color:#849eb5; }
@@ -102,7 +102,7 @@
 .legend span { display:inline-flex; align-items:center; gap:5px; }
 .legend i { display:block; width:18px; border-top:1.5px solid var(--foreground); }
 .legend .dashed { border-top-style:dashed; border-color:var(--muted-foreground); }
-.legend .dotted { border-top-style:dotted; border-color:var(--warm-brown, #856030); }
+.legend .dotted { border-top-style:dotted; border-color:var(--warm-brown, #31edae); }
 .srOnly { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
 @media (max-width:600px) { .toolbar { padding:10px 12px; } .heading { margin-bottom:8px; } .filter { max-width:136px; } .find input { font-size:16px; } .filter select { font-size:11px; } .details { max-height:46%; } .detailHeader { padding:10px 12px 8px; } .detailActions { padding:0 12px; } .detailBody { padding:9px 12px 12px; } .legend { gap:8px; } }
 @media (prefers-reduced-motion:reduce) { .spin { animation:none; } }

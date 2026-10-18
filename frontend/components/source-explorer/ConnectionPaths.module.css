@@ -29,7 +29,7 @@
 .close { display: grid; place-items: center; flex: 0 0 auto; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted-foreground, #5e685e); cursor: pointer; }
 .close:hover, .path:hover { background: var(--muted, #efeee6); }
 .path[aria-pressed="true"] { background: var(--muted, #efeee6); }
-.close:focus-visible, .path:focus-visible { outline: 2px solid #bd9b42; outline-offset: -2px; }
+.close:focus-visible, .path:focus-visible { outline: 2px solid #087a55; outline-offset: -2px; }
 .body { min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--border, #d8ded5) transparent; }
 .list { padding: 0; margin: 0; list-style: none; }
 .list li + li { border-top: 1px solid var(--border, #d8ded5); }
@@ -44,7 +44,7 @@
 .footer { padding: 10px 15px 12px; border-top: 1px solid var(--border, #d8ded5); color: var(--muted-foreground, #5e685e); font-size: 11px; line-height: 1.5; }
 .footer p { margin: 0; }
 .footer p + p { margin-top: 4px; }
-.panel ::selection { background: #c5ac6859; color: var(--foreground, #283329); }
+.panel ::selection { background: #31edae59; color: var(--foreground, #283329); }
 .spin { animation: rotate 1s linear infinite; }
 @keyframes rotate { to { transform: rotate(360deg); } }
 @media (max-width: 480px) { .panel { left: 12px; bottom: 18px; width: calc(100% - 74px); } .path { padding: 10px 12px; } .header { padding-left: 12px; } .status, .footer { padding-left: 12px; padding-right: 12px; } }
