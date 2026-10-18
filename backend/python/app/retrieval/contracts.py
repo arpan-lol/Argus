@@ -44,7 +44,7 @@ class ReadChunks(Arguments):
 class InspectAssertions(Arguments):
     entity_id: str = Field(min_length=1, max_length=256)
     predicate: str | None = Field(default=None, max_length=200)
-    polarity: Literal["affirmed", "negated", "uncertain"] | None = None
+    polarity: Literal["affirmed", "negated", "uncertain", "unclassified"] | None = None
     limit: int = Field(default=20, ge=1, le=50)
 
 

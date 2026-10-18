@@ -31,4 +31,4 @@ def apply_project(config, project_id=None):
     if not project_id:
         return config
     project = get_project(project_id)
-    return {**config, 'projectId': project_id, 'workspaceDescription': project['description'], 'semanticGraph': 'argus_project_' + project_id.replace('-', '')}
+    return {**config, 'projectId': project_id, 'workspaceDescription': project['description'], 'categories': project.get('categories') or ['general_documents'], 'semanticGraph': 'argus_project_' + project_id.replace('-', '')}

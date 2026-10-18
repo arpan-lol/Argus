@@ -1,0 +1,2 @@
+-r requirements-ingestion.txt
+docling>=2.58,<3

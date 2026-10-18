@@ -89,8 +89,8 @@ def retry(job_id: str, through: str = "publish"):
         raise HTTPException(400, "Unknown ingestion stage")
     try:
         return pipeline.enqueue(job_id, through)
-    except RuntimeError:
-        raise HTTPException(409, "This job already has an active ingestion worker")
+    except RuntimeError as error:
+        raise HTTPException(409, str(error))
 
 
 @router.post("/jobs/{job_id}/pause", status_code=202)

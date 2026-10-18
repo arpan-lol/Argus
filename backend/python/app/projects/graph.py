@@ -40,6 +40,7 @@ def store_layout(pipeline, job):
                 section_positions[section['id']] = (sx, sy)
                 put(section['id'], 'section', sx, sy, section['title'], documentId=job['source_id'], sectionId=section['id'])
             child_counts = {}
+            chunk_positions = {}
             for chunk in chunks:
                 primary, _ = chunk_sections(chunk, sections)
                 sx, sy = section_positions[primary['id']]
@@ -49,6 +50,7 @@ def store_layout(pipeline, job):
                 r = 55 * math.sqrt(ordinal + 1)
                 cx, cy = (sx + (ordinal % 9 - 4) * 28, sy + 90 + ordinal // 9 * 30) if mode == 'grouped' else (sx + r * math.cos(angle), sy + r * math.sin(angle))
                 put(chunk['id'], 'chunk', cx, cy, chunk['text'], documentId=job['source_id'], sectionId=primary['id'], chunkId=chunk['id'])
+                chunk_positions[chunk['id']] = (cx, cy)
                 extracted = pipeline.item(job['id'], 'extract', chunk['id'])
                 for entity in extracted['entities']:
                     from app.ingestion.config import fingerprint
@@ -58,6 +60,16 @@ def store_layout(pipeline, job):
                     h = int(hashlib.sha256(entity_id.encode()).hexdigest()[:12], 16)
                     ea = h / (16 ** 12) * math.tau
                     put(entity_id, 'entity', cx + 80 * math.cos(ea), cy + 80 * math.sin(ea), entity['name'], entityType=entity['entity_type'])
+            for entity in document.get('codeGraph', {}).get('entities', []):
+                from app.ingestion.config import fingerprint
+                from app.ingestion.publication import semantic_graph_name
+                entity_id = 'entity:' + fingerprint([semantic_graph_name(job['configuration']), entity['name'].strip(), entity['type']])
+                supporting = next((chunk for chunk in chunks if chunk['startOffset'] < entity['end'] and chunk['endOffset'] > entity['start']), None)
+                if supporting:
+                    ax, ay = chunk_positions[supporting['id']]
+                    h = int(hashlib.sha256(entity_id.encode()).hexdigest()[:12], 16)
+                    ea = h / (16 ** 12) * math.tau
+                    put(entity_id, 'entity', ax + 80 * math.cos(ea), ay + 80 * math.sin(ea), entity['name'], entityType=entity['type'], extractionMethod='python_ast')
 
 
 def nodes_for(project_id, mode, bounds=None, limit=800, documents_only=False, identifiers=None):
@@ -84,8 +96,8 @@ def connections(nodes):
         return []
     ids = [node['id'] for node in nodes]
     graph = graph_connection(processing_config())
-    rows = graph.ro_query("MATCH (a)-[r:HAS_SECTION|HAS_CHUNK|NEXT_CHUNK|MENTIONS|RELATES]->(b) WHERE a.id IN $ids AND b.id IN $ids AND a.active=true AND b.active=true AND (type(r)<>'RELATES' OR r.active=true) RETURN a.id,b.id,type(r),r.predicate LIMIT 4000", {'ids': ids}, timeout=1500).result_set
-    return [{'id': a + '|' + kind + '|' + b + '|' + (predicate or ''), 'source': a, 'target': b, 'type': kind, 'predicate': predicate} for a, b, kind, predicate in rows]
+    rows = graph.ro_query("MATCH (a)-[r:HAS_SECTION|HAS_CHUNK|NEXT_CHUNK|MENTIONS|RELATES]->(b) WHERE a.id IN $ids AND b.id IN $ids AND a.active=true AND b.active=true AND (type(r)<>'RELATES' OR r.active=true) RETURN a.id,b.id,type(r),r.predicate,r.assertionId,r.extractionMethod,r.confidence LIMIT 4000", {'ids': ids}, timeout=1500).result_set
+    return [{'id': a + '|' + kind + '|' + b + '|' + (assertion or predicate or ''), 'source': a, 'target': b, 'type': kind, 'predicate': predicate, 'assertionId': assertion, 'extractionMethod': method, 'confidence': score} for a, b, kind, predicate, assertion, method, score in rows]
 
 
 @router.get('/overview')

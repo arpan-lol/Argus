@@ -10,12 +10,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from starlette.datastructures import UploadFile
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from psycopg.types.json import Jsonb
 
 from app.database import connection
 from app.ingestion.config import processing_config
 from app.ingestion.pipeline import IngestionPipeline, STAGES, serialize
 from .events import emit
 from .scope import get_project, project_scope
+from app.ingestion.categories import category_catalog, validate_categories
 
 
 router = APIRouter(prefix='/projects', tags=['projects'])
@@ -27,6 +29,12 @@ class NewProject(BaseModel):
     model_config = ConfigDict(extra='forbid')
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default='', max_length=12000)
+    categories: list[str] = Field(default_factory=lambda: ['general_documents'], max_length=8)
+
+    @field_validator('categories')
+    @classmethod
+    def selected_categories(cls, value):
+        return validate_categories(value)
 
     @field_validator('name')
     @classmethod
@@ -44,10 +52,16 @@ class NewProject(BaseModel):
 class Description(BaseModel):
     model_config = ConfigDict(extra='forbid')
     description: str = Field(min_length=1, max_length=12000)
+    categories: list[str] | None = Field(default=None, max_length=8)
 
 
 def summary(row):
-    return serialize({key: row[key] for key in ('id', 'name', 'description', 'created_at', 'updated_at', 'entity_types', 'relationship_types')})
+    return {**serialize({key: row[key] for key in ('id', 'name', 'description', 'categories', 'created_at', 'updated_at', 'entity_types', 'relationship_types')}), 'configurationLocked': bool(row.get('profile_id'))}
+
+
+@router.get('/categories')
+def categories():
+    return {'categories': [{'id': item['id'], 'name': item['name'], 'description': item['description']} for item in category_catalog()]}
 
 
 @router.get('')
@@ -61,7 +75,7 @@ def projects():
 def new_project(body: NewProject):
     project_id = str(uuid.uuid4())
     with connection() as conn:
-        row = conn.execute('INSERT INTO projects(id,name,description) VALUES(%s,%s,%s) RETURNING *', (project_id, body.name, body.description)).fetchone()
+        row = conn.execute('INSERT INTO projects(id,name,description,categories) VALUES(%s,%s,%s,%s) RETURNING *', (project_id, body.name, body.description, Jsonb(body.categories))).fetchone()
     return summary(row)
 
 
@@ -89,7 +103,7 @@ def metrics(project_id: str):
         totals['embeddingTokens' if embedding else 'inputTokens'] += tokens
         if not embedding:
             totals['outputTokens'] += usage.get('output_tokens', usage.get('completion_tokens', 0)) or 0
-    return {'actualReportedUsage': totals, 'costUsd': None, 'duplicateMode': 'sdk_basic', 'execution': {'queue': 'one job per file', 'workers': int(os.getenv('ARGUS_INGESTION_WORKERS', '1')), 'parallelStages': ['embed', 'extract'], 'chunkEmbeddingBatchSize': 64}, 'estimate': {'duplicateLlmCalls': 0, 'extractionLlmCalls': 'At most one extraction request per uncached chunk; invalid output falls back to local GLiNER mentions'}}
+    return {'actualReportedUsage': totals, 'costUsd': None, 'duplicateMode': 'sdk_basic', 'execution': {'queue': 'one job per file', 'workers': int(os.getenv('ARGUS_INGESTION_WORKERS', '1')), 'parallelStages': ['embed', 'mentions', 'configure'], 'chunkEmbeddingBatchSize': 64, 'embeddingTokensPerMinute': processing_config()['embeddingTokensPerMinute']}, 'estimate': {'duplicateLlmCalls': 0, 'extractionLlmCalls': 0, 'workspaceDiscovery': 'Batched random samples; no calls start after 30 seconds; each dispatched response may finish; shared workspace token budget'}}
 
 
 @scoped.put('/description')
@@ -101,7 +115,15 @@ def describe(project_id: str, body: Description):
         row = conn.execute('SELECT * FROM projects WHERE id=%s FOR UPDATE', (project_id,)).fetchone()
         if row['description'] and row['description'] != description:
             raise HTTPException(409, 'This workspace already has a saved description')
-        row = conn.execute('UPDATE projects SET description=%s,updated_at=now() WHERE id=%s RETURNING *', (description, project_id)).fetchone()
+        selected = row.get('categories') or ['general_documents']
+        if body.categories is not None:
+            try:
+                selected = validate_categories(body.categories)
+            except ValueError as error:
+                raise HTTPException(400, str(error))
+            if selected != row.get('categories') and conn.execute('SELECT 1 FROM ingestion_jobs WHERE project_id=%s LIMIT 1', (project_id,)).fetchone():
+                raise HTTPException(409, 'Categories are saved for this workspace; create another workspace for a different category setup')
+        row = conn.execute('UPDATE projects SET description=%s,categories=%s,updated_at=now() WHERE id=%s RETURNING *', (description, Jsonb(selected), project_id)).fetchone()
     return summary(row)
 
 
@@ -128,12 +150,27 @@ async def upload_project_files(project_id, files, through, config=None):
     project = get_project(project_id)
     if not project['description']:
         raise HTTPException(409, 'Describe this workspace before uploading files')
+    if project.get('profile_id'):
+        from app.ingestion.profiles import get_profile, profile_signature
+        if get_profile(project['profile_id'])['model_configuration'] != profile_signature(config):
+            raise HTTPException(409, 'This workspace uses earlier extraction settings. Create a new workspace to build a fresh graph with local extraction.')
     staged = []
     temporary = []
+    archives = []
+    skipped = []
+    seen = {}
     try:
         for file in files:
-            filename = Path(file.filename or 'source.txt').name
-            with tempfile.NamedTemporaryFile(delete=False, suffix='-' + filename) as target:
+            from app.ingestion.archives import source_name, expand_archive, skip_reason
+            try:
+                filename = source_name(file.filename or 'source.txt')
+            except ValueError as error:
+                raise HTTPException(400, str(error))
+            reason = skip_reason(filename) if not filename.lower().endswith('.zip') else None
+            if reason:
+                skipped.append({'filename': filename, 'reason': reason})
+                continue
+            with tempfile.NamedTemporaryFile(delete=False, suffix='-' + Path(filename).name) as target:
                 path = Path(target.name)
                 temporary.append(path)
                 size = 0
@@ -144,16 +181,42 @@ async def upload_project_files(project_id, files, through, config=None):
                         raise HTTPException(413, filename + ' exceeds the configured upload limit')
                     digest.update(chunk)
                     target.write(chunk)
-            source_id = 'source:' + hashlib.sha256((project_id + ':' + digest.hexdigest()).encode()).hexdigest()
-            staged.append((path, filename, source_id, pipeline.describe_source(path, source_id=source_id, filename=filename)))
+            members = [(path, filename)]
+            if filename.lower().endswith('.zip'):
+                pipeline.describe_source(path, source_id='archive:' + digest.hexdigest(), filename=filename)
+                try:
+                    members, report = expand_archive(path, filename, config, temporary)
+                except (ValueError, __import__('zipfile').BadZipFile) as error:
+                    raise HTTPException(400, str(error))
+                archives.append(report)
+                skipped.extend(report['skipped'])
+            for member, relative in members:
+                revision = hashlib.sha256(member.read_bytes()).hexdigest()
+                if relative in seen:
+                    if seen[relative] != revision:
+                        raise HTTPException(400, 'Different files share the path ' + relative + '. Upload their containing folder to retain distinct paths.')
+                    skipped.append({'filename': relative, 'reason': 'duplicate source in this upload'})
+                    continue
+                seen[relative] = revision
+                source_id = 'source:' + hashlib.sha256((project_id + ':' + relative).encode()).hexdigest()
+                staged.append((member, relative, source_id, pipeline.describe_source(member, source_id=source_id, filename=relative)))
+                if len(staged) > config['maxUploadFiles']:
+                    raise HTTPException(413, 'Expanded files exceed the configured file count')
         if not staged:
-            raise HTTPException(400, 'Choose at least one source file')
-        jobs = [pipeline.register_file(path, source_id=source_id, filename=filename) for path, filename, source_id, _ in staged]
+            raise HTTPException(400, 'No supported source files were found. Add source code, Markdown, JATS/XML, PDF, Office documents, JSON or text files.')
+        from app.ingestion.profiles import create_profile
+        with connection() as conn:
+            saved = conn.execute('SELECT * FROM projects WHERE id=%s FOR UPDATE', (project_id,)).fetchone()
+            profile_id = saved['profile_id']
+            if not profile_id:
+                profile_id = create_profile(project['description'], [source for _, _, _, source in staged], config)['id']
+                conn.execute('UPDATE projects SET profile_id=%s WHERE id=%s', (profile_id, project_id))
+        jobs = [pipeline.register_file(path, source_id=source_id, filename=filename, profile_id=profile_id) for path, filename, source_id, _ in staged]
         for job in jobs:
             if job['status'] not in ('complete', 'running', 'queued'):
                 pipeline.enqueue(job['id'], through)
             emit(project_id, 'file_registered', {'filename': job['filename']}, job['id'])
-        return {'jobs': [pipeline.get_job(job['id']) for job in jobs]}
+        return {'jobs': [pipeline.get_job(job['id']) for job in jobs], 'archives': archives, 'skippedFiles': skipped}
     finally:
         for path in temporary:
             path.unlink(missing_ok=True)

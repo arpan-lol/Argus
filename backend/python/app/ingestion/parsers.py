@@ -10,7 +10,7 @@ from pathlib import Path
 from defusedxml import ElementTree
 
 
-SUPPORTED = {".txt", ".md", ".markdown", ".xml", ".jats", ".html", ".htm", ".pdf", ".docx", ".csv", ".tsv", ".xlsx", ".json"}
+SUPPORTED = {".txt", ".md", ".markdown", ".xml", ".jats", ".nxml", ".html", ".htm", ".pdf", ".docx", ".csv", ".tsv", ".xlsx", ".json"}
 
 
 def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_archive_members=10000):
@@ -43,7 +43,7 @@ def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_a
             location = location or {}
             blocks.append({"ordinal": len(blocks), "kind": kind, "role": location.get("role", "table" if kind == "table" else "content"), "text": text, "location": location, "structured": structured})
 
-    if suffix in {".xml", ".jats"}:
+    if suffix in {".xml", ".jats", ".nxml"}:
         root = ElementTree.fromstring(raw)
         if sum(1 for node in root.iter() if node.tag.split("}")[-1] == "article") > 1:
             raise ValueError("This XML file contains multiple articles. Supply one article per source file so revisions and source locations remain unambiguous.")

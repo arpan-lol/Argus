@@ -70,12 +70,15 @@ def read_chunks(session, args):
 
 
 def assertion_rows(session, entity_id, direction="both", predicates=None, polarity=None, limit=20):
-    rows = session.cypher("MATCH (s:Entity)<-[:SUBJECT]-(a:Assertion)-[:OBJECT]->(o:Entity),(a)-[:SUPPORTED_BY]->(c:Chunk) WHERE a.active=true AND c.active=true AND a.jobId IN $jobs AND c.jobId=a.jobId AND (($direction='outgoing' AND s.id=$entity) OR ($direction='incoming' AND o.id=$entity) OR ($direction='both' AND (s.id=$entity OR o.id=$entity))) AND (size($predicates)=0 OR a.predicate IN $predicates) AND ($polarity IS NULL OR a.polarity=$polarity) RETURN a.id,a.jobId,a.predicate,a.polarity,a.conditions,a.quote,a.startOffset,a.endOffset,c.id,s.id,s.label,o.id,o.label ORDER BY a.id LIMIT $limit", {"entity": entity_id, "direction": direction, "predicates": predicates or [], "polarity": polarity, "limit": limit + 1}, "assertion adjacency")
+    rows = session.cypher("MATCH (s:Entity)<-[:SUBJECT]-(a:Assertion)-[:OBJECT]->(o:Entity),(a)-[:SUPPORTED_BY]->(c:Chunk) WHERE a.active=true AND c.active=true AND a.jobId IN $jobs AND c.jobId=a.jobId AND (($direction='outgoing' AND s.id=$entity) OR ($direction='incoming' AND o.id=$entity) OR ($direction='both' AND (s.id=$entity OR o.id=$entity))) AND (size($predicates)=0 OR a.predicate IN $predicates) AND ($polarity IS NULL OR a.polarity=$polarity) RETURN a.id,a.jobId,a.predicate,a.polarity,a.conditions,a.quote,a.startOffset,a.endOffset,c.id,s.id,s.label,o.id,o.label,a.extractionMethod,a.confidence,a.resolution,a.llmVerified,a.polarityStatus ORDER BY a.id LIMIT $limit", {"entity": entity_id, "direction": direction, "predicates": predicates or [], "polarity": polarity, "limit": limit + 1}, "assertion adjacency")
     if len(rows) > limit:
         session.truncate("Assertion fanout/result limit reached; traversal is incomplete")
     support = session.chunks([row[8] for row in rows[:limit]])
     assertions = []
+    seen = set()
     for row in rows[:limit]:
+        if row[0] in seen:
+            continue
         chunk = support.get(row[8])
         if not chunk or chunk["job_id"] != row[1]:
             continue
@@ -84,7 +87,9 @@ def assertion_rows(session, entity_id, direction="both", predicates=None, polari
         if relative < 0 or row[7] > chunk["payload"]["endOffset"] or row[7] - row[6] != len(row[5]) or text[relative:relative + row[7] - row[6]] != row[5]:
             session.warnings.append("Assertion with inconsistent source support withheld")
             continue
-        assertions.append({"id": row[0], "predicate": row[2], "polarity": row[3], "conditions": json.loads(row[4] or "[]"), "quote": row[5], "subject": {"id": row[9], "name": row[10]}, "object": {"id": row[11], "name": row[12]}, "citation": session.citation(chunk, row[6], row[7])})
+        seen.add(row[0])
+        provenance = {'method': row[13] if len(row) > 13 else None, 'score': row[14] if len(row) > 14 else None, 'resolution': row[15] if len(row) > 15 else None, 'llmVerified': row[16] is True if len(row) > 16 else False, 'polarityStatus': row[17] if len(row) > 17 else None, 'meaning': 'Local model predictions are unverified; Python parser relations describe syntax and named references, not runtime execution'}
+        assertions.append({"id": row[0], "predicate": row[2], "polarity": row[3], "conditions": json.loads(row[4] or "[]"), "quote": row[5], "subject": {"id": row[9], "name": row[10]}, "object": {"id": row[11], "name": row[12]}, "citation": session.citation(chunk, row[6], row[7]), "extraction": provenance})
     return assertions
 
 

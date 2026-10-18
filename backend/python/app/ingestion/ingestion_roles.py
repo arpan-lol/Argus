@@ -20,6 +20,8 @@ def ingestion_configuration_failure(config, error):
 def validate_ingestion_llm(config, judge=False):
     if config.get("ingestionLlmRole") != "LLM2":
         return
+    if judge:
+        raise ValueError('LLM duplicate judging is disabled for local ingestion')
     current = deployment("LLM2")
     if not current or not os.getenv("LLM2_DEPLOYMENT_KEY", "").strip():
         raise ValueError("Configure the complete LLM2 deployment before starting ingestion")

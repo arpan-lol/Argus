@@ -9,7 +9,7 @@ from .publication import semantic_graph_name
 
 
 def resolve_basic(pipeline, job):
-    provider = Providers(job['configuration'], pipeline.call_recorder(job['id']))
+    provider = Providers(job['configuration'], pipeline.call_recorder(job['id']), lambda: pipeline.check_paused(job['id']))
     space = semantic_graph_name(job['configuration'])
     mentions = deferred_count = 0
     records = []
@@ -20,24 +20,47 @@ def resolve_basic(pipeline, job):
             mention_id = 'mention:' + fingerprint([chunk['id'], entity['key']])
             canonical_id = 'entity:' + fingerprint([space, entity['name'].strip().lower(), entity['entity_type'].strip().lower()]) if not deferred else 'entity:' + fingerprint([job['id'], mention_id])
             records.append((entity, mention_id, canonical_id, deferred))
-    missing = [(entity, mention_id) for entity, mention_id, _, _ in records if pipeline.item(job['id'], 'entity_embed', mention_id) is None]
+    structure = pipeline.artifact(job['id'], 'normalize').get('codeGraph', {})
+    for item in structure.get('entities', []):
+        canonical_id = 'entity:' + fingerprint([space, item['name'].strip(), item['type']])
+        for occurrence in item['occurrences']:
+            mention_id = 'mention:' + fingerprint([job['id'], 'python_ast', item['key'], occurrence['start'], occurrence['end']])
+            entity = {'name': item['name'], 'entity_type': item['type'], 'description': 'Python source module or symbol', 'quote': occurrence['quote']}
+            records.append((entity, mention_id, canonical_id, False))
+    unique = {canonical_id: entity for entity, _, canonical_id, _ in records}
+    with connection() as conn:
+        existing = {row['id']: row for row in conn.execute('SELECT id,embedding,embedding_model FROM ingestion_entities WHERE id=ANY(%s)', (list(unique),)).fetchall()} if unique else {}
+        cached_vectors = {row['item_id']: row['payload']['vector'] for row in conn.execute("SELECT item_id,payload FROM ingestion_items WHERE job_id=%s AND stage='entity_embed'", (job['id'],)).fetchall()}
+    vectors_by_id = {}
+    for canonical_id in unique:
+        prior = existing.get(canonical_id)
+        vector = cached_vectors.get(canonical_id) or (prior['embedding'] if prior and prior['embedding_model'] == job['configuration']['embeddingModel'] else None)
+        if vector and len(vector) == job['configuration']['embeddingDimensions'] and all(math.isfinite(value) for value in vector) and any(vector):
+            vectors_by_id[canonical_id] = vector
+    missing = [(entity, canonical_id) for canonical_id, entity in unique.items() if canonical_id not in vectors_by_id]
     for start in range(0, len(missing), 64):
         batch = missing[start:start + 64]
         key = fingerprint([job['configuration']['embeddingModel'], [mention_id for _, mention_id in batch]])
         vectors = pipeline.retry_call(job, 'entity_embed_batch', key, lambda rows=batch: {'vectors': provider.embed([entity['name'] + '\n' + entity['entity_type'] + '\n' + entity['description'] for entity, _ in rows])})['vectors']
-        for (_, mention_id), vector in zip(batch, vectors, strict=True):
-            pipeline.save_item(job['id'], 'entity_embed', mention_id, {'vector': vector})
+        with connection() as conn, conn.cursor() as cursor:
+            cursor.executemany("INSERT INTO ingestion_items(job_id,stage,item_id,payload) VALUES(%s,'entity_embed',%s,%s) ON CONFLICT(job_id,stage,item_id) DO UPDATE SET payload=excluded.payload", [(job['id'], identifier, Jsonb({'vector': vector})) for (_, identifier), vector in zip(batch, vectors, strict=True)])
+        vectors_by_id.update({identifier: vector for (_, identifier), vector in zip(batch, vectors, strict=True)})
+    decisions = []
+    items = []
     for entity, mention_id, canonical_id, deferred in records:
-        vector = pipeline.item(job['id'], 'entity_embed', mention_id)['vector']
+        vector = vectors_by_id[canonical_id]
         if len(vector) != job['configuration']['embeddingDimensions'] or not any(vector) or any(not math.isfinite(value) for value in vector):
             raise ValueError('Entity vector is invalid')
         decision_id = 'resolution:' + fingerprint([job['id'], mention_id])
         verdict = 'deferred' if deferred else 'same'
-        rationale = 'GLiNER fallback mention kept separate.' if deferred else 'SDK-style exact normalized name and type grouping; no LLM duplicate judgment.'
-        with connection() as conn:
-            conn.execute("INSERT INTO ingestion_entities(id,label,entity_type,description,aliases,embedding,embedding_model,created_by_job,source_quote) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET description=CASE WHEN length(excluded.description)>length(ingestion_entities.description) THEN excluded.description ELSE ingestion_entities.description END", (canonical_id, entity['name'], entity['entity_type'], entity['description'], Jsonb([entity['name']]), Jsonb(vector), job['configuration']['embeddingModel'], job['id'], entity['quote']))
-            conn.execute('INSERT INTO ingestion_resolution_decisions(id,job_id,mention_id,canonical_id,decision,rationale,votes) VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET canonical_id=excluded.canonical_id,decision=excluded.decision,rationale=excluded.rationale WHERE NOT ingestion_resolution_decisions.reverted', (decision_id, job['id'], mention_id, canonical_id, verdict, rationale, Jsonb([])))
-        pipeline.save_item(job['id'], 'resolve', mention_id, {'mentionId': mention_id, 'canonicalId': canonical_id, 'decisionId': decision_id, 'decision': verdict, 'deferred': deferred, 'reason': rationale})
+        rationale = 'GLiNER fallback mention kept separate.' if deferred else 'Exact qualified Python symbol, preserving case.' if entity['entity_type'].startswith('code_') else 'SDK-style exact normalized name and type grouping; no LLM duplicate judgment.'
+        decisions.append((decision_id, job['id'], mention_id, canonical_id, verdict, rationale, Jsonb([])))
+        items.append((job['id'], mention_id, Jsonb({'mentionId': mention_id, 'canonicalId': canonical_id, 'decisionId': decision_id, 'decision': verdict, 'deferred': deferred, 'reason': rationale})))
         mentions += 1
         deferred_count += int(deferred)
-    return {'resolvedMentions': mentions, 'deferredMentions': deferred_count, 'candidatePairs': 0, 'duplicateLlmCalls': 0, 'method': 'sdk-style-normalized-name-type-1'}
+    with connection() as conn, conn.cursor() as cursor:
+        cursor.executemany("INSERT INTO ingestion_entities(id,label,entity_type,description,aliases,embedding,embedding_model,created_by_job,source_quote) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET description=CASE WHEN length(excluded.description)>length(ingestion_entities.description) THEN excluded.description ELSE ingestion_entities.description END", [(identifier, entity['name'], entity['entity_type'], entity['description'], Jsonb([entity['name']]), Jsonb(vectors_by_id[identifier]), job['configuration']['embeddingModel'], job['id'], entity['quote']) for identifier, entity in unique.items()])
+        cursor.executemany('INSERT INTO ingestion_resolution_decisions(id,job_id,mention_id,canonical_id,decision,rationale,votes) VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET canonical_id=excluded.canonical_id,decision=excluded.decision,rationale=excluded.rationale WHERE NOT ingestion_resolution_decisions.reverted', decisions)
+        cursor.executemany("INSERT INTO ingestion_items(job_id,stage,item_id,payload) VALUES(%s,'resolve',%s,%s) ON CONFLICT(job_id,stage,item_id) DO UPDATE SET payload=excluded.payload", items)
+        conn.execute('UPDATE ingestion_jobs SET updated_at=now() WHERE id=%s', (job['id'],))
+    return {'resolvedMentions': mentions, 'deferredMentions': deferred_count, 'candidatePairs': 0, 'duplicateLlmCalls': 0, 'entityEmbeddingsCreated': len(missing), 'entityEmbeddingsReused': len(unique) - len(missing), 'method': 'sdk-style-normalized-name-type-1'}

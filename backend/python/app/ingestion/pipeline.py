@@ -21,14 +21,13 @@ from app.config import settings
 from app.database import connection, migrate
 
 from .chunking import chunk_document
-from .config import SDK_DEFAULT_ENTITY_TYPES, fingerprint, processing_config
-from .parsers import normalize, parse
-from .providers import ConfigurationRequired, Extraction, Profile, Providers, EXTRACTION_PROMPT, PROFILE_PROMPT
-from .providers import extraction_schema
+from .config import fingerprint, processing_config
+from .parsers import normalize
+from .providers import ConfigurationRequired, Providers
 from .schema import ensure_schema
 
 
-STAGES = ("register", "parse", "normalize", "chunk", "configure", "embed", "extract", "resolve", "prepare", "validate", "publish")
+STAGES = ("register", "parse", "normalize", "chunk", "mentions", "configure", "embed", "extract", "resolve", "prepare", "validate", "publish")
 logger = logging.getLogger("argus.ingestion")
 
 
@@ -69,8 +68,9 @@ class IngestionPipeline:
         for stage in STAGES:
             builder.add_node(stage, self.node(stage))
         builder.add_edge(START, STAGES[0])
-        for first, second in (("register", "parse"), ("parse", "normalize"), ("normalize", "chunk"), ("chunk", "configure"), ("configure", "embed"), ("configure", "extract"), ("extract", "resolve"), ("resolve", "prepare"), ("validate", "publish")):
+        for first, second in (("register", "parse"), ("parse", "normalize"), ("normalize", "chunk"), ("chunk", "configure"), ("chunk", "embed"), ("chunk", "mentions"), ("extract", "resolve"), ("resolve", "prepare"), ("validate", "publish")):
             builder.add_edge(first, second)
+        builder.add_edge(["configure", "mentions"], "extract")
         builder.add_edge(["embed", "prepare"], "validate")
         builder.add_edge("publish", END)
         self.builder = builder
@@ -164,13 +164,9 @@ class IngestionPipeline:
             job_event(self.job_row(job_id), 'model_call', payload)
         return record
 
-    def budget(self, job):
-        maximum = job["configuration"]["maxLlmCallsPerJob"]
-        if maximum:
-            with connection() as conn:
-                count = conn.execute("SELECT count(*) AS count FROM ingestion_items WHERE job_id=%s AND stage='provider_call' AND payload->>'kind'='llm'", (job["id"],)).fetchone()["count"]
-            if count >= maximum:
-                raise ConfigurationRequired(f"Configured job LLM call budget ({maximum}) exhausted. Register this source with a higher configured budget to create a new processing version. Existing job outputs remain retained.")
+    def check_paused(self, job_id):
+        if self.job_row(job_id).get('stop_requested'):
+            raise PauseRequested()
 
     def node(self, stage):
         def execute(state):
@@ -192,6 +188,14 @@ class IngestionPipeline:
                     if key in result:
                         receipt[key] = result[key]
                 summaries = []
+                parser = result.get('metadata', {}).get('parser')
+                if parser:
+                    summaries.append('Parser: ' + parser.replace('_', ' '))
+                if result.get('structuralRelationships') is not None:
+                    summaries.append(str(result['structuralRelationships']) + ' Python syntax relationships')
+                sampling = result.get('sampling', {})
+                if sampling:
+                    summaries.append(str(sampling.get('callsThisRun', 0)) + ' label discovery calls; stopped: ' + sampling.get('stopReason', 'complete').replace('_', ' '))
                 if result.get("fallbackChunks"):
                     summaries.append(f"{result['fallbackChunks']} chunks kept local GLiNER mentions after failed extraction; no relationships extracted for those chunks.")
                 if result.get("deferredMentions"):
@@ -238,8 +242,6 @@ class IngestionPipeline:
             try:
                 from app.projects.events import job_event
                 job_event(job, 'item_start', {'stage': stage, 'itemId': key, 'attempt': attempt + 1})
-                if stage not in {"embed", "embed_batch", "entity_embed", "entity_embed_batch", "assertion_embed"}:
-                    self.budget(job)
                 payload = operation()
                 self.save_item(job["id"], stage, key, payload)
                 counts = {name: len(payload[name]) for name in ('entities', 'relationships', 'mentions', 'vectors', 'votes') if isinstance(payload.get(name), list)}
@@ -256,8 +258,13 @@ class IngestionPipeline:
                 job_event(job, 'item_failed', {'stage': stage, 'itemId': key, 'attempt': attempt + 1, 'message': str(error), 'willRetry': attempt + 1 < attempts})
                 if attempt + 1 >= attempts:
                     raise
-                provider_delay = re.search(r"retry in\s+([\d.]+)\s*s", str(error), re.IGNORECASE)
-                delay = max(job["configuration"]["retryBaseSeconds"] * (2 ** attempt), float(provider_delay.group(1)) + 1 if provider_delay else 0)
+                provider_delay = re.search(r"retry (?:in|after)\s+([\d.]+)\s*s", str(error), re.IGNORECASE)
+                headers = getattr(getattr(error, 'response', None), 'headers', {}) or {}
+                try:
+                    header_delay = float(headers.get('retry-after-ms', '0')) / 1000 or float(headers.get('retry-after', '0'))
+                except (ValueError, TypeError):
+                    header_delay = 0
+                delay = max(job["configuration"]["retryBaseSeconds"] * (2 ** attempt), float(provider_delay.group(1)) + 1 if provider_delay else 0, header_delay + 0.25 if header_delay else 0)
                 deadline = time.monotonic() + delay
                 while time.monotonic() < deadline:
                     if self.job_row(job["id"]).get("stop_requested"):
@@ -267,7 +274,9 @@ class IngestionPipeline:
     def enqueue(self, job_id, through="publish"):
         if through not in STAGES:
             raise ValueError("Unknown stage")
-        self.job_row(job_id)
+        row = self.job_row(job_id)
+        if row['configuration'].get('contract') != processing_config(row.get('project_id'))['contract']:
+            raise RuntimeError('This upload uses an earlier ingestion pipeline. Create a new workspace and upload the original files to rebuild with local extraction.')
         with connection() as conn:
             acquired = conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS acquired", (job_id,)).fetchone()["acquired"]
             if not acquired:
@@ -318,14 +327,16 @@ class IngestionPipeline:
         return {"sourceId": job["source_id"], "revision": job["revision"], "byteLength": len(raw), "originalPath": job["original_path"]}
 
     def stage_parse(self, job):
-        result = parse(job["original_path"], job["configuration"]["maxDecompressedBytes"], job["configuration"].get("maxExtractedTextCharacters", 20971520), job["configuration"].get("maxArchiveMembers", 10000))
+        from .parser_routing import parse_source
+        result = parse_source(job["original_path"], job["configuration"], job["filename"])
         if job["source_url"]:
             result["metadata"]["sourceUrl"] = job["source_url"]
         return result
 
     def stage_normalize(self, job):
         from .profiles import source_quality
-        result = source_quality(normalize(self.artifact(job["id"], "parse")))
+        from .parser_routing import attach_structure
+        result = attach_structure(source_quality(normalize(self.artifact(job["id"], "parse"))), job["filename"])
         for block in result["blocks"]:
             block["id"] = "block:" + fingerprint([job["id"], block["ordinal"]])
         return result
@@ -334,7 +345,7 @@ class IngestionPipeline:
         return chunk_document(self.artifact(job["id"], "normalize"), [job["source_id"], job["revision"], job["processing_version"]], job["configuration"])
 
     def stage_embed(self, job):
-        provider = Providers(job["configuration"], self.call_recorder(job["id"]))
+        provider = Providers(job["configuration"], self.call_recorder(job["id"]), lambda: self.check_paused(job['id']))
         chunks = self.artifact(job["id"], "chunk")["chunks"]
         missing = [chunk for chunk in chunks if self.item(job["id"], "embed", chunk["id"]) is None]
         for start in range(0, len(missing), 64):
@@ -347,11 +358,19 @@ class IngestionPipeline:
 
     def stage_configure(self, job):
         config = job["configuration"]
-        return {"entityTypes": config["entityTypes"] or list(SDK_DEFAULT_ENTITY_TYPES), "relationshipTypes": [], "extractionInstructions": config.get("workspaceDescription") or "Extract explicitly supported entities and relationships with source attribution.", "profileOrigin": "sdk_default" if not config["entityTypes"] else "fixed_configuration"}
+        from .profiles import prepare_profile
+        from .categories import seed_settings
+        if config.get("corpusProfileId"):
+            return prepare_profile(self, job, config["corpusProfileId"])
+        return seed_settings(config["categories"], config["profileEntityCap"], config["profileRelationshipCap"])
+
+    def stage_mentions(self, job):
+        from .local_extraction import extract_early_mentions
+        return extract_early_mentions(self, job)
 
     def stage_extract(self, job):
-        from .extraction import extract_document
-        return extract_document(self, job)
+        from .local_extraction import extract_local
+        return extract_local(self, job)
 
     def stage_prepare(self, job):
         return {"relationshipVectors": 0, "providerCalls": 0}
@@ -403,7 +422,12 @@ class IngestionPipeline:
                 if not self.item(job["id"], "resolve", mention_id):
                     raise ValueError("Entity resolution artifact missing")
         fallback_count = (self.artifact(job["id"], "extract") or {}).get("fallbackChunks", 0)
-        return {"chunks": len(chunks), "assertions": assertions, "offsets": "exact_match", "fallbackChunks": fallback_count, "semanticValidation": "Exact source locations checked. Fallback chunks contain local mentions without relationships; scientific correctness is not independently established." if fallback_count else "LLM source grounding plus structural validation; scientific correctness not independently established"}
+        graph = document.get("codeGraph", {})
+        occurrences = [occurrence for entity in graph.get('entities', []) for occurrence in entity['occurrences']]
+        for record in graph.get("entities", []) + graph.get("relationships", []) + occurrences:
+            if document["text"][record["start"]:record["end"]] != record["quote"] or not record["quote"]:
+                raise ValueError("Code parser source offsets are inconsistent")
+        return {"chunks": len(chunks), "assertions": assertions, "offsets": "exact_match", "fallbackChunks": fallback_count, "structuralRelationships": len(graph.get("relationships", [])), "semanticValidation": "Source offsets and graph structure checked. Local semantic predictions are not independently verified. Code relations describe syntax, not runtime execution."}
 
     def stage_publish(self, job):
         from .publication import publish
