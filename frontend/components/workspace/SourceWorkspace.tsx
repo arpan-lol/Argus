@@ -15,6 +15,7 @@ import { GraphMap, type MapNode } from '@/components/source-explorer/GraphMap';
 import { useSearchOptions } from '@/hooks/use-search-options';
 import { api, type DocumentSummary, type EvidenceDocument } from '@/lib/evidence-types';
 import { statusLabel, type IngestionJob } from '@/lib/ingestion-types';
+import { GlassScene } from '@/components/liquid/glass-scene';
 
 
 
@@ -236,8 +237,9 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const selectedSource = document?.id === selectedNode?.documentId ? document : null;
   const sourceTitle = selectedSource?.title || (selectedNode?.type === 'document' ? selectedNode.preview || selectedNode.label : null);
 
-  return <div className={`ce-workspace ${sidebarOpen ? '' : 'ce-sidebar-collapsed'}`}>
-    <aside className="ce-sidebar">
+  return <div className={`ce-workspace lg-root ${sidebarOpen ? '' : 'ce-sidebar-collapsed'}`}>
+    <GlassScene variant="workspace" />
+    <aside className="ce-sidebar" data-glass-anchor="workspace:sidebar" data-glass-radius={20}>
       <div className="ce-brand"><img src="/argus-logo.svg" alt="" width={29} height={29} /><strong>Argus</strong><button className="ce-icon" onClick={() => setSidebarOpen(false)} aria-label="Collapse sidebar"><PanelLeftClose size={17} /></button></div>
       <a className="ce-project-return" href="/"><ArrowLeft size={17} />Projects</a>
       <div className="ce-navigation-label ce-project-name">{project?.name || 'Workspace'}</div>
@@ -248,6 +250,7 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
     <main className="ce-main">
       <ResizablePanelGroup direction="horizontal" className="ce-panels">
         <ResizablePanel defaultSize={52} minSize={30} className="ce-chat-panel">
+          <div className="ce-glass-anchor" data-glass-anchor="workspace:chat" data-glass-radius={20} />
           <div className="ce-chat-heading">{!sidebarOpen && <><button className="ce-icon" onClick={() => setSidebarOpen(true)} aria-label="Expand sidebar"><PanelLeftOpen size={18} /></button><span className="ce-mobile-brand">Argus</span></>}<span>Chat</span><button className="ce-icon ce-mobile-theme" onClick={toggleTheme} aria-label={`Switch to ${dark ? 'light' : 'dark'} mode`}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button><button className="ce-icon ce-mobile-source" onClick={() => window.document.querySelector('.ce-explorer-panel')?.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'})} aria-label="Open files and graph"><Network size={17} /></button></div>
           <div className="ce-messages" ref={messages}>
             {!turns.length && <div className="ce-chat-empty"><img src="/argus-logo.svg" alt="" width={46} height={46} /><h1>Start with a question.</h1><p>Ask Argus a question and open its citations.<br />{chatConfig ? `${chatConfig.model.toUpperCase()} · ${chatConfig.coverage.publishedDocuments} published sources available` : 'Connecting to the assistant…'}</p><div className="ce-suggestions"><button onClick={() => void submit(undefined, 'Summarize a published source')}>Summarize a published source<ArrowUp size={14} /></button><button onClick={() => void submit(undefined, 'What sources can you search?')}>What can you search?<ArrowUp size={14} /></button></div></div>}
@@ -257,6 +260,7 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
         </ResizablePanel>
         <ResizableHandle withHandle className="ce-resize" />
         <ResizablePanel defaultSize={48} minSize={28} className="ce-explorer-panel">
+          <div className="ce-glass-anchor" data-glass-anchor="workspace:explorer" data-glass-radius={20} />
           <dialog open ref={explorerDialog} className={`ce-explorer-shell ${explorerExpanded ? 'is-expanded' : ''}`} aria-labelledby="source-explorer-title" onCancel={event => { event.preventDefault(); if (explorerExpanded) setExplorerExpanded(false); }}>
           <div className="ce-explorer-heading"><div className="ce-workspace-title"><h2 id="source-explorer-title" className="ce-project-name">{project?.name || 'Workspace'}</h2><span className={`ce-live-processing ${runningJob ? 'is-working' : ''}`} role="status" aria-live="polite" title={liveProcessingStatus}>{liveProcessingStatus}</span></div><div className="ce-explorer-actions"><button className="ce-add-files" onClick={upload} disabled={!project}><Plus size={16} />Add files</button></div></div>
           {configurationOpen && <section id="engine-configuration" className="ce-configuration"><div><strong>Engine configuration</strong><button className="ce-icon" onClick={() => setConfigurationOpen(false)} aria-label="Close engine configuration"><X size={16} /></button></div><label><span>Graph expansion<small>Follow shared connections after search</small></span><Switch checked={options.graphExpansion} onCheckedChange={checked => updateOptions({ graphExpansion: checked })} /></label><p>{chatConfig?.model.toUpperCase() || 'GPT-5'} · {chatConfig?.coverage.publishedDocuments ?? '…'} searchable sources in this project.</p><p>{project?.description || 'Add sources to describe this workspace.'}</p></section>}

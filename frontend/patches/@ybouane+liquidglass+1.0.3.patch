@@ -1,0 +1,99 @@
+diff --git a/node_modules/@ybouane/liquidglass/dist/HtmlCapture.js b/node_modules/@ybouane/liquidglass/dist/HtmlCapture.js
+index 9bb341d..acc3f99 100644
+--- a/node_modules/@ybouane/liquidglass/dist/HtmlCapture.js
++++ b/node_modules/@ybouane/liquidglass/dist/HtmlCapture.js
+@@ -226,7 +226,7 @@ async function buildFontBlocks() {
+             await sheet.replace(cssText);
+             for (const rule of sheet.cssRules) {
+                 if (rule.type === CSSRule.FONT_FACE_RULE) {
+-                    fontFaceRules.push(rule.cssText);
++                    fontFaceRules.push({ text: rule.cssText, base: link.href });
+                 }
+             }
+         }
+@@ -241,7 +241,7 @@ async function buildFontBlocks() {
+         try {
+             for (const rule of Array.from(sheet.cssRules || [])) {
+                 if (rule.type === CSSRule.FONT_FACE_RULE) {
+-                    fontFaceRules.push(rule.cssText);
++                    fontFaceRules.push({ text: rule.cssText, base: document.baseURI });
+                 }
+             }
+         }
+@@ -262,12 +262,12 @@ async function buildFontBlocks() {
+         }
+     }
+     const candidates = loadedFamilies.size > 0
+-        ? fontFaceRules.filter((r) => loadedFamilies.has(parseFontFamily(r).toLowerCase()))
++        ? fontFaceRules.filter((r) => loadedFamilies.has(parseFontFamily(r.text).toLowerCase()))
+         : fontFaceRules;
+     // 3. For each surviving rule, parse its descriptors, fetch its
+     //    font file(s) as base64 data URLs, and produce an
+     //    EmbeddedFontBlock.
+-    const embedded = await Promise.all(candidates.map(async (ruleText) => {
++    const embedded = await Promise.all(candidates.map(async ({ text: ruleText, base }) => {
+         // Replace every url(...) with a base64 data URL.
+         const urlRegex = /url\(\s*['"]?([^'")\s]+)['"]?\s*\)/g;
+         const urlMatches = Array.from(ruleText.matchAll(urlRegex));
+@@ -276,7 +276,13 @@ async function buildFontBlocks() {
+             const url = m[1];
+             if (url.startsWith('data:'))
+                 continue;
+-            const dataUrl = await fetchAsDataUrl(url);
++            let resolved = url;
++            try {
++                resolved = new URL(url, base).href;
++            }
++            catch {
++            }
++            const dataUrl = await fetchAsDataUrl(resolved);
+             if (dataUrl) {
+                 css = css.replace(m[0], `url(${dataUrl})`);
+             }
+diff --git a/node_modules/@ybouane/liquidglass/dist/index.js b/node_modules/@ybouane/liquidglass/dist/index.js
+index 10897f2..09b35c1 100644
+--- a/node_modules/@ybouane/liquidglass/dist/index.js
++++ b/node_modules/@ybouane/liquidglass/dist/index.js
+@@ -941,7 +941,7 @@ async function buildFontBlocks() {
+       await sheet.replace(cssText);
+       for (const rule of sheet.cssRules) {
+         if (rule.type === CSSRule.FONT_FACE_RULE) {
+-          fontFaceRules.push(rule.cssText);
++          fontFaceRules.push({ text: rule.cssText, base: link.href });
+         }
+       }
+     } catch {
+@@ -952,7 +952,7 @@ async function buildFontBlocks() {
+     try {
+       for (const rule of Array.from(sheet.cssRules || [])) {
+         if (rule.type === CSSRule.FONT_FACE_RULE) {
+-          fontFaceRules.push(rule.cssText);
++          fontFaceRules.push({ text: rule.cssText, base: document.baseURI });
+         }
+       }
+     } catch {
+@@ -968,16 +968,21 @@ async function buildFontBlocks() {
+       }
+     }
+   }
+-  const candidates = loadedFamilies.size > 0 ? fontFaceRules.filter((r) => loadedFamilies.has(parseFontFamily(r).toLowerCase())) : fontFaceRules;
++  const candidates = loadedFamilies.size > 0 ? fontFaceRules.filter((r) => loadedFamilies.has(parseFontFamily(r.text).toLowerCase())) : fontFaceRules;
+   const embedded = await Promise.all(
+-    candidates.map(async (ruleText) => {
++    candidates.map(async ({ text: ruleText, base }) => {
+       const urlRegex = /url\(\s*['"]?([^'")\s]+)['"]?\s*\)/g;
+       const urlMatches = Array.from(ruleText.matchAll(urlRegex));
+       let css = ruleText;
+       for (const m of urlMatches) {
+         const url = m[1];
+         if (url.startsWith("data:")) continue;
+-        const dataUrl = await fetchAsDataUrl(url);
++        let resolved = url;
++        try {
++          resolved = new URL(url, base).href;
++        } catch {
++        }
++        const dataUrl = await fetchAsDataUrl(resolved);
+         if (dataUrl) {
+           css = css.replace(m[0], `url(${dataUrl})`);
+         }

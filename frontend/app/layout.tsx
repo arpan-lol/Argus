@@ -12,5 +12,5 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><body className={`${geist.variable} ${mono.variable}`}>{children}</body></html>;
+  return <html lang="en" suppressHydrationWarning><body className={`${geist.variable} ${mono.variable}`}><script dangerouslySetInnerHTML={{ __html: "try{if(localStorage.getItem('falkor-theme')==='dark')document.documentElement.classList.add('dark')}catch(error){}" }} />{children}</body></html>;
 }
