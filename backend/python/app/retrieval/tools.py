@@ -57,26 +57,38 @@ def find_entities(session, args):
 
 
 def read_chunks(session, args):
-    rows = session.chunks(args.chunk_ids)
+    requested = list(dict.fromkeys(args.chunk_ids))
+    rows = session.chunks(requested)
+    unknown = [key for key in requested if key not in rows]
+    following = session.cypher("MATCH (c:Chunk)-[:NEXT_CHUNK]->(n:Chunk) WHERE c.id IN $ids AND c.active=true AND n.active=true AND c.jobId IN $jobs AND n.jobId=c.jobId AND n.documentId=c.documentId RETURN c.id,n.id ORDER BY c.id,n.id LIMIT 11", {"ids": list(rows)}, "adjacent source context") if rows else []
+    neighbors = list(dict.fromkeys(row[1] for row in following if row[1] not in requested))
+    if len(neighbors) > 10 - len(requested):
+        session.truncate("Adjacent source context capped at 10 total chunks")
+    adjacent = neighbors[:10 - len(requested)]
+    rows.update(session.chunks(adjacent) if adjacent else {})
     items = []
-    for chunk_id in dict.fromkeys(args.chunk_ids):
+    for chunk_id in requested + adjacent:
         if chunk_id not in rows:
             continue
         entities = session.cypher("MATCH (c:Chunk {id:$chunk})-[:MENTIONS]->(e:Entity) WHERE c.active=true AND c.jobId IN $jobs RETURN e.id,e.label,e.type ORDER BY e.label,e.id LIMIT 41", {"chunk": chunk_id}, "chunk entities")
         if len(entities) > 40:
             session.truncate("Chunk entity list capped at 40")
         items.append({**session.excerpt(rows[chunk_id]), "entities": [{"id": row[0], "name": row[1], "type": row[2]} for row in entities[:40]]})
-    return {"items": items, "unknownChunkIds": [key for key in args.chunk_ids if key not in rows], "connectionMeaning": "Chunk mentions an entity; this alone does not assert a semantic relationship"}
+    return {"items": items, "unknownChunkIds": unknown, "adjacentChunkIds": [key for key in adjacent if key in rows], "connectionMeaning": "Additional chunks follow requested passages in the same published source. Adjacency and shared mentions do not assert semantic relationships."}
 
 
 def assertion_rows(session, entity_id, direction="both", predicates=None, polarity=None, limit=20):
     rows = session.cypher("MATCH (s:Entity)<-[:SUBJECT]-(a:Assertion)-[:OBJECT]->(o:Entity),(a)-[:SUPPORTED_BY]->(c:Chunk) WHERE a.active=true AND c.active=true AND a.jobId IN $jobs AND c.jobId=a.jobId AND (($direction='outgoing' AND s.id=$entity) OR ($direction='incoming' AND o.id=$entity) OR ($direction='both' AND (s.id=$entity OR o.id=$entity))) AND (size($predicates)=0 OR a.predicate IN $predicates) AND ($polarity IS NULL OR a.polarity=$polarity) RETURN a.id,a.jobId,a.predicate,a.polarity,a.conditions,a.quote,a.startOffset,a.endOffset,c.id,s.id,s.label,o.id,o.label,a.extractionMethod,a.confidence,a.resolution,a.llmVerified,a.polarityStatus ORDER BY a.id LIMIT $limit", {"entity": entity_id, "direction": direction, "predicates": predicates or [], "polarity": polarity, "limit": limit + 1}, "assertion adjacency")
     if len(rows) > limit:
         session.truncate("Assertion fanout/result limit reached; traversal is incomplete")
-    support = session.chunks([row[8] for row in rows[:limit]])
+    return supported_assertions(session, rows[:limit])
+
+
+def supported_assertions(session, rows):
+    support = session.chunks([row[8] for row in rows])
     assertions = []
     seen = set()
-    for row in rows[:limit]:
+    for row in rows:
         if row[0] in seen:
             continue
         chunk = support.get(row[8])
@@ -170,3 +182,6 @@ def expand_connections(session, args):
 
 def find_paths(session, args):
     return traverse(session, [args.source_entity_id], args.max_depth, args.direction, args.predicates, 100, args.target_entity_id, args.limit)
+
+
+from .research import rank_entities, recent_source_updates, source_authors

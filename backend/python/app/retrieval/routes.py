@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import ValidationError
 
 from . import tools
-from .contracts import Invocation, SearchSources, TOOLS, catalog
+from .contracts import Invocation, SearchSources, TOOLS, ARTICLE_TOOLS, catalog
 from .session import BudgetReached, Session
 
 
@@ -13,6 +13,8 @@ router = APIRouter()
 
 
 def execute(name, arguments, project_id=None):
+    if name == "recall":
+        return {"tool": "recall", "outcome": "capability_disabled", "items": [], "reason": "Long-term findings memory is disabled by user choice", "generation": False}
     if name not in TOOLS:
         raise HTTPException(404, "Unknown retrieval tool")
     try:
@@ -25,7 +27,10 @@ def execute(name, arguments, project_id=None):
         return session.finish({"items": []}, "no_published_sources")
     try:
         payload = getattr(tools, name)(session, validated)
-        outcome = "unknown_entity" if payload.get("unknownEntityIds") else "partial" if payload.get("partial") else None
+        unknown = next((kind for field, kind in (("unknownChunkIds", "chunk"), ("unknownEntityIds", "entity"), ("unknownDocumentIds", "document")) if payload.get(field)), None)
+        outcome = ("partial" if payload.get("items") else "unknown_" + unknown) if unknown else "partial" if payload.get("partial") else None
+        if unknown:
+            payload.update(inputError=True, recovery="Unknown lookup IDs do not establish missing source facts. Use search_sources or find_entities to discover the correct IDs before retrying.")
     except BudgetReached:
         payload, outcome = {"items": []}, "budget_exceeded"
     except Exception:
@@ -37,7 +42,7 @@ def execute(name, arguments, project_id=None):
 
 @router.get("/retrieval/tools")
 def tool_catalog():
-    return {"tools": catalog(), "scope": "Published semantic sources only", "rawCypher": False, "schemaAccess": False, "agentLoop": True, "chatEndpoint": "/api/chat", "langgraphBinding": "app.retrieval.bindings.get_tools"}
+    return {"tools": catalog(), "scope": "Published semantic sources only", "rawCypher": False, "schemaAccess": False, "agentLoop": True, "chatEndpoint": "/api/chat", "langgraphBinding": "app.retrieval.bindings.get_tools", "articleTools": ARTICLE_TOOLS, "longTermMemory": False, "mcp": {"transport": "stdio", "module": "app.retrieval.mcp_server"}}
 
 
 @router.post("/retrieval/tools/{name}")

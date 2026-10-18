@@ -89,7 +89,7 @@ export function FileExplorer({ projectId, refreshToken = 0, onUpload, focusDocum
   /* File reading is temporarily disabled.
   useEffect(() => {
     if (selectedDocumentId) { setArticleId(selectedDocumentId); setUploadedSelection(focusCollection === 'pipeline'); setPinnedJobId(focusJobId); }
-    if (selectedChunkId) setMode('chunks');
+    setMode(selectedChunkId ? 'chunks' : 'reader');
   }, [selectedDocumentId, selectedChunkId, focusCollection, focusJobId]);
 
   useEffect(() => {

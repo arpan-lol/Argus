@@ -316,3 +316,5 @@ button:disabled { cursor:not-allowed; }
 .ce-comparison-scroll table { border-collapse: collapse; font-size: 12px; min-width: 480px; }
 .ce-comparison-scroll td, .ce-comparison-scroll th { text-align: left; vertical-align: top; padding: 10px; border-bottom: 1px solid var(--ce-line); }
 .ce-chat-resume { display: flex; gap: 6px; align-items: center; padding: 8px 10px; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 6px; cursor: pointer; }
+
+.ce-file-byline { margin: 8px 24px; font-size: 12px; line-height: 1.6; color: var(--ce-muted); overflow-wrap: anywhere; }
