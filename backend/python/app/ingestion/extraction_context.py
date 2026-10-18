@@ -1,9 +1,11 @@
 def contextual_input(chunk, text):
     headings = chunk.get('headingContext', [])
-    if not headings:
+    headers = [str(header) for block in chunk.get('sourceContext', []) for header in (block.get('structured') or {}).get('headers', []) if header]
+    if not headings and not headers:
         return text, 0
-    label = ' / '.join(str(value) for value in headings)[-256:]
-    prefix = 'Source section: ' + label + '\nSource passage:\n'
+    labels = [str(value.get('title', '')) if isinstance(value, dict) else str(value) for value in headings]
+    label = ' / '.join(labels)[-256:]
+    prefix = ('Source section: ' + label + '\n' if label else '') + ('Table columns: ' + ', '.join(dict.fromkeys(headers))[:256] + '\n' if headers else '') + 'Source passage:\n'
     return prefix + text, len(prefix)
 
 

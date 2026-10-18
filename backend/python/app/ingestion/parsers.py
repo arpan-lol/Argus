@@ -6,6 +6,7 @@ import io
 import json
 import re
 import zipfile
+from itertools import chain
 from pathlib import Path
 
 from defusedxml import ElementTree
@@ -164,7 +165,7 @@ def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_a
             "bodyRetainedTextSha256": hashlib.sha256(body_retained.encode("utf-8")).hexdigest(),
             "accounting": "exact_ordered_non_whitespace_characters",
             "scope": "available_jats_text",
-            "requiresAttention": bool(reasons),
+            "requiresAttention": bool(body_available) and not complete,
             "attentionReasons": reasons,
         }
         metadata["warnings"].extend(reasons)
@@ -204,16 +205,25 @@ def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_a
     elif suffix == ".xlsx":
         from openpyxl import load_workbook
         from openpyxl.utils import get_column_letter
-        for sheet in load_workbook(io.BytesIO(raw), read_only=True, data_only=False):
-            rows = list(sheet.iter_rows())
-            if not rows:
+        workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=False)
+        cached = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        metadata['warnings'].append('Spreadsheet formulas are retained and never executed; cached values may be absent or stale')
+        metadata['sheetStates'] = {sheet.title: sheet.sheet_state for sheet in workbook}
+        for sheet in workbook:
+            rows = iter(sheet.iter_rows())
+            first = next(rows, None)
+            if first is None:
                 continue
-            headers = [str(cell.value) if cell.value is not None else f"Column {cell.column}" for cell in rows[0]]
-            for index, row in enumerate(rows, start=1):
+            headers = [str(cell.value) if cell.value is not None else f"Column {column}" for column, cell in enumerate(first, 1)]
+            cached_rows = iter(cached[sheet.title].iter_rows())
+            for index, row in enumerate(chain([first], rows), start=1):
                 cells = ["" if cell.value is None else str(cell.value) for cell in row]
                 rendered, structured = ("\t".join(cells), {"headers": headers, "rows": [cells], "isHeader": True}) if index == 1 else _table_text([cells], headers=headers)
-                structured["cells"] = [{"coordinate": cell.coordinate, "value": None if cell.value is None else str(cell.value), "formula": str(cell.value) if cell.data_type == "f" else None, "dataType": cell.data_type} for cell in row]
-                add(rendered, "table", {"sheetName": sheet.title, "rowNumber": index, "cellRange": f"A{index}:{get_column_letter(sheet.max_column)}{index}"}, structured)
+                cached_row = next(cached_rows)
+                structured["cells"] = [{"coordinate": f"{get_column_letter(column)}{index}", "value": None if cell.value is None else str(cell.value), "formula": str(cell.value) if cell.data_type == "f" else None, "cachedValue": None if previous.value is None else str(previous.value), "dataType": cell.data_type} for column, (cell, previous) in enumerate(zip(row, cached_row, strict=True), 1)]
+                add(rendered, "table", {"sheetName": sheet.title, "rowNumber": index, "cellRange": f"A{index}:{get_column_letter(len(row))}{index}"}, structured)
+        workbook.close()
+        cached.close()
     elif suffix in {".csv", ".tsv"}:
         rows = list(csv.reader(io.StringIO(decode_source_text(raw)), delimiter="\t" if suffix == ".tsv" else ","))
         headers = rows[0] if rows else []

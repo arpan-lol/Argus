@@ -108,6 +108,8 @@ def extract_local(pipeline, job):
                     quote = c['text'][start:end]
                     if not quote or quote != mention['text']:
                         raise ValueError('Initial GLiNER mention offsets do not match the source')
+                    if not valid_entity_mention(quote, mention['label'], c['text']):
+                        continue
                     span = source_span(c, start, end)
                     output['entities'].append({'key': 'early_' + str(len(output['entities'])), 'name': quote, 'entity_type': mention['label'], 'description': '', 'quote': quote, 'confidence': float(mention['score']), 'sourceSpan': span, 'sourceSpans': [span], 'sourceSpanStatus': 'exact', 'extractionMethod': 'gliner', 'llmVerified': False})
                     retained.add((start, end))
