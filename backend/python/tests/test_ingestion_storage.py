@@ -76,7 +76,7 @@ def check_storage():
         return payload
 
     try:
-        with patch.object(Providers, 'structured', settings_call), patch.object(Providers, 'embed', vectors), patch.object(Providers, 'gliner', return_value={'mentions': []}), patch('app.ingestion.local_extraction.relex_many', local_relations), TestClient(app) as client:
+        with patch.object(Providers, 'structured', settings_call), patch.object(Providers, 'embed', vectors), patch.object(Providers, 'gliner_many', lambda self, texts, types: [{'mentions': []} for text in texts]), patch('app.ingestion.local_extraction.relex_many', local_relations), TestClient(app) as client:
             assert len(client.get('/api/projects/categories').json()['categories']) == 8
             project = client.post('/api/projects', json={'name': 'Synthetic code check', 'description': 'Synthetic Python repository for an ingestion test', 'categories': ['code_repository']}).json()['id']
             archive = io.BytesIO()
