@@ -312,6 +312,45 @@ button:disabled { cursor:not-allowed; }
 .ce-chat-activity ol { padding: 8px 0 0 22px; }
 .ce-chat-activity li { padding: 5px 0; }
 .ce-chat-activity li small { display: block; margin-top: 3px; }
+.ce-chat-trace { display:flex; flex-direction:column; gap:9px; margin:16px 0 20px; }
+.ce-chat-live { padding:3px 0 6px; }
+.ce-tool-block { border:1px solid var(--ce-line); border-radius:11px; background:var(--ce-bg); overflow:hidden; }
+.ce-tool-block > header { display:flex; align-items:center; gap:10px; min-height:45px; padding:10px 13px; background:var(--ce-surface); }
+.ce-tool-block > header strong { font-size:12px; font-weight:600; }
+.ce-tool-block > header small { margin-left:auto; color:var(--ce-muted); font-size:10px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.ce-tool-icon { display:grid; place-items:center; color:var(--ce-muted); }
+.ce-tool-outcome { margin:0; padding:10px 13px; color:var(--ce-muted); font-size:11px; line-height:1.6; }
+.ce-tool-items { display:grid; gap:0; padding:0 13px; }
+.ce-tool-items > div { padding:10px 0; border-top:1px solid var(--ce-line); }
+.ce-tool-items > div:first-child { border-top:0; }
+.ce-tool-items strong { display:block; font-size:11px; font-weight:600; line-height:1.5; overflow-wrap:anywhere; }
+.ce-tool-items p,.ce-traversal li p { color:var(--ce-muted); font-size:11px; line-height:1.6; margin:5px 0 0; overflow-wrap:anywhere; white-space:pre-wrap; }
+.ce-tool-items > small { padding:9px 0; border-top:1px solid var(--ce-line); color:var(--ce-muted); font-size:10px; }
+.ce-tool-source { display:inline-flex; align-items:center; gap:4px; margin-top:7px; padding:0; border:0; background:transparent; color:var(--ce-text); font-size:10px; font-weight:500; text-align:left; text-decoration:underline; text-underline-offset:3px; cursor:pointer; }
+.ce-tool-source:hover { color:#087a55; }
+.ce-traversal { border-top:1px solid var(--ce-line); padding:11px 13px 12px; }
+.ce-traversal-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.ce-traversal-heading span,.ce-traversal-heading button { display:inline-flex; align-items:center; gap:5px; font-size:11px; }
+.ce-traversal-heading span { font-weight:600; }
+.ce-traversal-heading button { border:0; padding:3px; color:var(--ce-text); background:transparent; cursor:pointer; white-space:nowrap; }
+.ce-traversal-heading button:hover { text-decoration:underline; }
+.ce-traversal ol { list-style:none; margin:10px 0 0; padding:0; }
+.ce-traversal li { display:flex; gap:10px; padding:9px 0; border-top:1px solid var(--ce-line); }
+.ce-hop-number { flex:0 0 19px; width:19px; height:19px; display:grid; place-items:center; border-radius:50%; background:#e85b5920; color:#b63837; font-size:10px; font-weight:700; }
+.ce-traversal li > div { min-width:0; }
+.ce-traversal li strong { font-size:11px; line-height:1.5; overflow-wrap:anywhere; }
+.ce-traversal li em { color:var(--ce-muted); font-style:normal; font-weight:400; }
+.ce-hop-status { display:block; margin-top:5px; color:var(--ce-muted); font-size:10px; }
+.ce-traversal-note { margin:7px 0 0; color:var(--ce-muted); font-size:10px; line-height:1.5; }
+.ce-answer-body { border:1px solid var(--ce-line); border-radius:12px; padding:17px 18px; background:var(--ce-bg); }
+.ce-answer-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; padding-bottom:12px; border-bottom:1px solid var(--ce-line); font-size:12px; font-weight:650; }
+.ce-answer-heading small { display:inline-flex; align-items:center; gap:4px; color:var(--ce-muted); font-size:10px; font-weight:400; }
+.ce-answer-trail { display:flex; align-items:center; gap:10px; width:100%; margin-top:15px; padding:12px; border:1px solid #e85b594d; border-radius:8px; background:#e85b590b; color:var(--ce-text); text-align:left; cursor:pointer; }
+.ce-answer-trail > svg:first-child { color:#c74745; flex-shrink:0; }
+.ce-answer-trail > span { display:grid; gap:3px; flex:1; }
+.ce-answer-trail strong { font-size:11px; }
+.ce-answer-trail small { font-size:10px; color:var(--ce-muted); }
+.ce-answer-trail:hover { border-color:#e85b59; }
 .ce-answer-paragraph { margin: 18px 0; }
 .ce-answer-paragraph p { margin: 0; white-space: pre-wrap; line-height: 1.75; overflow-wrap: anywhere; }
 .ce-answer-citations { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }

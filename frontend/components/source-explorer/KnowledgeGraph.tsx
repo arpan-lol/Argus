@@ -10,7 +10,7 @@ type Relationship = { id: string; source: string; target: string; label: string;
 type KnowledgeView = { nodes: Entity[]; entityPage?: Entity[]; edges: Relationship[]; status?: string; pagination: { entityTotal: number; entityOffset: number; entityLimit: number; hasMoreEntities: boolean; relationshipTotal: number; relationshipOffset: number; relationshipLimit: number; hasMoreRelationships: boolean } };
 type Mention = { id: string; text: string; chunkId: string; chunkText?: string; documentId: string; documentTitle: string; sourceSpans?: unknown[]; extractionMethod?: string; confidence?: number | null };
 type Mentions = { entity: Entity; mentions: Mention[]; counts: { documents: number; chunks: number; occurrences: number; occurrenceCountTruncated?: boolean; status?: string }; pagination: { total: number; offset: number; limit: number; hasMore: boolean } };
-type Props = { apiRoot: string; refreshToken?: number; focus?: { nodeId: string; nonce: number } | null; onSelect?: (node: Entity) => void; onSource?: (source: { nodeId: string; label?: string }) => void };
+type Props = { apiRoot: string; refreshToken?: number; focus?: { nodeId: string; nonce: number } | null; trace?: { assertionIds: string[]; nonce: number } | null; onSelect?: (node: Entity) => void; onSource?: (source: { nodeId: string; label?: string }) => void };
 type Camera = { x: number; y: number; zoom: number };
 const ENTITY_PAGE = 40;
 const RELATION_PAGE = 60;
@@ -28,7 +28,7 @@ const structuredMention = (mention: Mention) => {
 const hue = (value: string) => { let hash = 0; for (const char of value) hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0; return Math.abs(hash) % 5; };
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 
-export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, onSelect, onSource }: Props) {
+export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSelect, onSource }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const animation = useRef(0);
   const drag = useRef<{ x: number; y: number; camera: Camera } | null>(null);
@@ -60,6 +60,8 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, onSelect, onS
   const externalSelection = useRef<string | null>(null);
   const nodes = useMemo(() => new Map(view.nodes.map(node => [node.id, node])), [view.nodes]);
   const edges = useMemo(() => view.edges.filter(edge => nodes.has(edge.source) && nodes.has(edge.target) && (relationFilter === 'all' || (relationFilter === 'native' ? native(edge) && !review(edge) : review(edge)))), [view.edges, nodes, relationFilter]);
+  const tracedEdges = useMemo(() => new Set(trace?.assertionIds || []), [trace]);
+  const tracedNodes = useMemo(() => new Set(view.edges.filter(edge => tracedEdges.has(edge.id)).flatMap(edge => [edge.source, edge.target])), [view.edges, tracedEdges]);
   const related = useMemo(() => selected ? view.edges.filter(edge => edge.source === selected.id || edge.target === selected.id) : [], [selected, view.edges]);
   const matching = useMemo(() => (view.entityPage || view.nodes).filter(node => `${node.label} ${node.entityType}`.toLowerCase().includes(search.toLowerCase())), [search, view.nodes, view.entityPage]);
 
@@ -114,6 +116,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, onSelect, onS
     const params = new URLSearchParams({ offset: String(offset), limit: String(ENTITY_PAGE), relationOffset: String(relationOffset), relationLimit: String(RELATION_PAGE) });
     if (focusId) params.set('focus', focusId);
     if (query) params.set('q', query);
+    trace?.assertionIds.forEach(identifier => params.append('path', identifier));
     api<KnowledgeView>(`${apiRoot}/map/knowledge?${params}`, { signal: controller.signal }).then(result => {
       if (controller.signal.aborted) return;
       setView(result); setLoading(false);
@@ -125,7 +128,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, onSelect, onS
       if (!controller.signal.aborted) { setError(reason instanceof Error ? reason.message : 'The knowledge graph could not load'); setLoading(false); }
     });
     return () => controller.abort();
-  }, [apiRoot, offset, relationOffset, focusId, refreshToken, reload, query]);
+  }, [apiRoot, offset, relationOffset, focusId, refreshToken, reload, query, trace]);
 
   useEffect(() => {
     if (!loading && fitPending.current && view.nodes.length) { fit(); fitPending.current = false; }
@@ -135,6 +138,17 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, onSelect, onS
     if (!focus?.nodeId) return;
     externalSelection.current = focus.nodeId; fitPending.current = true; setFocusId(focus.nodeId); setRelationOffset(0);
   }, [focus?.nodeId, focus?.nonce]);
+
+  useEffect(() => {
+    if (!trace?.assertionIds.length || loading) return;
+    const pathNodes = view.nodes.filter(node => tracedNodes.has(node.id));
+    if (!pathNodes.length) return;
+    const minX = Math.min(...pathNodes.map(node => node.x)) - 90;
+    const maxX = Math.max(...pathNodes.map(node => node.x)) + 90;
+    const minY = Math.min(...pathNodes.map(node => node.y)) - 90;
+    const maxY = Math.max(...pathNodes.map(node => node.y)) + 90;
+    moveCamera({ x: (minX + maxX) / 2, y: (minY + maxY) / 2, zoom: Math.min(1.6, Math.max(.035, Math.min((size.width - 50) / (maxX - minX), (size.height - 60) / (maxY - minY)))) }, true);
+  }, [trace?.nonce, loading, view.nodes, tracedNodes, size, moveCamera]);
 
   useEffect(() => {
     if (!selected) { setMentions(null); return; }
@@ -230,13 +244,13 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, onSelect, onS
             const midX = (sourceX + targetX) / 2 - uy * bend, midY = (sourceY + targetY) / 2 + ux * bend;
             const path = edge.source === edge.target ? `M ${source.x - 5} ${source.y - 8} C ${source.x - 65} ${source.y - 90} ${source.x + 65} ${source.y - 90} ${source.x + 5} ${source.y - 8}` : `M ${sourceX} ${sourceY} Q ${midX} ${midY} ${targetX} ${targetY}`;
             const faded = selected && edge.source !== selected.id && edge.target !== selected.id;
-            return <g key={edge.id} data-graph-control="edge" className={`${styles.edge} ${native(edge) && !review(edge) ? styles.native : review(edge) ? styles.review : styles.unverified} ${selectedEdge?.id === edge.id ? styles.activeEdge : ''} ${faded ? styles.faded : ''}`} role="button" tabIndex={0} aria-label={`${source.label} ${human(edge.label)} ${target.label}. ${relationshipStatus(edge)}`} onMouseEnter={() => setHoverId(edge.id)} onMouseLeave={() => setHoverId(null)} onClick={() => { setSelectedEdge(edge); setSelected(null); }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedEdge(edge); setSelected(null); } }}>
+            return <g key={edge.id} data-graph-control="edge" className={`${styles.edge} ${native(edge) && !review(edge) ? styles.native : review(edge) ? styles.review : styles.unverified} ${tracedEdges.has(edge.id) ? styles.tracedEdge : ''} ${selectedEdge?.id === edge.id ? styles.activeEdge : ''} ${faded && !tracedEdges.has(edge.id) ? styles.faded : ''}`} role="button" tabIndex={0} aria-label={`${source.label} ${human(edge.label)} ${target.label}. ${relationshipStatus(edge)}`} onMouseEnter={() => setHoverId(edge.id)} onMouseLeave={() => setHoverId(null)} onClick={() => { setSelectedEdge(edge); setSelected(null); }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedEdge(edge); setSelected(null); } }}>
               <title>{`${source.label} → ${human(edge.label)} → ${target.label}\n${relationshipStatus(edge)}`}</title>
               <path className={styles.edgeHit} d={path} /><path className={styles.edgeLine} d={path} markerEnd={`url(#${id}-arrow)`} />
               {(length * camera.zoom > 140 || selectedEdge?.id === edge.id || hoverId === edge.id) && <text className={styles.edgeLabel} style={{ fontSize: 10 / camera.zoom, strokeWidth: 4 / camera.zoom }} x={midX} y={midY - 5 / camera.zoom} textAnchor="middle">{clip(human(edge.label), 25)}</text>}
             </g>;
           })}
-          {view.nodes.map(node => <g key={node.id} data-graph-control="node" role="button" tabIndex={0} aria-label={`${node.label}, ${human(node.entityType)}, ${node.mentionCount ?? 0} mentions`} className={`${styles.node} ${styles[`hue${hue(node.entityType)}`]} ${selected?.id === node.id ? styles.selectedNode : ''} ${search && !matching.some(match => match.id === node.id) ? styles.faded : ''}`} transform={`translate(${node.x} ${node.y})`} onMouseEnter={() => setHoverId(node.id)} onMouseLeave={() => setHoverId(null)} onClick={() => select(node)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); select(node); } }}>
+          {view.nodes.map(node => <g key={node.id} data-graph-control="node" role="button" tabIndex={0} aria-label={`${node.label}, ${human(node.entityType)}, ${node.mentionCount ?? 0} mentions`} className={`${styles.node} ${styles[`hue${hue(node.entityType)}`]} ${tracedNodes.has(node.id) ? styles.tracedNode : ''} ${selected?.id === node.id ? styles.selectedNode : ''} ${search && !matching.some(match => match.id === node.id) && !tracedNodes.has(node.id) ? styles.faded : ''}`} transform={`translate(${node.x} ${node.y})`} onMouseEnter={() => setHoverId(node.id)} onMouseLeave={() => setHoverId(null)} onClick={() => select(node)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); select(node); } }}>
             <title>{`${node.label}\n${human(node.entityType)}`}</title><circle r={(selected?.id === node.id ? 6 : 4) / camera.zoom} style={{ strokeWidth: 1.5 / camera.zoom }} />{visibleLabels.has(node.id) && <text y={18 / camera.zoom} style={{ fontSize: 11 / camera.zoom, strokeWidth: 4 / camera.zoom }} textAnchor="middle">{clip(node.label, 30)}</text>}
           </g>)}
         </g>
