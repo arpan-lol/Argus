@@ -8,6 +8,7 @@ import re
 import zipfile
 from itertools import chain
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from defusedxml import ElementTree
 
@@ -296,6 +297,16 @@ def parse(path, max_decompressed_bytes=209715200, max_text_chars=20971520, max_a
                 rendered = json.dumps(record, ensure_ascii=False, sort_keys=True)
                 add(rendered, "record", {"structuralPath": f"record/{index + 1}", "recordNumber": index + 1}, {"record": record})
         else:
+            front = text[:4096].split('\n\n', 1)[0]
+            for line in front.splitlines():
+                key, separator, value = line.partition(':')
+                value = value.strip()
+                if separator and key.strip().casefold() == 'title' and value:
+                    metadata['title'] = value[:500]
+                if separator and key.strip().casefold() in {'original url', 'source url'}:
+                    parsed_url = urlsplit(value)
+                    if parsed_url.scheme in {'http', 'https'} and parsed_url.hostname and not parsed_url.username and not parsed_url.password:
+                        metadata['sourceUrl'] = value
             for index, paragraph in enumerate(re.split(r"\n\s*\n", text)):
                 add(paragraph, "paragraph", {"structuralPath": f"block/{index}"})
     if not blocks:
