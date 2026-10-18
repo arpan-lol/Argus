@@ -6,9 +6,10 @@ from unittest import TestCase, mock
 
 import httpx
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph
 from openai import OpenAI
 
-from app.investigation.runtime import Investigation, RunBudgetReached, collect_sources, compact, deduplicate_tool_passages, validate_sources
+from app.investigation.runtime import Investigation, RunBudgetReached, State, collect_sources, compact, deduplicate_tool_passages, validate_sources
 from app.investigation import service
 
 
@@ -173,6 +174,14 @@ class InvestigationTest(TestCase):
         self.assertEqual(state["report"]["purpose"], "insufficient_support")
         self.assertEqual(tool.call_count, 2)
 
+    def test_partial_lookup_does_not_discard_a_supported_answer(self):
+        state = initial()
+        state.update(tool_count=1, sources={"S1": source()}, messages=[{"role": "tool", "tool_call_id": "partial", "content": json.dumps({"outcome": "partial", "items": [source()], "inputError": True, "unknownChunkIds": ["unavailable"]})}])
+        result = self.runtime(mock.Mock()).check_report(report("source_answer", ["S1"]), state)
+        self.assertEqual(result.purpose, "source_answer")
+        with self.assertRaisesRegex(ValueError, "lookup"):
+            self.runtime(mock.Mock()).check_report(report("insufficient_support"), state)
+
     def test_schema_errors_are_recoverable_without_running_bad_tool(self):
         model = mock.Mock(side_effect=[
             (call("search_sources", {"query": "valid query", "limit": 900}, "bad-limit"), None),
@@ -186,9 +195,26 @@ class InvestigationTest(TestCase):
         self.assertEqual(state["tool_count"], 2)
 
     def test_validation_repair_can_use_tools_from_saved_synthesis_checkpoint(self):
-        model = mock.Mock(return_value=(call("search_sources", {"query": "repair", "mode": "lexical"}, "repair"), None))
-        graph = self.runtime(model, mock.Mock(return_value={"items": [source()]})).graph(InMemorySaver())
-        self.assertIn("synthesize", graph.nodes)
+        saver = InMemorySaver()
+        legacy = StateGraph(State)
+        legacy.add_node("plan", lambda state: state)
+        def interrupted(state):
+            raise RuntimeError("interrupted legacy synthesis")
+        legacy.add_node("synthesize", interrupted)
+        legacy.add_edge(START, "plan")
+        legacy.add_edge("plan", "synthesize")
+        legacy.add_edge("synthesize", END)
+        options = {"configurable": {"thread_id": "legacy-synthesis"}}
+        with self.assertRaisesRegex(RuntimeError, "interrupted legacy"):
+            legacy.compile(checkpointer=saver).invoke(initial(), options)
+        model = mock.Mock(side_effect=[
+            (call("search_sources", {"query": "repair", "mode": "lexical"}, "repair"), None),
+            ({"role": "assistant", "content": json.dumps(report("source_answer", ["S1"]))}, None),
+        ])
+        tool = mock.Mock(return_value={"items": [source()]})
+        state = self.runtime(model, tool).graph(saver).invoke(None, options)
+        self.assertEqual(state["report"]["purpose"], "source_answer")
+        self.assertEqual(tool.call_count, 1)
 
     def test_invalid_tool_catalog_citation_gets_model_feedback(self):
         self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
@@ -230,6 +256,25 @@ class InvestigationTest(TestCase):
             runtime.check_report(report("source_answer"), initial())
         with self.assertRaises(ValueError):
             validate_sources({}, ["S99"], {})
+
+    def test_native_record_ids_are_preserved_and_checked_against_cited_text(self):
+        state = initial()
+        state.update(tool_count=1, sources={"S1": {**source(), "text": "[CASE-014] Service Alpha recovered after a documented retry.\n[CASE-015] Service Alphabet is unrelated."}})
+        candidate = report("source_answer", ["S1"])
+        candidate["comparison"] = [{"subject": "Service Alpha", "finding": "Documented recovery", "conditions": "", "citations": ["S1"]}]
+        result = self.runtime(mock.Mock()).check_report(candidate, state)
+        self.assertIn("CASE-014", result.comparison[0].finding)
+        self.assertNotIn("CASE-015", result.comparison[0].finding)
+        self.assertEqual(result.comparison[0].citations, ["S1"])
+
+    def test_native_records_cannot_silently_choose_between_source_occurrences(self):
+        state = initial()
+        state.update(tool_count=1, sources={"S1": {**source(), "text": "[CASE-014] Service Alpha recovered."}, "S2": {**source(), "jobId": "other-job", "text": "[CASE-015] Service Alpha failed."}})
+        candidate = report("source_answer", ["S1"])
+        candidate["comparison"] = [{"subject": "Service Alpha", "finding": "Documented recovery", "conditions": "", "citations": ["S1"]}]
+        result = self.runtime(mock.Mock()).check_report(candidate, state)
+        self.assertIn("CASE-014", result.comparison[0].finding)
+        self.assertNotIn("CASE-015", result.comparison[0].finding)
 
     def test_tool_replay_uses_saved_receipt(self):
         state = initial()
@@ -320,6 +365,19 @@ class InvestigationTest(TestCase):
         packed = json.loads(state["messages"][-1]["content"])
         self.assertEqual(packed["items"][0]["text"], text)
 
+    def test_read_context_prioritizes_source_text_over_entity_id_inventory(self):
+        text = "Source narrative and documented conditions. " * 45
+        items = [{**source(), "chunkId": f"chunk-{index}", "text": text, "endOffset": 20 + len(text), "entities": [{"id": f"entity-{index}-{other}" + "abcdef0123456789" * 4, "name": f"Name {other}", "type": "Concept"} for other in range(40)]} for index in range(3)]
+        runtime = self.runtime(mock.Mock(), mock.Mock(return_value={"tool": "read_chunks", "items": items}))
+        state = initial()
+        message = call("read_chunks", {"chunk_ids": [item["chunkId"] for item in items]})
+        state.update(pending=message["tool_calls"], messages=[message])
+        state = runtime.tools(state)
+        packed = json.loads(state["messages"][-1]["content"])
+        self.assertEqual([item["text"] for item in packed["items"]], [text] * 3)
+        self.assertIn("find_entities", packed["entityLookup"])
+        self.assertEqual(len(self.ledger.results["test-run", "call-1"]["items"][0]["entities"]), 40)
+
     def test_model_context_budget_reports_omitted_assertions(self):
         self.row["request"]["graph_expansion"] = True
         items = [{"id": f"assertion-{index}", "predicate": "reads", "polarity": "affirmed", "subject": {"id": "service"}, "object": {"id": "dataset"}, "quote": "A source-supported assertion. " * 100, "conditions": []} for index in range(50)]
@@ -389,6 +447,7 @@ class InvestigationTest(TestCase):
         body = json.loads(requests[0].content)
         self.assertFalse(body["store"])
         self.assertFalse(body["parallel_tool_calls"])
+        self.assertNotIn("temperature", body)
         self.assertEqual(body["tool_choice"], "auto")
         self.assertEqual(body["text"]["format"]["type"], "json_schema")
         self.assertNotIn('"title"', json.dumps(body["text"]["format"]["schema"]))
@@ -415,6 +474,7 @@ class InvestigationTest(TestCase):
         self.assertEqual(body["model"], "gpt-4.1-mini")
         self.assertNotIn("reasoning", body)
         self.assertNotIn("include", body)
+        self.assertEqual(body["temperature"], 0)
         self.assertFalse(body["store"])
 
     def test_chat_configuration_uses_llm2_even_when_llm1_is_present(self):
