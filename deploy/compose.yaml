@@ -1,0 +1,93 @@
+services:
+  postgres:
+    image: paradedb/paradedb@sha256:3f608f8a531e5552b2e546471271fa11e305a1261b9c4cccfb723b0fa4ad092a
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: argus
+      POSTGRES_PASSWORD: ${ARGUS_POSTGRES_PASSWORD:?set a strong ARGUS_POSTGRES_PASSWORD in .env.production}
+      POSTGRES_DB: argus
+    volumes:
+      - argus-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U argus -d argus"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  falkordb:
+    image: falkordb/falkordb@sha256:b0bdcac2cbaff989e77cb0610439b7a9289e86de033ccbbd4368b66fb680ae7a
+    restart: unless-stopped
+    volumes:
+      - argus-falkordb:/var/lib/falkordb/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -h 127.0.0.1 ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/backend.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../.env.production
+    environment:
+      DATABASE_URL: postgresql://argus:${ARGUS_POSTGRES_PASSWORD}@postgres:5432/argus
+      FALKOR_HOST: falkordb
+      FALKOR_PORT: 6379
+      FRONTEND_ORIGIN: https://${ARGUS_HOSTNAME}
+      DATABASE_POOL_MAX_SIZE: ${DATABASE_POOL_MAX_SIZE:-16}
+      HF_HOME: /app/data/model-cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+    volumes:
+      - argus-data:/app/data
+    expose:
+      - "4000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/api/health', timeout=5)"]
+      interval: 15s
+      timeout: 8s
+      retries: 10
+      start_period: 90s
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/frontend.Dockerfile
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:4000
+    depends_on:
+      backend:
+        condition: service_healthy
+    expose:
+      - "3001"
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    env_file:
+      - ../.env.production
+    depends_on:
+      frontend:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - argus-caddy-data:/data
+      - argus-caddy-config:/config
+
+volumes:
+  argus-postgres:
+  argus-falkordb:
+  argus-data:
+  argus-caddy-data:
+  argus-caddy-config:

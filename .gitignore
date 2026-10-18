@@ -12,6 +12,7 @@ dist/
 !.env.example
 *.log
 data/
+/deploy/argus.env
 .gstack/
 /agents.md
 /AGENTS.md
