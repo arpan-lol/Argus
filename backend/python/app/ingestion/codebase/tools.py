@@ -23,7 +23,8 @@ class RepositoryTools:
         self.changed = set(self.manifest if changed is None else changed)
 
     def present(self, identifier, chunk):
-        lines = [{'line': number, 'text': line.rstrip('\r\n')} for number, line in enumerate(chunk['text'].splitlines(keepends=True), 1)]
+        first_line = self.source(identifier)['document']['text'].count('\n', 0, chunk['startOffset']) + 1
+        lines = [{'line': number, 'text': line.rstrip('\r\n')} for number, line in enumerate(chunk['text'].splitlines(keepends=True), first_line)]
         return {'source_id': identifier, 'filename': self.manifest[identifier]['filename'], 'chunk_id': chunk['id'], 'lines': lines, 'ordinal': chunk['ordinal']}
 
     def source(self, identifier):
@@ -48,19 +49,20 @@ class RepositoryTools:
 
     def citation(self, citation, seen):
         citation = dict(citation)
-        chunk = next((chunk for chunk in self.source(citation['source_id'])['chunks'] if chunk['id'] == citation['chunk_id']), None)
-        if chunk is None or chunk['id'] not in seen:
-            raise ValueError('Citation must reference a chunk returned by read_sources or search_sources')
-        lines = chunk['text'].splitlines(keepends=True)
-        first, last = citation['start_line'], citation['end_line']
-        if first > last or last > len(lines) or last - first > 2:
-            raise ValueError('Citation must select one to three numbered lines from the read chunk')
-        start = sum(len(line) for line in lines[:first - 1])
-        quote = ''.join(lines[first - 1:last]).rstrip('\r\n')
+        source = self.source(citation['source_id'])
+        lines = source['document']['text'].splitlines(keepends=True)
+        number = citation['line']
+        if number > len(lines):
+            raise ValueError('Citation line is outside the source file')
+        absolute_start = sum(len(line) for line in lines[:number - 1])
+        quote = lines[number - 1].rstrip('\r\n')
         if not quote.strip():
             raise ValueError('Citation cannot select an empty source line')
-        end = start + len(quote)
-        return {**citation, 'quote': quote, 'start': start, 'end': end, 'revision': self.manifest[citation['source_id']]['revision'], 'startOffset': chunk['startOffset'] + start, 'endOffset': chunk['startOffset'] + end}
+        absolute_end = absolute_start + len(quote)
+        chunk = next((item for item in source['chunks'] if item['id'] in seen and item['startOffset'] <= absolute_start and item['endOffset'] >= absolute_end), None)
+        if chunk is None:
+            raise ValueError('Citation line must be contained in a chunk returned by read_sources or search_sources')
+        return {**citation, 'chunk_id': chunk['id'], 'quote': quote, 'start': absolute_start - chunk['startOffset'], 'end': absolute_end - chunk['startOffset'], 'revision': self.manifest[citation['source_id']]['revision'], 'startOffset': absolute_start, 'endOffset': absolute_end}
 
     def execute(self, action, state):
         tool = action['tool']
