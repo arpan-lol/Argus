@@ -1,6 +1,7 @@
 import json
 import re
 
+from app.database import connection
 from .config import fingerprint
 from .graph_batch import GraphWrites, write_batches
 
@@ -69,20 +70,39 @@ def _deactivate_prior_links(graph, source_id):
 
 
 def link_native_references(graph, document, chunks, job, pipeline):
-    if document.get("metadata", {}).get("parser") != "stix_native_json":
-        return {"nativeReferenceMentions": 0, "crossFileChunks": 0, "scannedActiveChunks": 0, "truncated": False}
-
-    native_ids, ambiguous_native_ids, native_chunks_truncated = _native_canonical_ids(pipeline, job, chunks)
-    external_ids, ambiguous_external_ids, external_ids_truncated = _external_id_mapping(document, native_ids)
+    native = document.get("metadata", {}).get("parser") == "stix_native_json"
+    ambiguous_native_ids = 0
+    native_chunks_truncated = False
+    if native:
+        native_ids, ambiguous_native_ids, native_chunks_truncated = _native_canonical_ids(pipeline, job, chunks)
+        mapping, ambiguous_external_ids, external_ids_truncated = _external_id_mapping(document, native_ids)
+        external_ids = {identifier: (*target, job['id'], job['source_id']) for identifier, target in mapping.items()}
+        pipeline.save_item(job['id'], 'native_external_ids', 'current', {'targets': external_ids})
+        _deactivate_prior_links(graph, job['source_id'])
+    else:
+        with connection() as conn:
+            registries = conn.execute("SELECT i.payload FROM ingestion_items i JOIN ingestion_publications p ON p.job_id=i.job_id JOIN ingestion_jobs j ON j.id=p.job_id WHERE j.project_id=%s AND p.active AND i.stage='native_external_ids' AND i.item_id='current' ORDER BY p.published_at DESC LIMIT 65", (job['configuration'].get('projectId'),)).fetchall()
+        candidates = {}
+        external_ids_truncated = len(registries) > 64
+        for row in registries[:64]:
+            for identifier, target in row['payload']['targets'].items():
+                if len(candidates) >= MAX_EXTERNAL_IDS and identifier not in candidates:
+                    external_ids_truncated = True
+                    continue
+                candidates.setdefault(identifier, {})[target[1]] = tuple(target)
+        ambiguous_external_ids = sum(len(targets) != 1 for targets in candidates.values())
+        external_ids = {identifier: next(iter(targets.values())) for identifier, targets in candidates.items() if len(targets) == 1}
     if not external_ids:
         return {"nativeReferenceMentions": 0, "crossFileChunks": 0, "scannedActiveChunks": 0, "ambiguousNativeIds": ambiguous_native_ids, "ambiguousExternalIds": ambiguous_external_ids, "truncated": external_ids_truncated or native_chunks_truncated}
 
     patterns = sorted(external_ids, key=lambda value: (-len(value), value))
     matcher = re.compile(r"(?<![\w.-])(?:" + "|".join(re.escape(value) for value in patterns) + r")(?![\w.-])")
-    rows = graph.query("MATCH (c:Chunk) WHERE c.active=true AND c.text IS NOT NULL WITH c ORDER BY c.id LIMIT $limit RETURN c.id,c.documentId,c.jobId,c.text,c.startOffset", {"limit": MAX_ACTIVE_CHUNKS + 1}).result_set
+    if native:
+        rows = graph.query("MATCH (c:Chunk) WHERE c.active=true AND c.text IS NOT NULL WITH c ORDER BY c.id LIMIT $limit RETURN c.id,c.documentId,c.jobId,c.text,c.startOffset", {"limit": MAX_ACTIVE_CHUNKS + 1}).result_set
+    else:
+        rows = [(chunk["id"], job["source_id"], job["id"], chunk["text"], chunk["startOffset"]) for chunk in chunks[:MAX_ACTIVE_CHUNKS + 1]]
     scan_truncated = len(rows) > MAX_ACTIVE_CHUNKS
     rows = rows[:MAX_ACTIVE_CHUNKS]
-    _deactivate_prior_links(graph, job["source_id"])
 
     writes = GraphWrites(graph)
     count = 0
@@ -100,20 +120,20 @@ def link_native_references(graph, document, chunks, job, pipeline):
             if count >= MAX_REFERENCE_MENTIONS:
                 mentions_truncated = True
                 break
-            native_id, canonical_id = target
+            native_id, canonical_id, anchor_job, anchor_source = target
             affected_entities.add(canonical_id)
             start, end = match.span()
             quote = text[start:end]
             span = {"startOffset": int(chunk_start) + start, "endOffset": int(chunk_start) + end, "chunkStart": start, "chunkEnd": end, "offsetUnit": "unicode_codepoint"}
-            mention_id = "mention:native-ref:" + fingerprint([chunk_id, job["id"], job["source_id"], native_id, external_id, start, end])
-            writes.add("MATCH (c:Chunk {id:$chunk}),(e:Entity {id:$entity}) MERGE (m:Mention {id:$mention}) SET m.jobId=c.jobId,m.documentId=c.documentId,m.text=$quote,m.startOffset=$start,m.endOffset=$end,m.sourceSpans=$spans,m.sourceSpanStatus='exact',m.sourceSpanAmbiguous=false,m.extractionMethod='native_identifier_reference',m.llmVerified=false,m.identityStatus='stable_external_identifier',m.nativeResolverKey=$externalId,m.nativeFormat='stix',m.nativeAnchorJobId=$anchorJob,m.nativeAnchorSourceId=$anchorSource,m.nativeAnchorRecordId=$nativeId,m.active=c.active MERGE (c)-[:HAS_MENTION]->(m) MERGE (m)-[:RESOLVED_TO]->(e) MERGE (c)-[:MENTIONS]->(e)", {"chunk": chunk_id, "entity": canonical_id, "mention": mention_id, "quote": quote, "start": span["startOffset"], "end": span["endOffset"], "spans": json.dumps([span]), "externalId": external_id, "anchorJob": job["id"], "anchorSource": job["source_id"], "nativeId": native_id})
+            mention_id = "mention:native-ref:" + fingerprint([chunk_id, anchor_job, anchor_source, native_id, external_id, start, end])
+            writes.add("MATCH (c:Chunk {id:$chunk}),(e:Entity {id:$entity}) MERGE (m:Mention {id:$mention}) SET m.jobId=c.jobId,m.documentId=c.documentId,m.text=$quote,m.startOffset=$start,m.endOffset=$end,m.sourceSpans=$spans,m.sourceSpanStatus='exact',m.sourceSpanAmbiguous=false,m.extractionMethod='native_identifier_reference',m.llmVerified=false,m.identityStatus='stable_external_identifier',m.nativeResolverKey=$externalId,m.nativeFormat='stix',m.nativeAnchorJobId=$anchorJob,m.nativeAnchorSourceId=$anchorSource,m.nativeAnchorRecordId=$nativeId,m.active=c.active MERGE (c)-[:HAS_MENTION]->(m) MERGE (m)-[:RESOLVED_TO]->(e) MERGE (c)-[:MENTIONS]->(e)", {"chunk": chunk_id, "entity": canonical_id, "mention": mention_id, "quote": quote, "start": span["startOffset"], "end": span["endOffset"], "spans": json.dumps([span]), "externalId": external_id, "anchorJob": anchor_job, "anchorSource": anchor_source, "nativeId": native_id})
             count += 1
-            if document_id != job["source_id"]:
+            if document_id != anchor_source:
                 cross_file_chunks.add(chunk_id)
         if mentions_truncated:
             break
     writes.flush()
-    affected_entities.update(canonical_id for _, canonical_id in external_ids.values())
+    affected_entities.update(target[1] for target in external_ids.values())
     if affected_entities:
         write_batches(graph, "UNWIND $ids AS id MATCH (e:Entity {id:id}) OPTIONAL MATCH (e)<-[:RESOLVED_TO]-(m:Mention) WHERE m.active=true WITH e,count(m) AS mentions SET e.active=(mentions>0)", "ids", sorted(affected_entities))
     return {"nativeReferenceMentions": count, "crossFileChunks": len(cross_file_chunks), "scannedActiveChunks": len(rows), "ambiguousNativeIds": ambiguous_native_ids, "ambiguousExternalIds": ambiguous_external_ids, "truncated": scan_truncated or external_ids_truncated or native_chunks_truncated or mentions_truncated}
