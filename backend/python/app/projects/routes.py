@@ -151,8 +151,8 @@ async def upload_project_files(project_id, files, through, config=None):
     if not project['description']:
         raise HTTPException(409, 'Describe this workspace before uploading files')
     if project.get('profile_id'):
-        from app.ingestion.profiles import get_profile, profile_signature
-        if get_profile(project['profile_id'])['model_configuration'] != profile_signature(config):
+        from app.ingestion.profiles import get_profile, profile_compatible
+        if not profile_compatible(get_profile(project['profile_id']), config):
             raise HTTPException(409, 'This workspace uses earlier extraction settings. Create a new workspace to build a fresh graph with local extraction.')
     staged = []
     temporary = []
@@ -161,7 +161,7 @@ async def upload_project_files(project_id, files, through, config=None):
     seen = {}
     try:
         for file in files:
-            from app.ingestion.archives import source_name, expand_archive, skip_reason
+            from app.ingestion.archives import source_name, expand_archive, skip_reason, content_skip_reason
             try:
                 filename = source_name(file.filename or 'source.txt')
             except ValueError as error:
@@ -191,6 +191,10 @@ async def upload_project_files(project_id, files, through, config=None):
                 archives.append(report)
                 skipped.extend(report['skipped'])
             for member, relative in members:
+                reason = content_skip_reason(member, relative)
+                if reason:
+                    skipped.append({'filename': relative, 'reason': reason})
+                    continue
                 revision = hashlib.sha256(member.read_bytes()).hexdigest()
                 if relative in seen:
                     if seen[relative] != revision:
