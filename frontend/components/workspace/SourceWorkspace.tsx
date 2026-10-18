@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowLeft, ArrowUp, ArrowUpRight, ChevronDown, FileText, Loader2, Maximize2, Minimize2, MessageSquare, Moon, Network, PanelLeftClose, PanelLeftOpen, Paperclip, Plus, Settings2, Sun, Upload, X } from 'lucide-react';
+import { ArrowLeft, ArrowUp, ArrowUpRight, ChevronDown, FileText, Loader2, Maximize2, Minimize2, MessageSquare, Moon, Network, Pause, PanelLeftClose, PanelLeftOpen, Paperclip, Play, Plus, Settings2, Sun, Upload, X } from 'lucide-react';
 import type { ImperativePanelHandle } from 'react-resizable-panels';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { Switch } from '@/components/ui/switch';
@@ -9,7 +9,7 @@ import { ChatResponse } from './ChatResponse';
 import { streamChat, type ChatTurn, type ChatSource, type ChatResult, type ChatEvent, type SavedChat, type ChatCoverage } from '@/lib/chat';
 import { ProjectSources } from '@/components/source-explorer/ProjectSources';
 import { ProcessingActivity } from '@/components/source-explorer/ProcessingActivity';
-import { projectRoot, type Project, type ProcessingEvent } from '@/lib/projects';
+import { projectApi, projectRoot, type Project, type ProcessingEvent } from '@/lib/projects';
 import { normalizeSourceDocument } from '@/lib/ingestion-types';
 import { GraphMap, type MapNode } from '@/components/source-explorer/GraphMap';
 import { useSearchOptions } from '@/hooks/use-search-options';
@@ -36,6 +36,10 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const [streamConnected, setStreamConnected] = useState(false);
   const [dataVersion, setDataVersion] = useState(0);
   const [graphVersion, setGraphVersion] = useState(0);
+  const [queueControlBusy, setQueueControlBusy] = useState<'pause' | 'resume' | null>(null);
+  const [queuePaused, setQueuePaused] = useState<boolean | null>(null);
+  const [queueControlStatus, setQueueControlStatus] = useState('');
+  const [queueControlError, setQueueControlError] = useState('');
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [dark, setDark] = useState(false);
@@ -167,6 +171,20 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const showFiles = () => filePanel.current?.resize(85);
   const showGraph = () => graphPanel.current?.resize(70);
   const upload = () => { setUploadRequest(previous => previous + 1); };
+  const controlIngestion = async (action: 'pause' | 'resume') => {
+    setQueueControlBusy(action); setQueueControlError(''); setQueueControlStatus('');
+    try {
+      const result = await projectApi<{ action?: 'pause' | 'resume'; counts?: Record<string, number>; [key: string]: unknown }>(projectId, '/ingestion-control', { method: 'POST', body: JSON.stringify({ action }) });
+      const appliedAction = result.action || action;
+      setQueuePaused(appliedAction === 'pause');
+      const counts = result.counts || Object.fromEntries(Object.entries(result).filter(([key, value]) => key !== 'action' && typeof value === 'number')) as Record<string, number>;
+      const summary = Object.entries(counts).map(([name, count]) => `${count.toLocaleString()} ${name}`).join(' · ');
+      setQueueControlStatus(`Ingestion ${appliedAction === 'pause' ? 'paused' : 'resumed'}${summary ? ` · ${summary}` : ''}`);
+      setDataVersion(version => version + 1);
+    } catch (reason) {
+      setQueueControlError(reason instanceof Error ? reason.message : 'Ingestion queue control failed. Try again.');
+    } finally { setQueueControlBusy(null); }
+  };
   const activeStages = new Set<string>();
   for (const event of processingEvents) {
     const key = `${event.jobId || ''}:${event.stage || ''}`;
@@ -186,6 +204,12 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const queuedFiles = workspaceJobs.filter(job => ['registered', 'queued'].includes(job.status)).length;
   const stoppedFiles = workspaceJobs.filter(job => ['failed', 'interrupted', 'budget_exceeded', 'waiting_configuration'].includes(job.status)).length;
   const pausedFiles = workspaceJobs.filter(job => job.status === 'paused').length;
+  useEffect(() => {
+    if (queuePaused !== null) return;
+    const activeOrQueued = workspaceJobs.some(job => ['registered', 'queued', 'running', 'processing'].includes(job.status));
+    if (pausedFiles && !activeOrQueued) setQueuePaused(true);
+    else if (workspaceJobs.length) setQueuePaused(false);
+  }, [workspaceJobs, pausedFiles, queuePaused]);
   const activeStage = lastProcessingEvent?.stage || runningJob?.currentStage || '';
   const stageSummary = runningJob?.stages.find(stage => stage.name === activeStage)?.metadata?.summary?.join(' ');
   const liveProcessingStatus = runningJob ? `${statusLabel(activeStage || runningJob.status)}${lastProcessingEvent?.counts ? ` · ${Object.entries(lastProcessingEvent.counts).map(([name, count]) => `${count.toLocaleString()} ${name}`).join(', ')}` : stageSummary ? ` · ${stageSummary}` : ''} · ${elapsedLabel}` : [queuedFiles ? `${queuedFiles} queued` : '', stoppedFiles ? `${stoppedFiles} needs attention` : '', pausedFiles ? `${pausedFiles} paused` : ''].filter(Boolean).join(' · ') || (workspaceJobs.length ? 'Up to date' : '');
@@ -258,7 +282,8 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
         <ResizableHandle withHandle className="ce-resize" />
         <ResizablePanel defaultSize={48} minSize={28} className="ce-explorer-panel">
           <dialog open ref={explorerDialog} className={`ce-explorer-shell ${explorerExpanded ? 'is-expanded' : ''}`} aria-labelledby="source-explorer-title" onCancel={event => { event.preventDefault(); if (explorerExpanded) setExplorerExpanded(false); }}>
-          <div className="ce-explorer-heading"><div className="ce-workspace-title"><h2 id="source-explorer-title" className="ce-project-name">{project?.name || 'Workspace'}</h2><span className={`ce-live-processing ${runningJob ? 'is-working' : ''}`} role="status" aria-live="polite" title={liveProcessingStatus}>{liveProcessingStatus}</span></div><div className="ce-explorer-actions"><button className="ce-add-files" onClick={upload} disabled={!project}><Plus size={16} />Add files</button></div></div>
+          <div className="ce-explorer-heading"><div className="ce-workspace-title"><h2 id="source-explorer-title" className="ce-project-name">{project?.name || 'Workspace'}</h2><span className={`ce-live-processing ${runningJob ? 'is-working' : ''}`} role="status" aria-live="polite" title={liveProcessingStatus}>{liveProcessingStatus}</span></div><div className="ce-explorer-actions"><button className="ce-queue-control" onClick={() => void controlIngestion('pause')} disabled={!project || queueControlBusy !== null || queuePaused === true} aria-label="Pause ingestion">{queueControlBusy === 'pause' ? <Loader2 size={14} className="spinning" /> : <Pause size={14} />}<span>Pause ingestion</span></button><button className="ce-queue-control" onClick={() => void controlIngestion('resume')} disabled={!project || queueControlBusy !== null || queuePaused === false} aria-label="Resume ingestion">{queueControlBusy === 'resume' ? <Loader2 size={14} className="spinning" /> : <Play size={14} />}<span>Resume ingestion</span></button><button className="ce-add-files" onClick={upload} disabled={!project}><Plus size={16} />Add files</button></div></div>
+          {(queueControlError || queueControlStatus) && <div className={`ce-queue-control-message ${queueControlError ? 'is-error' : ''}`} role={queueControlError ? 'alert' : 'status'} aria-live="polite">{queueControlError || queueControlStatus}</div>}
           {configurationOpen && <section id="engine-configuration" className="ce-configuration"><div><strong>Engine configuration</strong><button className="ce-icon" onClick={() => setConfigurationOpen(false)} aria-label="Close engine configuration"><X size={16} /></button></div><label><span>Graph expansion<small>Follow shared connections after search</small></span><Switch checked={options.graphExpansion} onCheckedChange={checked => updateOptions({ graphExpansion: checked })} /></label><p>{chatConfig?.model.toUpperCase() || 'GPT-5'} · {chatConfig?.coverage.publishedDocuments ?? '…'} searchable sources in this project.</p><p>{project?.description || 'Add sources to describe this workspace.'}</p></section>}
           {projectError && <p className="ce-inline-error" role="alert">{projectError} <a href="/">Return to projects</a></p>}
           <div className="ce-explorer-content">
