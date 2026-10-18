@@ -32,6 +32,10 @@ STAGES = ("register", "parse", "normalize", "chunk", "configure", "embed", "extr
 logger = logging.getLogger("argus.ingestion")
 
 
+class PauseRequested(Exception):
+    pass
+
+
 class PipelineState(TypedDict):
     job_id: str
     through: str
@@ -171,7 +175,7 @@ class IngestionPipeline:
     def node(self, stage):
         def execute(state):
             job = self.job_row(state["job_id"])
-            if state["stopped"] or STAGES.index(stage) > STAGES.index(state["through"]) or self.artifact(job["id"], stage) is not None:
+            if state["stopped"] or job.get("stop_requested") or STAGES.index(stage) > STAGES.index(state["through"]) or self.artifact(job["id"], stage) is not None:
                 return {}
             with connection() as conn:
                 attempt = conn.execute("SELECT COALESCE(max(attempt),0)+1 AS n FROM ingestion_attempts WHERE job_id=%s AND stage=%s", (job["id"], stage)).fetchone()["n"]
@@ -205,6 +209,12 @@ class IngestionPipeline:
                 if stage == 'publish':
                     job_event(job, 'graph_updated', {'counts': {key: result[key] for key in ('documents', 'sections', 'chunks', 'entities', 'mentions', 'assertions') if key in result}})
                 return {}
+            except PauseRequested:
+                with connection() as conn:
+                    conn.execute("UPDATE ingestion_attempts SET status='paused',finished_at=now(),duration_ms=%s,error='Paused by user; saved item results remain available' WHERE id=%s", ((time.monotonic() - started) * 1000, attempt_id))
+                    conn.execute("UPDATE ingestion_jobs SET status='paused',error=NULL,updated_at=now() WHERE id=%s", (job["id"],))
+                job_event(job, 'stage_complete', {'stage': stage, 'status': 'paused', 'message': 'Paused by user. Completed work is saved.'})
+                return {"stopped": True}
             except Exception as error:
                 status = "waiting_configuration" if isinstance(error, ConfigurationRequired) else "failed"
                 logger.exception("ingestion stage failed: %s %s", job["id"], stage)
@@ -223,6 +233,8 @@ class IngestionPipeline:
         if attempts < 1:
             raise ConfigurationRequired("Provider attempts must be positive")
         for attempt in range(attempts):
+            if self.job_row(job["id"]).get("stop_requested"):
+                raise PauseRequested()
             try:
                 from app.projects.events import job_event
                 job_event(job, 'item_start', {'stage': stage, 'itemId': key, 'attempt': attempt + 1})
@@ -232,8 +244,12 @@ class IngestionPipeline:
                 self.save_item(job["id"], stage, key, payload)
                 counts = {name: len(payload[name]) for name in ('entities', 'relationships', 'mentions', 'vectors', 'votes') if isinstance(payload.get(name), list)}
                 job_event(job, 'item_complete', {'stage': stage, 'itemId': key, 'attempt': attempt + 1, 'counts': counts})
+                if self.job_row(job["id"]).get("stop_requested"):
+                    raise PauseRequested()
                 return payload
             except ConfigurationRequired:
+                raise
+            except PauseRequested:
                 raise
             except Exception as error:
                 self.save_item(job["id"], "retry_history", str(uuid.uuid4()), {"stage": stage, "itemId": key, "attempt": attempt + 1, "error": str(error)})
@@ -242,7 +258,11 @@ class IngestionPipeline:
                     raise
                 provider_delay = re.search(r"retry in\s+([\d.]+)\s*s", str(error), re.IGNORECASE)
                 delay = max(job["configuration"]["retryBaseSeconds"] * (2 ** attempt), float(provider_delay.group(1)) + 1 if provider_delay else 0)
-                time.sleep(delay)
+                deadline = time.monotonic() + delay
+                while time.monotonic() < deadline:
+                    if self.job_row(job["id"]).get("stop_requested"):
+                        raise PauseRequested()
+                    time.sleep(min(0.25, deadline - time.monotonic()))
 
     def enqueue(self, job_id, through="publish"):
         if through not in STAGES:
@@ -253,7 +273,7 @@ class IngestionPipeline:
             if not acquired:
                 raise RuntimeError("Job already has an active worker")
             try:
-                conn.execute("UPDATE ingestion_jobs SET status='queued',error=NULL,queued_through=%s,updated_at=now() WHERE id=%s", (through, job_id))
+                conn.execute("UPDATE ingestion_jobs SET status='queued',error=NULL,stop_requested=false,queued_through=%s,updated_at=now() WHERE id=%s", (through, job_id))
             finally:
                 conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s,0))", (job_id,))
         return self.get_job(job_id)

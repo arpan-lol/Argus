@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS ingestion_publications (
 );
 ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS original_path text;
 ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS queued_through text;
+ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS stop_requested boolean NOT NULL DEFAULT false;
 ALTER TABLE ingestion_jobs ALTER COLUMN status SET DEFAULT 'registered';
 UPDATE ingestion_jobs SET status='registered' WHERE status='queued' AND queued_through IS NULL;
 CREATE INDEX IF NOT EXISTS ingestion_jobs_queued ON ingestion_jobs(created_at,id) WHERE status='queued' AND queued_through IS NOT NULL;

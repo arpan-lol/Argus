@@ -93,6 +93,19 @@ def retry(job_id: str, through: str = "publish"):
         raise HTTPException(409, "This job already has an active ingestion worker")
 
 
+@router.post("/jobs/{job_id}/pause", status_code=202)
+def pause(job_id: str):
+    result = job(job_id)
+    if result["status"] not in ("running", "queued"):
+        raise HTTPException(409, "Only queued or running files can be paused")
+    with connection() as conn:
+        if result["status"] == "queued":
+            conn.execute("UPDATE ingestion_jobs SET status='paused',queued_through=NULL,stop_requested=false,updated_at=now() WHERE id=%s AND status='queued'", (job_id,))
+        else:
+            conn.execute("UPDATE ingestion_jobs SET stop_requested=true,updated_at=now() WHERE id=%s AND status='running'", (job_id,))
+    return pipeline.get_job(job_id)
+
+
 @router.get("/jobs/{job_id}/events")
 def events(job_id: str, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
     job(job_id)
