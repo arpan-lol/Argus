@@ -112,26 +112,51 @@ def connections(nodes):
 def shared_document_connections(nodes):
     ids = [node['id'] for node in nodes if node['type'] == 'document']
     if len(ids) < 2:
-        return []
+        return [], False
     config = processing_config()
     key = (config['semanticGraph'], tuple(sorted(ids)))
     cached = _summary_cache.get(key)
     if cached and time.monotonic() - cached[0] < 5:
-        return cached[1]
+        return cached[1], cached[2]
     graph = graph_connection(config)
-    rows = graph.ro_query("MATCH (c:Chunk)-[:MENTIONS]->(e:Entity) WHERE c.active=true AND e.active=true AND c.documentId IN $ids WITH e,collect(DISTINCT c.documentId) AS documents WHERE size(documents)>1 UNWIND documents AS source UNWIND documents AS target WITH e,source,target WHERE source<target WITH source,target,count(e) AS shared,collect(e.label) AS labels RETURN source,target,shared,labels ORDER BY shared DESC LIMIT 1200", {'ids': ids}, timeout=2000).result_set
-    edges = [{'id': a + '|SHARES_TERM|' + b, 'source': a, 'target': b, 'type': 'SHARES_TERM', 'derived': True, 'sharedEntities': count, 'labels': labels[:6]} for a, b, count, labels in rows]
+    rows = graph.ro_query("MATCH (c:Chunk)-[:MENTIONS]->(e:Entity) WHERE c.active=true AND e.active=true AND c.documentId IN $ids RETURN DISTINCT e.id,e.label,c.documentId ORDER BY e.id,c.documentId LIMIT 12001", {'ids': ids}, timeout=2000).result_set
+    pairs_by_entity = {}
+    labels_by_entity = {}
+    for entity_id, label, document_id in rows[:12000]:
+        pairs_by_entity.setdefault(entity_id, set()).add(document_id)
+        labels_by_entity[entity_id] = label
+    truncated = len(rows) > 12000
+    scores = {}
+    for entity_id, documents in pairs_by_entity.items():
+        if len(documents) > 40:
+            truncated = True
+            documents = set(sorted(documents)[:40])
+        if len(documents) < 2:
+            continue
+        ordered = sorted(documents)
+        for index, source in enumerate(ordered):
+            for target in ordered[index + 1:]:
+                score = scores.setdefault((source, target), {'shared': 0, 'labels': [], 'entityIds': []})
+                score['shared'] += 1
+                if len(score['labels']) < 6:
+                    score['labels'].append(labels_by_entity[entity_id])
+                    score['entityIds'].append(entity_id)
+    ranked = sorted(scores.items(), key=lambda item: (-item[1]['shared'], item[0]))
+    if len(ranked) > 1200:
+        truncated = True
+    edges = [{'id': a + '|SHARES_TERM|' + b, 'source': a, 'target': b, 'type': 'SHARES_TERM', 'derived': True, 'sharedEntities': score['shared'], 'labels': score['labels'], 'entityIds': score['entityIds']} for (a, b), score in ranked[:1200]]
     if len(_summary_cache) >= 64:
         _summary_cache.pop(next(iter(_summary_cache)))
-    _summary_cache[key] = (time.monotonic(), edges)
-    return edges
+    _summary_cache[key] = (time.monotonic(), edges, truncated)
+    return edges, truncated
 
 
 @router.get('/overview')
 def overview(project_id: str, mode: str = Query('network', pattern='^(network|grouped)$')):
     nodes, truncated = nodes_for(project_id, mode, limit=2000, documents_only=True)
     bounds = {'minX': min((node['x'] for node in nodes), default=0) - 500, 'maxX': max((node['x'] for node in nodes), default=0) + 500, 'minY': min((node['y'] for node in nodes), default=0) - 500, 'maxY': max((node['y'] for node in nodes), default=0) + 500}
-    return {'nodes': nodes, 'edges': shared_document_connections(nodes), 'bounds': bounds, 'source': 'published semantic sources', 'truncated': truncated}
+    edges, summary_truncated = shared_document_connections(nodes)
+    return {'nodes': nodes, 'edges': edges, 'bounds': bounds, 'source': 'published semantic sources', 'truncated': truncated, 'summaryTruncated': summary_truncated}
 
 
 @router.get('/view')
@@ -140,7 +165,8 @@ def view(project_id: str, minX: float, maxX: float, minY: float, maxY: float, zo
     documents, _ = nodes_for(project_id, mode, bounds, limit, True)
     documents_only = zoom < .12 and len(documents) > 16
     nodes, truncated = nodes_for(project_id, mode, bounds, limit, documents_only)
-    return {'nodes': nodes, 'edges': [*shared_document_connections(documents), *connections(nodes)], 'level': 'documents' if documents_only else 'detail', 'truncated': truncated, 'source': 'falkordb', 'status': 'ready'}
+    shared_edges, summary_truncated = shared_document_connections(documents)
+    return {'nodes': nodes, 'edges': [*shared_edges, *connections(nodes)], 'level': 'documents' if documents_only else 'detail', 'truncated': truncated, 'summaryTruncated': summary_truncated, 'source': 'falkordb', 'status': 'ready'}
 
 
 @router.get('/locate/{identifier}')
