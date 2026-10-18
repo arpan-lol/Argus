@@ -22,12 +22,12 @@ class BudgetReached(RuntimeError):
 
 
 class Session:
-    def __init__(self, tool, arguments):
+    def __init__(self, tool, arguments, project_id=None):
         self.id = str(uuid.uuid4())
         self.tool = tool
         self.arguments = arguments
         self.started = time.monotonic()
-        self.config = processing_config()
+        self.config = processing_config(project_id)
         self.graph_name = semantic_graph_name(self.config)
         self.graph = FalkorDB(host=settings.falkor_host, port=settings.falkor_port, socket_connect_timeout=2, socket_timeout=3).select_graph(self.graph_name)
         self.trace = []

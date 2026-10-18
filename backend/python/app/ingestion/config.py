@@ -11,7 +11,7 @@ load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 
-def processing_config():
+def processing_config(project_id=None):
     provider = "azure_openai"
     extraction_model = os.getenv("LLM2_DEPLOYMENT_NAME", "").strip()
     embedding_model = os.getenv("EMBEDDING_MODEL_NAME", "").strip()
@@ -53,7 +53,7 @@ def processing_config():
         "entityEmbeddingBatchSize": int(os.getenv("ARGUS_ENTITY_EMBED_BATCH_SIZE", "32")),
         "resolutionCosineThreshold": float(os.getenv("ARGUS_RESOLUTION_COSINE_THRESHOLD", "0.82")),
         "maxLlmCallsPerJob": int(os.getenv("ARGUS_MAX_LLM_CALLS_PER_JOB", "0")),
-        "promptVersion": "argus-source-grounded-1",
+        "promptVersion": "falkordb-35e67a0-adapted-grounding-2",
         "extractionVersion": "two-attempt-gliner-fallback-1",
         "maxOutputTokens": int(os.getenv("ARGUS_MAX_OUTPUT_TOKENS", "8192")),
         "modelTimeoutSeconds": float(os.getenv("ARGUS_MODEL_TIMEOUT_SECONDS", "120")),
@@ -64,6 +64,7 @@ def processing_config():
         "profileSampleDocuments": int(os.getenv("ARGUS_PROFILE_SAMPLE_DOCUMENTS", "8")),
         "profileSampleCharacters": int(os.getenv("ARGUS_PROFILE_SAMPLE_CHARACTERS", "32000")),
         "maxUploadBytes": int(os.getenv("ARGUS_MAX_UPLOAD_BYTES", "104857600")),
+        "maxUploadFiles": int(os.getenv("ARGUS_MAX_UPLOAD_FILES", "10000")),
         "maxDecompressedBytes": int(os.getenv("ARGUS_MAX_DECOMPRESSED_BYTES", "209715200")),
         "maxExtractedTextCharacters": int(os.getenv("ARGUS_MAX_EXTRACTED_TEXT_CHARACTERS", "20971520")),
         "maxArchiveMembers": int(os.getenv("ARGUS_MAX_ARCHIVE_MEMBERS", "10000")),
@@ -84,7 +85,9 @@ def processing_config():
         "embeddingApiVersion": "2024-05-01-preview" if embedding_endpoint and embedding_endpoint.endswith("/models") else None,
         "embeddingCredentialEnv": "EMBEDDING_MODEL_KEY",
     })
-    return config
+    from app.projects.scope import apply_project
+    config['customDuplicateChecking'] = os.getenv('ARGUS_CUSTOM_DUPLICATE_CHECKING', 'false').strip().lower() == 'true'
+    return apply_project(config, project_id)
 
 
 

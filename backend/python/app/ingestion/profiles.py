@@ -35,7 +35,7 @@ PROFILE_PROMPT = """Configure extraction for the user's corpus task. The user ta
 
 
 def profile_signature(config):
-    keys = ("provider", "extractionModel", "llmResourceIdentity", "promptVersion", "parser", "maxDecompressedBytes", "maxExtractedTextCharacters", "maxArchiveMembers", "profileSampleDocuments", "profileSampleCharacters")
+    keys = ("projectId", "workspaceDescription", "provider", "extractionModel", "llmResourceIdentity", "promptVersion", "parser", "maxDecompressedBytes", "maxExtractedTextCharacters", "maxArchiveMembers", "profileSampleDocuments", "profileSampleCharacters")
     return {**{key: config.get(key) for key in keys}, "profileVersion": "corpus-extraction-settings-1"}
 
 
@@ -47,6 +47,9 @@ def get_profile(profile_id):
     with connection() as conn:
         row = conn.execute("SELECT * FROM ingestion_profiles WHERE id=%s", (profile_id,)).fetchone()
     if not row:
+        raise KeyError(profile_id)
+    from app.projects.scope import current_project
+    if current_project.get() and row['model_configuration'].get('projectId') != current_project.get():
         raise KeyError(profile_id)
     return row
 

@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from .contracts import ChatRequest
@@ -17,8 +17,10 @@ def chat_configuration():
 
 
 @router.post("/chat")
-def chat(body: ChatRequest):
+def chat(body: ChatRequest, request: Request):
     run_id, updates = service.start(body)
+    if 'project_id' in request.path_params:
+        return StreamingResponse(('data: ' + line.rstrip('\n') + '\n\n' for line in service.events(updates, run_id)), media_type='text/event-stream', headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
     return StreamingResponse(service.events(updates, run_id), media_type="application/x-ndjson", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
@@ -28,6 +30,8 @@ def investigation(run_id: UUID):
 
 
 @router.post("/chat/{run_id}/resume")
-def resume(run_id: UUID):
+def resume(run_id: UUID, request: Request):
     identifier, updates = service.start(run_id=str(run_id))
+    if 'project_id' in request.path_params:
+        return StreamingResponse(('data: ' + line.rstrip('\n') + '\n\n' for line in service.events(updates, identifier)), media_type='text/event-stream', headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
     return StreamingResponse(service.events(updates, identifier), media_type="application/x-ndjson", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})

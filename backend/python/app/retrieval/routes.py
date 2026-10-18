@@ -12,14 +12,14 @@ logger = logging.getLogger("argus.retrieval")
 router = APIRouter()
 
 
-def execute(name, arguments):
+def execute(name, arguments, project_id=None):
     if name not in TOOLS:
         raise HTTPException(404, "Unknown retrieval tool")
     try:
         validated = TOOLS[name][0].model_validate(arguments)
     except ValidationError as error:
         raise HTTPException(400, [{"field": ".".join(map(str, item["loc"])), "message": item["msg"]} for item in error.errors()]) from error
-    session = Session(name, validated.model_dump())
+    session = Session(name, validated.model_dump(), project_id)
     if not session.jobs:
         session.warnings.append("No active semantic publications for the configured embedding profile. Legacy corpus is not searched by these tools.")
         return session.finish({"items": []}, "no_published_sources")

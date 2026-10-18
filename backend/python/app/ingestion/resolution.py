@@ -80,6 +80,9 @@ def plan_resolution(pipeline, job, provider, graph):
 
 
 def resolve(pipeline, job):
+    if not job['configuration'].get('customDuplicateChecking', False):
+        from .sdk_resolution import resolve_basic
+        return resolve_basic(pipeline, job)
     graph = graph_connection(job["configuration"])
     index(graph, "Entity", job["configuration"]["embeddingDimensions"])
     provider = Providers(job["configuration"], pipeline.call_recorder(job["id"]))

@@ -99,7 +99,7 @@ class Investigation:
         self.started = time.monotonic()
         self.emit = emit
         self.model_call = model_call or self.invoke_model
-        self.tool_call = tool_call or execute
+        self.tool_call = tool_call or (lambda name, arguments: execute(name, arguments, self.config.get('projectId')))
         self.encoding = tiktoken.get_encoding("cl100k_base")
 
     def elapsed(self):

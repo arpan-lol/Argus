@@ -63,6 +63,9 @@ def get_run(run_id):
         row = conn.execute("SELECT * FROM chat_runs WHERE id=%s", (run_id,)).fetchone()
     if not row:
         raise HTTPException(404, "Investigation not found")
+    from app.projects.scope import current_project
+    if current_project.get() and row['configuration'].get('projectId') != current_project.get():
+        raise HTTPException(404, 'Investigation not found')
     return row
 
 

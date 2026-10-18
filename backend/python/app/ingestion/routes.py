@@ -36,6 +36,12 @@ def job(job_id: str):
 async def upload(file: UploadFile = File(...), source_id: str | None = Form(None), through: str = Form("publish"), profile_id: str | None = Form(None), prompt: str | None = Form(None)):
     if through not in STAGES:
         raise HTTPException(400, "Unknown ingestion stage")
+    from app.projects.scope import current_project
+    if current_project.get():
+        if source_id or profile_id or prompt:
+            raise HTTPException(400, 'Project uploads use the saved workspace description and shared profile')
+        from app.projects.routes import upload_project_files
+        return (await upload_project_files(current_project.get(), [file], through))['jobs'][0]
     if profile_id and prompt:
         raise HTTPException(400, "Supply either a saved corpus profile or a new prompt")
     if prompt is not None and (not prompt.strip() or len(prompt) > 12000):
@@ -113,9 +119,10 @@ class CorpusPrompt(BaseModel):
 @router.post("/profiles", status_code=201)
 def corpus_profile(body: CorpusPrompt):
     from .profiles import create_profile
+    from app.projects.scope import current_project
     sources = []
     with connection() as conn:
-        rows = conn.execute("SELECT DISTINCT ON (j.source_id) j.source_id,j.revision,j.original_path,s.filename FROM ingestion_jobs j JOIN ingestion_sources s ON s.id=j.source_id WHERE j.source_id=ANY(%s) ORDER BY j.source_id,j.created_at DESC", (body.source_ids,)).fetchall()
+        rows = conn.execute("SELECT DISTINCT ON (j.source_id) j.source_id,j.revision,j.original_path,s.filename FROM ingestion_jobs j JOIN ingestion_sources s ON s.id=j.source_id WHERE j.source_id=ANY(%s) AND j.project_id IS NOT DISTINCT FROM %s ORDER BY j.source_id,j.created_at DESC", (body.source_ids, current_project.get())).fetchall()
         for row in rows:
             sources.append({"sourceId": row["source_id"], "revision": row["revision"], "originalPath": row["original_path"], "filename": row["filename"]})
     if len(sources) != len(set(body.source_ids)):
@@ -200,15 +207,18 @@ def revert_resolution(decision_id: str):
 
 @router.get("/documents")
 def documents(limit: int = Query(24, ge=1, le=100), offset: int = Query(0, ge=0)):
+    from app.projects.scope import current_project
+    project_id = current_project.get()
     with connection() as conn:
-        rows = conn.execute("SELECT * FROM (SELECT DISTINCT ON (j.source_id) j.source_id AS id,s.filename,j.status,j.id AS job_id,j.updated_at,COALESCE(a.payload->'metadata'->>'title',s.filename) AS title,s.source_url AS \"sourceUrl\",COALESCE(jsonb_array_length(c.payload->'chunks'),0) AS \"chunkCount\" FROM ingestion_jobs j JOIN ingestion_sources s ON s.id=j.source_id JOIN ingestion_artifacts a ON a.job_id=j.id AND a.stage='normalize' LEFT JOIN ingestion_artifacts c ON c.job_id=j.id AND c.stage='chunk' ORDER BY j.source_id,j.created_at DESC) d ORDER BY updated_at DESC LIMIT %s OFFSET %s", (limit, offset)).fetchall()
-        total = conn.execute("SELECT count(DISTINCT source_id) AS count FROM ingestion_jobs j WHERE EXISTS(SELECT 1 FROM ingestion_artifacts a WHERE a.job_id=j.id AND a.stage='normalize')").fetchone()["count"]
+        rows = conn.execute("SELECT * FROM (SELECT DISTINCT ON (j.source_id) j.source_id AS id,s.filename,j.status,j.id AS job_id,j.updated_at,COALESCE(a.payload->'metadata'->>'title',s.filename) AS title,s.source_url AS \"sourceUrl\",COALESCE(jsonb_array_length(c.payload->'chunks'),0) AS \"chunkCount\" FROM ingestion_jobs j JOIN ingestion_sources s ON s.id=j.source_id JOIN ingestion_artifacts a ON a.job_id=j.id AND a.stage='normalize' LEFT JOIN ingestion_artifacts c ON c.job_id=j.id AND c.stage='chunk' WHERE j.project_id IS NOT DISTINCT FROM %s ORDER BY j.source_id,j.created_at DESC) d ORDER BY updated_at DESC LIMIT %s OFFSET %s", (project_id, limit, offset)).fetchall()
+        total = conn.execute("SELECT count(DISTINCT source_id) AS count FROM ingestion_jobs j WHERE j.project_id IS NOT DISTINCT FROM %s AND EXISTS(SELECT 1 FROM ingestion_artifacts a WHERE a.job_id=j.id AND a.stage='normalize')", (project_id,)).fetchone()["count"]
     return {"documents": serialize(rows), "total": total, "limit": limit, "offset": offset}
 
 
 def latest_document_job(source_id):
+    from app.projects.scope import current_project
     with connection() as conn:
-        row = conn.execute("SELECT j.id FROM ingestion_jobs j WHERE j.source_id=%s AND EXISTS(SELECT 1 FROM ingestion_artifacts a WHERE a.job_id=j.id AND a.stage='normalize') ORDER BY j.created_at DESC LIMIT 1", (source_id,)).fetchone()
+        row = conn.execute("SELECT j.id FROM ingestion_jobs j WHERE j.source_id=%s AND j.project_id IS NOT DISTINCT FROM %s AND EXISTS(SELECT 1 FROM ingestion_artifacts a WHERE a.job_id=j.id AND a.stage='normalize') ORDER BY j.created_at DESC LIMIT 1", (source_id, current_project.get())).fetchone()
     if not row:
         raise HTTPException(404, "Source not found")
     return pipeline.job_row(row["id"])

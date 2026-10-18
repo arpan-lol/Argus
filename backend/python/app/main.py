@@ -1,6 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -11,6 +11,9 @@ from app.routes.api import router
 from app.services.worker import IngestionWorkers
 from app.retrieval.routes import router as retrieval_router
 from app.investigation.routes import router as investigation_router
+from app.projects.routes import router as projects_router
+from app.projects.scope import project_scope
+from app.projects.graph import router as project_graph_router
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger=logging.getLogger("argus")
@@ -33,13 +36,18 @@ async def lifespan(app):
 
 
 app=FastAPI(title="Argus",version="0.2.0",lifespan=lifespan)
-app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_origin],allow_methods=["GET","POST"],allow_headers=["*"])
+app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_origin],allow_methods=["GET","POST","PUT"],allow_headers=["*"])
 app.include_router(router,prefix="/api")
 app.include_router(retrieval_router,prefix="/api")
 app.include_router(investigation_router,prefix="/api")
+app.include_router(projects_router,prefix='/api')
+app.include_router(project_graph_router,prefix='/api')
+app.include_router(investigation_router,prefix='/api/projects/{project_id}',dependencies=[Depends(project_scope)])
+app.include_router(retrieval_router,prefix='/api/projects/{project_id}',dependencies=[Depends(project_scope)])
 try:
     from app.ingestion.routes import router as ingestion_router
     app.include_router(ingestion_router,prefix="/api")
+    app.include_router(ingestion_router,prefix='/api/projects/{project_id}',dependencies=[Depends(project_scope)])
 except ModuleNotFoundError:
     logger.warning("Ingestion package is not installed")
 
