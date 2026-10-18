@@ -162,7 +162,7 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
       setSelectedId(chunkId || nextDocumentId);
     }
   };
-  const selectCitation = (source: ChatSource) => { graphPanel.current?.resize(65); setPipelineFocus(source); setDocumentId(source.documentId); setMapFocus({nodeId: source.chunkId, nonce: Date.now()}); };
+  const selectCitation = (source: ChatSource) => { graphPanel.current?.resize(65); setPipelineFocus(source); setDocumentId(source.documentId); setMapFocus({nodeId: source.chunkId || source.documentId, nonce: Date.now()}); };
   const selectNode = (node: MapNode) => { if (node.documentId) focusSource(node.documentId, node.chunkId); setSelectedId(node.id); setSelectedNode(node); };
   const showFiles = () => filePanel.current?.resize(85);
   const showGraph = () => graphPanel.current?.resize(70);
