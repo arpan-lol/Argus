@@ -42,14 +42,16 @@ def _external_id_mapping(document, native_canonical_ids):
 def _native_canonical_ids(pipeline, job, chunks):
     identifiers = {}
     ambiguous = set()
+    with connection() as conn:
+        saved = {(row["stage"], row["item_id"]): row["payload"] for row in conn.execute("SELECT stage,item_id,payload FROM ingestion_items WHERE job_id=%s AND stage=ANY(%s)", (job["id"], ["extract", "resolve"])).fetchall()}
     for chunk in chunks[:MAX_ACTIVE_CHUNKS]:
-        extracted = pipeline.item(job["id"], "extract", chunk["id"]) or {}
+        extracted = saved.get(("extract", chunk["id"])) or {}
         for entity in extracted.get("entities", []):
             native_id = entity.get("nativeResolverKey")
             if not native_id or entity.get("nativeFormat") != "stix":
                 continue
             mention_id = "mention:" + fingerprint([chunk["id"], entity["key"]])
-            resolved = pipeline.item(job["id"], "resolve", mention_id) or {}
+            resolved = saved.get(("resolve", mention_id)) or {}
             canonical_id = resolved.get("canonicalId")
             if not canonical_id:
                 continue

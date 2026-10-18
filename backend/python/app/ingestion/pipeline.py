@@ -433,14 +433,16 @@ class IngestionPipeline:
         from .publication import supported_spans
         document = self.artifact(job["id"], "normalize")
         chunks = self.artifact(job["id"], "chunk")["chunks"]
+        with connection() as conn:
+            saved_items = {(row["stage"], row["item_id"]): row["payload"] for row in conn.execute("SELECT stage,item_id,payload FROM ingestion_items WHERE job_id=%s AND stage=ANY(%s)", (job["id"], ["embed", "extract", "resolve"])).fetchall()}
         assertions = 0
         for chunk in chunks:
             if document["text"][chunk["startOffset"]:chunk["endOffset"]] != chunk["text"]:
                 raise ValueError("Chunk source offset mismatch")
-            embedded = self.item(job["id"], "embed", chunk["id"])
+            embedded = saved_items.get(("embed", chunk["id"]))
             if not embedded or len(embedded["vector"]) != job["configuration"]["embeddingDimensions"] or not any(embedded["vector"]) or any(not math.isfinite(value) for value in embedded["vector"]):
                 raise ValueError("Chunk embedding missing, nonfinite or wrong dimensionality")
-            extraction = self.item(job["id"], "extract", chunk["id"])
+            extraction = saved_items.get(("extract", chunk["id"]))
             self.validate_extraction(chunk, extraction)
             for record in extraction["entities"] + extraction["relationships"]:
                 supported_spans(chunk, record)
@@ -448,7 +450,7 @@ class IngestionPipeline:
             assertions += len(facts)
             for entity in extraction["entities"]:
                 mention_id = "mention:" + fingerprint([chunk["id"], entity["key"]])
-                if not self.item(job["id"], "resolve", mention_id):
+                if not saved_items.get(("resolve", mention_id)):
                     raise ValueError("Entity resolution artifact missing")
         fallback_count = (self.artifact(job["id"], "extract") or {}).get("fallbackChunks", 0)
         graph = document.get("codeGraph", {})
