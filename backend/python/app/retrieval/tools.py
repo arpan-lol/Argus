@@ -77,8 +77,8 @@ def read_chunks(session, args):
     return {"items": items, "unknownChunkIds": unknown, "adjacentChunkIds": [key for key in adjacent if key in rows], "connectionMeaning": "Additional chunks follow requested passages in the same published source. Adjacency and shared mentions do not assert semantic relationships."}
 
 
-def assertion_rows(session, entity_id, direction="both", predicates=None, polarity=None, limit=20):
-    rows = session.cypher("MATCH (s:Entity)<-[:SUBJECT]-(a:Assertion)-[:OBJECT]->(o:Entity),(a)-[:SUPPORTED_BY]->(c:Chunk) WHERE a.active=true AND c.active=true AND a.jobId IN $jobs AND c.jobId=a.jobId AND (($direction='outgoing' AND s.id=$entity) OR ($direction='incoming' AND o.id=$entity) OR ($direction='both' AND (s.id=$entity OR o.id=$entity))) AND (size($predicates)=0 OR a.predicate IN $predicates) AND ($polarity IS NULL OR a.polarity=$polarity) RETURN a.id,a.jobId,a.predicate,a.polarity,a.conditions,a.quote,a.startOffset,a.endOffset,c.id,s.id,s.label,o.id,o.label,a.extractionMethod,a.confidence,a.resolution,a.llmVerified,a.polarityStatus ORDER BY a.id LIMIT $limit", {"entity": entity_id, "direction": direction, "predicates": predicates or [], "polarity": polarity, "limit": limit + 1}, "assertion adjacency")
+def assertion_rows(session, entity_id, direction="both", predicates=None, polarity=None, limit=20, include_context_review=False):
+    rows = session.cypher("MATCH (s:Entity)<-[:SUBJECT]-(a:Assertion)-[:OBJECT]->(o:Entity),(a)-[:SUPPORTED_BY]->(c:Chunk) WHERE a.active=true AND c.active=true AND a.jobId IN $jobs AND c.jobId=a.jobId AND (($direction='outgoing' AND s.id=$entity) OR ($direction='incoming' AND o.id=$entity) OR ($direction='both' AND (s.id=$entity OR o.id=$entity))) AND (size($predicates)=0 OR a.predicate IN $predicates) AND ($polarity IS NULL OR a.polarity=$polarity) AND ($review OR coalesce(a.traversalStatus,'legacy_unclassified')<>'needs_context_review') RETURN a.id,a.jobId,a.predicate,a.polarity,a.conditions,a.quote,a.startOffset,a.endOffset,c.id,s.id,s.label,o.id,o.label,a.extractionMethod,a.confidence,a.resolution,a.llmVerified,a.polarityStatus,a.traversalStatus,a.context ORDER BY a.id LIMIT $limit", {"entity": entity_id, "direction": direction, "predicates": predicates or [], "polarity": polarity, "review": include_context_review, "limit": limit + 1}, "assertion adjacency")
     if len(rows) > limit:
         session.truncate("Assertion fanout/result limit reached; traversal is incomplete")
     return supported_assertions(session, rows[:limit])
@@ -100,7 +100,7 @@ def supported_assertions(session, rows):
             session.warnings.append("Assertion with inconsistent source support withheld")
             continue
         seen.add(row[0])
-        provenance = {'method': row[13] if len(row) > 13 else None, 'score': row[14] if len(row) > 14 else None, 'resolution': row[15] if len(row) > 15 else None, 'llmVerified': row[16] is True if len(row) > 16 else False, 'polarityStatus': row[17] if len(row) > 17 else None, 'meaning': 'Local model predictions are unverified; Python parser relations describe syntax and named references, not runtime execution'}
+        provenance = {'method': row[13] if len(row) > 13 else None, 'score': row[14] if len(row) > 14 else None, 'resolution': row[15] if len(row) > 15 else None, 'llmVerified': row[16] is True if len(row) > 16 else False, 'polarityStatus': row[17] if len(row) > 17 else None, 'traversalStatus': row[18] if len(row) > 18 else 'legacy_unclassified', 'sourceContext': json.loads(row[19] or '{}') if len(row) > 19 else {}, 'meaning': 'Local model predictions are unverified; Python parser relations describe syntax and named references, not runtime execution'}
         assertions.append({"id": row[0], "predicate": row[2], "polarity": row[3], "conditions": json.loads(row[4] or "[]"), "quote": row[5], "subject": {"id": row[9], "name": row[10]}, "object": {"id": row[11], "name": row[12]}, "citation": session.citation(chunk, row[6], row[7]), "extraction": provenance})
     return assertions
 
@@ -109,7 +109,7 @@ def inspect_assertions(session, args):
     entity = session.entity(args.entity_id)
     if not entity:
         return {"items": [], "unknownEntityIds": [args.entity_id]}
-    return {"entity": entity, "items": assertion_rows(session, args.entity_id, predicates=[args.predicate] if args.predicate else [], polarity=args.polarity, limit=args.limit), "interpretation": "Reported assertions retain uncertainty/negation; source grounding is not independent scientific validation"}
+    return {"entity": entity, "items": assertion_rows(session, args.entity_id, predicates=[args.predicate] if args.predicate else [], polarity=args.polarity, limit=args.limit, include_context_review=True), "interpretation": "Reported assertions retain uncertainty/negation; source grounding is not independent scientific validation"}
 
 
 def traverse(session, roots, depth, direction, predicates, edge_limit, target=None, path_limit=3):

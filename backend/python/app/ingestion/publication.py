@@ -118,7 +118,7 @@ def _publish(pipeline, job):
     graph.query("MATCH (s:Section {documentId:$source}) WHERE s.jobId=$job SET s.projectionCurrent=false", {"source": job["source_id"], "job": job["id"]})
     for section in sections:
         writes.add("MATCH (d:Document {id:$document}),(r:SourceRevision {id:$job}) MERGE (s:Section {id:$id}) SET s.documentId=$document,s.jobId=$job,s.title=$title,s.startOffset=$start,s.endOffset=$end,s.projectionCurrent=true,s.active=false MERGE (d)-[:HAS_SECTION]->(s) MERGE (r)-[:HAS_SECTION]->(s)", {"document": job["source_id"], "job": job["id"], "id": section["id"], "title": section["title"], "start": section["startOffset"], "end": section["endOffset"]})
-    mention_count = assertion_count = fallback_count = 0
+    mention_count = assertion_count = fallback_count = review_count = native_count = 0
     extraction_warnings = []
     entities = {}
     accepted_aliases = {}
@@ -141,6 +141,7 @@ def _publish(pipeline, job):
             fallback_count += 1
             extraction_warnings.append({"chunkId": chunk["id"], "code": "gliner_only_fallback", "message": extraction_metadata.get("warning", "Only local mentions were retained; connections were not extracted."), "reason": extraction_metadata.get("reason")})
         writes.add("MATCH (c:Chunk {id:$id}) SET c.extractionMethod=$method,c.llmVerified=$verified,c.extractionFallback=$fallback,c.extractionMetadata=$metadata", {"id": chunk["id"], "method": extraction_metadata.get("method", "unknown"), "verified": extraction_metadata.get("llmVerified") is True, "fallback": bool(extraction_metadata.get("fallback")), "metadata": json.dumps(extraction_metadata)})
+        writes.add("MATCH (c:Chunk {id:$id}) SET c.sourceLocations=$locations,c.sourceContext=$context", {"id": chunk["id"], "locations": json.dumps(chunk.get('sourceLocations', [])), "context": json.dumps(chunk.get('sourceContext', []))})
         facts = extraction["relationships"]
         writes.add("MATCH (c:Chunk {id:$id}) OPTIONAL MATCH (c)-[r:MENTIONS]->() DELETE r", {"id": chunk["id"]})
         local = {}
@@ -162,6 +163,7 @@ def _publish(pipeline, job):
                 staged_entities.add(canonical_id)
             writes.add("MATCH (c:Chunk {id:$chunk}) MERGE (m:Mention {id:$mention}) SET m.jobId=$job,m.text=$quote,m.startOffset=$start,m.endOffset=$end,m.sourceSpans=$spans,m.sourceSpanStatus=$spanStatus,m.sourceSpanAmbiguous=$ambiguous,m.extractionMethod=$method,m.llmVerified=$verified,m.confidence=$confidence,m.documentId=$document,m.active=false MERGE (c)-[:HAS_MENTION]->(m)", {"chunk": chunk["id"], "mention": mention_id, "job": job["id"], "document": job["source_id"], "quote": entity["quote"], "start": start, "end": end, "spans": json.dumps(spans), "spanStatus": span_status, "ambiguous": len(spans) > 1, "method": method, "verified": llm_verified, "confidence": entity.get("confidence")})
             writes.add("MATCH (m:Mention {id:$mention}) OPTIONAL MATCH (m)-[old:RESOLVED_TO]->() DELETE old", {"mention": mention_id})
+            writes.add("MATCH (m:Mention {id:$mention}) SET m.identityStatus=$status,m.entityType=$type,m.nativeResolverKey=$native", {"mention": mention_id, "status": resolved.get('identityStatus', 'unverified_surface_form'), "type": entity['entity_type'], "native": entity.get('nativeResolverKey')})
             writes.add("MATCH (c:Chunk {id:$chunk}),(m:Mention {id:$mention}),(e:Entity {id:$entity}) MERGE (m)-[:RESOLVED_TO]->(e) MERGE (c)-[:MENTIONS]->(e) MERGE (r:ResolutionDecision {id:$decision}) SET r.jobId=$job,r.decision=$verdict,r.rationale=$rationale,r.reverted=$reverted MERGE (r)-[:RESOLVES]->(m)", {"chunk": chunk["id"], "mention": mention_id, "entity": canonical_id, "decision": decision["id"], "job": job["id"], "verdict": decision["decision"], "rationale": decision["rationale"], "reverted": decision["reverted"]})
             published_entity = entities.setdefault(canonical_id, {"id": canonical_id, "label": canonical["label"], "type": canonical["entity_type"], "extractionMethods": [], "llmVerified": True, "mentions": []})
             if method not in published_entity["extractionMethods"]:
@@ -179,6 +181,11 @@ def _publish(pipeline, job):
             writes.add("MATCH (a:Assertion {id:$id}) OPTIONAL MATCH (a)-[r:SUBJECT|OBJECT]->() DELETE r", {"id": assertion_id})
             writes.add("MATCH (a:Assertion {id:$id}),(s:Entity {id:$subject}),(o:Entity {id:$object}) MERGE (a)-[:SUBJECT]->(s) MERGE (a)-[:OBJECT]->(o) MERGE (s)-[r:RELATES {assertionId:$id}]->(o) SET r.predicate=$predicate,r.rel_type=$predicate,r.jobId=$job,r.sourceId=$source,r.active=false", {"id": assertion_id, "subject": local[relationship["subject"]], "object": local[relationship["object"]], "predicate": relationship["predicate"], "job": job["id"], "source": job["source_id"]})
             assertion_count += 1
+            status = relationship.get('traversalStatus', 'unverified_no_context_cue')
+            review_count += int(status == 'needs_context_review')
+            native_count += int(relationship.get('extractionMethod') == 'stix_native')
+            context = {key: relationship.get(key) for key in ('sourceContextSignals', 'negationCue', 'speculationCue', 'modalityCue', 'alternativeCue', 'qualifierStatus', 'sourceMeasurements', 'nativeRecordId', 'nativeReferenceStatus', 'referenceStatus') if key in relationship}
+            writes.add("MATCH (a:Assertion {id:$id}),(s:Entity)-[r:RELATES {assertionId:$id}]->() SET a.traversalStatus=$status,a.context=$context,a.qualifierStatus=$qualifier,r.traversalStatus=$status,r.polarity=$polarity", {"id": assertion_id, "status": status, "context": json.dumps(context), "qualifier": relationship.get('qualifierStatus', 'not_classified'), "polarity": relationship['polarity']})
             writes.add("MATCH (a:Assertion {id:$id}),(s:Entity)-[r:RELATES {assertionId:$id}]->() SET a.confidence=$confidence,a.polarityStatus=$polarityStatus,r.confidence=$confidence,r.extractionMethod=$method", {"id": assertion_id, "confidence": relationship.get("confidence"), "polarityStatus": relationship.get("polarityStatus", "source_classified"), "method": relationship.get("extractionMethod", extraction_metadata.get("method", "unknown"))})
         publication_chunks.append({**chunk, "documentId": job["source_id"], "revisionId": job["revision"], "processingVersion": job["processing_version"], "sectionId": section_id, "sectionIds": [section["id"] for section in related_sections], "sectionTitle": primary["title"], "sourceUrl": metadata.get("sourceUrl") or job["source_url"], "locationKind": "source", "extractionMetadata": extraction_metadata})
 
@@ -190,7 +197,7 @@ def _publish(pipeline, job):
     affected_entities.update(code["entities"])
     mention_count += code["mentions"]
     assertion_count += code["assertions"]
-    extraction_quality = {"fallbackChunks": fallback_count, "quality": "local_model_and_parser", "warnings": [*metadata.get("warnings", []), *extraction_warnings], "sourceCoverage": metadata.get("sourceCoverage"), "structuralRelationships": code["assertions"]}
+    extraction_quality = {"fallbackChunks": fallback_count, "quality": "local_model_and_parser", "warnings": [*metadata.get("warnings", []), *extraction_warnings], "sourceCoverage": metadata.get("sourceCoverage"), "structuralRelationships": code["assertions"], "contextReviewRelationships": review_count, "nativeRelationships": native_count, "semanticValidation": "Exact source spans checked; local model scores are uncalibrated. Lexical context cues require review and are excluded from automatic positive traversal."}
     payload = {**metadata, "id": job["source_id"], "revisionId": job["revision"], "processingVersion": job["processing_version"], "rawPath": job["original_path"], "title": title, "text": document["text"], "textLength": len(document["text"]), "sections": sections, "chunks": publication_chunks, "entities": list(entities.values()), "sourceUrl": metadata.get("sourceUrl") or job["source_url"], "offsetUnit": "unicode_codepoint", "blocks": document["blocks"], "normalization": document["normalization"], "extractionQuality": extraction_quality, "warnings": extraction_quality["warnings"], "extractionBoundary": "Source spans and structure checked. Semantic relationships are extracted locally by GLiNER-relex; code relationships come from Python syntax. Unresolved call names do not establish runtime targets."}
     from app.services.corpus import publish_document
     counts = {"documents": 1, "sections": len(sections), "chunks": len(chunks), "entities": len(entities), "mentions": mention_count, "assertions": assertion_count, "graph": semantic_graph_name(job["configuration"]), "localGraphWriteBatches": writes.query_count, "localGraphWriteRecords": writes.record_count, **extraction_quality}
