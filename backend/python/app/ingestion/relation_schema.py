@@ -80,4 +80,7 @@ def endpoint_types_allowed(predicate, subject_type, object_type, constraints):
     if contract is None:
         return True
     subjects, objects = contract
+    vocabulary = set().union(*(values for pair in constraints.values() for values in pair))
+    if subject_type.strip().lower() not in vocabulary or object_type.strip().lower() not in vocabulary:
+        return True
     return subject_type.strip().lower() in subjects and object_type.strip().lower() in objects

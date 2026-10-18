@@ -9,6 +9,7 @@ _locks = {}
 _registry_lock = threading.Lock()
 _torch_configured = False
 _compute_lock = threading.Lock()
+_execution_lock = threading.RLock()
 logger = logging.getLogger('argus.local_models')
 _runtime = {}
 
@@ -102,12 +103,22 @@ def configure_runtime(config):
 
 
 def model_lock(name):
-    with _registry_lock:
-        return _locks.setdefault(name, threading.Lock())
+    return _execution_lock
 
 
 def load_model(name, config):
     configure_runtime(config)
+    limit = config.get('localModelCacheSize', 1 if compute_device(config) == 'cpu' else 2)
+    if not 1 <= limit <= 2:
+        raise ValueError('Local model cache size must be one or two')
+    while len(_models) >= limit:
+        previous = next(iter(_models))
+        del _models[previous]
+        gc.collect()
+        if compute_device(config) == 'cuda':
+            import torch
+            torch.cuda.empty_cache()
+        logger.info('Released idle local model %s before loading %s', previous, name)
     from gliner import GLiNER
     from .relex_adapter import install
     started = time.monotonic()
