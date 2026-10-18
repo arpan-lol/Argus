@@ -41,9 +41,9 @@ function state(job: IngestionJob, names: string[]) {
 }
 
 export function IngestionJobs({ jobs, total, offset, onPage, busyJob, pauseRequested, onRetry, onPause, onOpen }: IngestionJobsProps) {
-  const unfinished = jobs.filter(job => !complete.has(job.status)).length;
+  const activeFiles = jobs.filter(job => ['running', 'processing'].includes(job.status)).length;
   return <section className="ce-ingestion" aria-label="Workspace files">
-    <div className="ce-ingestion-heading"><span>Files</span><small>{unfinished ? `${unfinished} in progress` : `${total.toLocaleString()} files`}</small></div>
+    <div className="ce-ingestion-heading"><span>Files</span><small>{total.toLocaleString()} files{activeFiles ? ` · ${activeFiles} processing` : ''}</small></div>
     <div id="file-processing-jobs" className="ce-ingestion-jobs">
       {jobs.map(job => {
         const active = ['running', 'processing'].includes(job.status);

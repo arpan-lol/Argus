@@ -25,10 +25,11 @@ interface FileExplorerProps {
   onDocumentFocus?: (documentId: string, chunkId?: string) => void;
   onOpenReader?: () => void;
   onBackToGraph?: () => void;
+  onJobsChange?: (jobs: IngestionJob[]) => void;
   onSourceSelect?: (source: EvidenceResult) => void;
 }
 
-export function FileExplorer({ projectId, refreshToken = 0, onUpload, focusDocumentId, focusChunkId, focusCollection = 'legacy', focusJobId, documentId, chunkId, uploadRequest = 0, onDocumentFocus, onOpenReader, onBackToGraph }: FileExplorerProps) {
+export function FileExplorer({ projectId, refreshToken = 0, onUpload, focusDocumentId, focusChunkId, focusCollection = 'legacy', focusJobId, documentId, chunkId, uploadRequest = 0, onDocumentFocus, onOpenReader, onBackToGraph, onJobsChange }: FileExplorerProps) {
   const apiRoot = projectId ? `/projects/${encodeURIComponent(projectId)}` : '';
   const fileApi = useCallback(<T,>(path: string, init?: RequestInit) => api<T>(apiRoot + path, init), [apiRoot]);
   const selectedDocumentId = focusDocumentId ?? documentId;
@@ -59,6 +60,7 @@ export function FileExplorer({ projectId, refreshToken = 0, onUpload, focusDocum
   const [page, setPage] = useState(1);
   const chunkRefs = useRef<Map<string, HTMLElement>>(new Map());
   const limit = 24;
+  useEffect(() => { onJobsChange?.(jobs); }, [jobs, onJobsChange]);
   const selectedJobVersion = uploadedSelection ? jobs.filter(job => job.documentId === articleId).map(job => `${job.status}:${job.chunkCount || 0}`).join('|') : '';
   const readerBlocks = useMemo(() => {
     if (!article) return [];
@@ -170,10 +172,10 @@ export function FileExplorer({ projectId, refreshToken = 0, onUpload, focusDocum
   }
 
   return <div className="ce-file-explorer">
-    <div className="ce-file-toolbar">
-      {articleId ? <button className="ce-file-back" onClick={() => { if (projectId) onBackToGraph?.(); else setArticleId(undefined); setError(''); }}><ArrowLeft size={15} />{projectId ? 'Back to graph' : 'All files'}</button> : <span className="ce-file-count">{projectId ? `${jobTotal.toLocaleString()} files` : `${total.toLocaleString()} legacy · ${uploadedTotal.toLocaleString()} processing`}</span>}
+    {(articleId || !projectId) && <div className="ce-file-toolbar">
+      {articleId ? <button className="ce-file-back" onClick={() => { setArticleId(undefined); setPinnedJobId(undefined); setError(''); if (projectId) onBackToGraph?.(); }}><ArrowLeft size={15} />All files</button> : <span className="ce-file-count">{projectId ? pipelineLoading ? 'Loading files…' : `${jobTotal.toLocaleString()} files` : `${total.toLocaleString()} legacy · ${uploadedTotal.toLocaleString()} processing`}</span>}
       {!projectId && <button className="ce-file-preview-button" aria-expanded={uploadOpen} onClick={() => onUpload ? onUpload() : setUploadOpen(true)}><Upload size={14} />Upload file</button>}
-    </div>
+    </div>}
     {uploadOpen && <IngestionUpload onClose={() => setUploadOpen(false)} onUploaded={uploadedFile} />}
     {error && <div className="ce-file-error" role="alert">{error}<button aria-label="Dismiss error" onClick={() => setError('')}><X size={14} /></button></div>}
     {!articleId && jobs.length > 0 && <IngestionJobs jobs={jobs} total={jobTotal} offset={jobOffset} onPage={setJobOffset} busyJob={busyJob} pauseRequested={pauseRequested} onPause={id => void pauseJob(id)} onRetry={id => void retryJob(id)} onOpen={(id, jobId) => { openArticle(id, true); setPinnedJobId(jobId); }} />}
@@ -186,7 +188,7 @@ export function FileExplorer({ projectId, refreshToken = 0, onUpload, focusDocum
         </div>
       </> : !error && <div className="ce-file-empty">No document found.</div>}
     </> : <>
-      <div className="ce-file-list">{!projectId && uploadedTotal > 0 && <h3 className="ce-file-collection-name">Processing pipeline</h3>}{!projectId && uploaded.map(document => <button key={document.id} className="ce-file-row" onClick={() => openArticle(document.id, true)}><span className="ce-file-row-icon"><FileText size={19} /></span><span><strong>{document.title || document.filename}</strong><small>{statusLabel(document.status)} · {document.chunkCount} chunks</small></span><ChevronRight size={15} /></button>)}{!projectId && total > 0 && <div className="ce-file-collection-heading"><h3 className="ce-file-collection-name">Legacy corpus</h3><p>Earlier parsed files.</p></div>}{!projectId && documents.map(document => <button key={document.id} className="ce-file-row" onClick={() => openArticle(document.id)}><span className="ce-file-row-icon"><FileText size={19} /></span><span><strong>{document.title}</strong><small>{document.year || 'Research article'} · {document.chunkCount} chunks</small></span><ChevronRight size={15} /></button>)}{!projectId && !documents.length && !uploaded.length && !error && <div className="ce-file-empty">{catalogLoading || pipelineLoading ? <><Loader2 className="animate-spin" size={20} /> Loading files…</> : <p>No files have been uploaded.</p>}</div>}{projectId && !jobs.length && <div className="ce-file-empty"><p>Your file list is empty.</p></div>}</div>
+      {(!projectId || !jobs.length) && <div className="ce-file-list">{!projectId && uploadedTotal > 0 && <h3 className="ce-file-collection-name">Processing pipeline</h3>}{uploaded.filter(document => !projectId || !jobs.some(job => job.documentId === document.id)).map(document => <button key={document.id} className="ce-file-row" onClick={() => openArticle(document.id, true)}><span className="ce-file-row-icon"><FileText size={19} /></span><span><strong>{document.title || document.filename}</strong><small>{statusLabel(document.status)} · {document.chunkCount} chunks</small></span><ChevronRight size={15} /></button>)}{!projectId && total > 0 && <div className="ce-file-collection-heading"><h3 className="ce-file-collection-name">Legacy corpus</h3><p>Earlier parsed files.</p></div>}{!projectId && documents.map(document => <button key={document.id} className="ce-file-row" onClick={() => openArticle(document.id)}><span className="ce-file-row-icon"><FileText size={19} /></span><span><strong>{document.title}</strong><small>{document.year || 'Research article'} · {document.chunkCount} chunks</small></span><ChevronRight size={15} /></button>)}{!projectId && !documents.length && !uploaded.length && !error && <div className="ce-file-empty">{catalogLoading || pipelineLoading ? <><Loader2 className="animate-spin" size={20} /> Loading files…</> : <p>No files have been uploaded.</p>}</div>}{projectId && !jobs.length && !uploaded.length && !error && <div className="ce-file-empty">{pipelineLoading ? <><Loader2 className="animate-spin" size={20} /> Loading files…</> : <p>No files yet. Add files to get started.</p>}</div>}</div>}
       {!projectId && <div className="ce-file-pagination"><button aria-label="Previous files" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}><ChevronLeft size={16} /></button><span>{Math.min(offset + 1, total)}–{Math.min(offset + limit, total)} of {total.toLocaleString()}</span><button aria-label="Next files" disabled={offset + limit >= total} onClick={() => setOffset(offset + limit)}><ChevronRight size={16} /></button></div>}
     </>}
   </div>;
