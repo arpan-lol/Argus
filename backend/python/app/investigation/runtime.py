@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from typing import TypedDict
 
@@ -139,15 +140,34 @@ class Investigation:
         query = self.request["query"].casefold()
         return any(phrase in query for phrase in ("tool", "capabilit", "what can you do", "how do you work", "agentic"))
 
-    def tool_inventory_question(self):
-        query = self.request["query"].casefold()
+    def explicit_tool_inventory_question(self, query):
         inventory_phrases = ("tools you have", "tools do you have", "your tools", "argus tools", "tools available to you", "tools can you use")
-        if any(phrase in query for phrase in inventory_phrases):
-            return True
-        history = self.request["history"][-2:]
-        return (len(history) == 2 and history[0]["role"] == "user" and history[1]["role"] == "assistant"
-                and any(phrase in history[0]["content"].casefold() for phrase in inventory_phrases)
-                and any(phrase in query for phrase in ("list", "format", "formating", "name", "them", "then")))
+        return (any(phrase in query for phrase in inventory_phrases)
+                and any(phrase in query for phrase in ("how many", "list", "name", "what are", "which tools")))
+
+    def tool_inventory_context(self):
+        history = self.request["history"][-4:]
+        return bool(history and history[-1]["role"] == "assistant" and any(
+            item["role"] == "user" and self.explicit_tool_inventory_question(item["content"].casefold()) for item in history
+        ))
+
+    def tool_inventory_request(self):
+        query = self.request["query"].casefold().replace("\\_", "_")
+        context = self.tool_inventory_context()
+        explicit = self.explicit_tool_inventory_question(query)
+        prefix = re.search(r"\b([a-z][a-z0-9]*_)\b", query)
+        if prefix and ((context or explicit) or "list" in query):
+            return "prefix", prefix.group(1)
+        if context:
+            ordinal = re.search(r"\b([1-9][0-9]*)(st|nd|rd|th)\b", query)
+            if ordinal:
+                return "ordinal", (int(ordinal.group(1)), ordinal.group(2))
+        if explicit or (context and any(phrase in query for phrase in ("list", "format", "formating", "name", "them", "then"))):
+            return "all", None
+        return None
+
+    def tool_inventory_question(self):
+        return self.tool_inventory_request() is not None
 
     def tool_names(self):
         return [name for name in TOOLS if self.request["graph_expansion"] or name not in ("expand_connections", "find_paths", "rank_entities")]
@@ -157,9 +177,11 @@ class Investigation:
         if direct:
             description = (self.config.get("workspaceDescription") or "")[:500]
             policy = NO_SOURCE_POLICY if not self.config["coverage"]["publishedDocuments"] else CONVERSATION_POLICY
-            if self.capability_question():
+            if self.capability_question() or self.tool_inventory_context():
                 names = self.tool_names()
                 policy += f"\nArgus has {len(names)} retrieval tools configured for this request: {', '.join(names)}. Answer questions about available tools from this list. finish_report is an internal output action, not a retrieval tool."
+                if not self.tool_inventory_question():
+                    policy += " Tool descriptions: " + json.dumps({name: TOOLS[name][1] for name in names}, ensure_ascii=False)
                 if not self.config["coverage"]["publishedDocuments"]:
                     policy += " This project has no published semantic sources, so those retrieval tools cannot return project source results yet. Include this availability limit in the answer and do not claim to have run them."
             base = [{"role": "system", "content": policy + "\nProject context: " + json.dumps({"coverage": self.config["coverage"], "workspaceDescription": description}, ensure_ascii=False)}]
@@ -298,11 +320,20 @@ class Investigation:
         return report
 
     def synthesize(self, state):
-        if self.tool_inventory_question():
+        inventory_request = self.tool_inventory_request()
+        if inventory_request:
             names = self.tool_names()
-            answer = f"Argus has {len(names)} retrieval tools configured for this chat:\n\n" + "\n".join(f"{index}. {name}" for index, name in enumerate(names, 1))
-            if not self.config["coverage"]["publishedDocuments"]:
-                answer += "\n\nThis project has no published semantic sources, so the retrieval tools cannot return project source results yet."
+            kind, value = inventory_request
+            if kind == "prefix":
+                matches = [name for name in names if name.startswith(value)]
+                answer = (f"Retrieval tools starting with {value}:\n\n" + "\n".join(f"{index}. {name}" for index, name in enumerate(matches, 1))) if matches else f"No configured retrieval tool starts with {value}."
+            elif kind == "ordinal":
+                number, suffix = value
+                answer = f"The {number}{suffix} tool in the full list is {names[number - 1]}." if number <= len(names) else f"The full list has {len(names)} tools, so there is no {number}{suffix} tool."
+            else:
+                answer = f"Argus has {len(names)} retrieval tools configured for this chat:\n\n" + "\n".join(f"{index}. {name}" for index, name in enumerate(names, 1))
+                if not self.config["coverage"]["publishedDocuments"]:
+                    answer += "\n\nThis project has no published semantic sources, so the retrieval tools cannot return project source results yet."
             report = Report.model_validate({"purpose": "conversation", "paragraphs": [{"text": answer, "citations": []}], "comparison": [], "gaps": []})
             return {**state, "report": report.model_dump()}
         schema_tokens = len(self.encoding.encode(json.dumps(pydantic_function_tool(Report)))) + 256

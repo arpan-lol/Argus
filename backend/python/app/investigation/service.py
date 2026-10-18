@@ -107,7 +107,7 @@ def run_worker(run_id, updates):
             sources = validate_sources(state["sources"], report_references(report), row["configuration"])
             with connection() as conn:
                 budget = conn.execute("SELECT budget FROM chat_runs WHERE id=%s", (run_id,)).fetchone()["budget"]
-            result = {"runId": run_id, "model": row["configuration"]["chatModel"], "report": report.model_dump(), "sources": sources, "coverage": row["configuration"]["coverage"], "usage": {**budget, "toolCalls": state["tool_count"], "runtimeMs": investigation.elapsed(), "costKnown": row["configuration"]["chatPrices"] is not None, "tokensMeaning": "Conservative reservations include maximum output, tool schemas and context; actual usage is recorded in events."}}
+            result = {"runId": run_id, "model": row["configuration"]["chatModel"], "report": report.model_dump(), "sources": sources, "coverage": row["configuration"]["coverage"], "usage": {**budget, "modelCalls": budget.get("modelCalls", 0), "reportedTokens": budget.get("reportedTokens", 0), "reservedTokens": budget.get("reservedTokens", 0), "toolCalls": state["tool_count"], "runtimeMs": investigation.elapsed(), "costKnown": row["configuration"]["chatPrices"] is not None, "tokensMeaning": "Conservative reservations include maximum output, tool schemas and context; actual usage is recorded in events."}}
             with connection() as conn:
                 conn.execute("UPDATE chat_runs SET status='complete',result=%s,runtime_ms=%s,updated_at=now() WHERE id=%s", (Jsonb(result), investigation.elapsed(), run_id))
             emit("done", result)

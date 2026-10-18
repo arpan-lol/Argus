@@ -134,6 +134,45 @@ class InvestigationTest(TestCase):
         self.assertIn("no published semantic sources", answer)
         model.assert_not_called()
 
+    def test_tool_inventory_followup_filters_prefix(self):
+        self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
+        self.row["request"].update(query="list only the read_ ones", graph_expansion=True, history=[
+            {"role": "user", "content": "tell me how many tools you have & also their names"},
+            {"role": "assistant", "content": "Argus has 9 retrieval tools configured for this chat."},
+        ])
+        model = mock.Mock(side_effect=AssertionError("prefix filtering should not use the model"))
+        state = self.runtime(model).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "tool-prefix"}})
+        answer = state["report"]["paragraphs"][0]["text"]
+        self.assertIn("read_chunks", answer)
+        self.assertNotIn("search_sources", answer)
+        self.assertNotIn("rank_entities", answer)
+        model.assert_not_called()
+
+    def test_tool_inventory_followup_answers_ordinal(self):
+        self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
+        self.row["request"].update(query="which is the 9th?", graph_expansion=True, history=[
+            {"role": "user", "content": "tell me how many tools you have & also their names"},
+            {"role": "assistant", "content": "Argus has 9 retrieval tools configured for this chat."},
+            {"role": "user", "content": "list only the read_ ones"},
+            {"role": "assistant", "content": "read_chunks"},
+        ])
+        model = mock.Mock(side_effect=AssertionError("ordinal lookup should not use the model"))
+        state = self.runtime(model).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "tool-ordinal"}})
+        self.assertEqual(state["report"]["paragraphs"][0]["text"], "The 9th tool in the full list is rank_entities.")
+        model.assert_not_called()
+
+    def test_unrecognized_tool_followup_keeps_catalog_for_model(self):
+        self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
+        self.row["request"].update(query="which of those checks author metadata?", history=[
+            {"role": "user", "content": "tell me how many tools you have & also their names"},
+            {"role": "assistant", "content": "Argus has 9 retrieval tools configured for this chat."},
+        ])
+        runtime = self.runtime(mock.Mock())
+        self.assertFalse(runtime.tool_inventory_question())
+        prompt = runtime.messages(initial(), 10000, direct=True)[0]["content"]
+        self.assertIn("source_authors", prompt)
+        self.assertIn("credited authors", prompt)
+
     def test_checkpoint_resume_keeps_sources_tools_and_budget(self):
         self.row["request"]["query"] = "Find the published hello source"
         model = mock.Mock(side_effect=[(call("search_sources", {"query": "hello", "mode": "lexical"}), None), RuntimeError("interrupted")])
