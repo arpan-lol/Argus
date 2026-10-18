@@ -5,6 +5,8 @@
 .argus-projects :is(button,input,textarea):focus-visible{outline:2px solid var(--project-accent);outline-offset:4px}
 .argus-projects ::selection{background:var(--project-accent);color:var(--project-bg)}
 .argus-projects-brand{display:flex;align-items:center;gap:10px;font-size:19px;font-weight:550}
+.argus-projects-theme{display:grid;place-items:center;width:38px;height:38px;margin-left:auto;border:1px solid var(--project-line);border-radius:8px;background:var(--project-surface);color:var(--project-muted)}
+.argus-projects-theme:hover{color:var(--project-text);border-color:var(--project-accent)}
 .argus-projects-content{max-width:1120px;margin:72px auto 40px}
 .argus-projects-heading{margin-bottom:32px}
 .argus-projects h1{font-size:clamp(28px,4vw,38px);font-weight:550;letter-spacing:-.03em;margin:0 0 10px}

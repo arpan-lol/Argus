@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowUpRight, FolderOpen, Loader2, Plus } from 'lucide-react';
+import { ArrowUpRight, FolderOpen, Loader2, Moon, Plus, Sun } from 'lucide-react';
 import { api } from '@/lib/evidence-types';
 import type { Project } from '@/lib/projects';
 import { CreateProjectModal } from './CreateProjectModal';
@@ -14,6 +14,7 @@ export function Projects() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
+  const [dark, setDark] = useState(false);
 
   function load() {
     setLoading(true);
@@ -23,9 +24,21 @@ export function Projects() {
       .finally(() => setLoading(false));
   }
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const value = localStorage.getItem('falkor-theme') === 'dark';
+    setDark(value);
+    document.documentElement.classList.toggle('dark', value);
+  }, []);
+
+  function toggleTheme() {
+    const next = !dark;
+    setDark(next);
+    document.documentElement.classList.toggle('dark', next);
+    localStorage.setItem('falkor-theme', next ? 'dark' : 'light');
+  }
 
   return <main className="argus-projects">
-    <header className="argus-projects-brand"><img src="/argus-logo.svg" alt="" width={30} height={30} /><span>Argus</span></header>
+    <header className="argus-projects-brand"><img src="/argus-logo.svg" alt="" width={30} height={30} /><span>Argus</span><button className="argus-projects-theme" type="button" onClick={toggleTheme} aria-label={`Switch to ${dark ? 'light' : 'dark'} mode`} title={`Switch to ${dark ? 'light' : 'dark'} mode`}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button></header>
     <div className="argus-projects-content"><div className="argus-projects-heading"><h1>Projects</h1><p>A workspace for your sources, conversations, and connected knowledge.</p></div>
       {error && <div className="argus-projects-error" role="alert"><p>{error}</p>{!creating && <button onClick={load}>Try again</button>}</div>}
       {loading ? <p className="argus-projects-loading" role="status"><Loader2 size={18} className="animate-spin" />Loading projects…</p> : <div className="argus-projects-grid">
