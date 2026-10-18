@@ -50,14 +50,17 @@ def _coordinates(graph, jobs, namespace):
     cached = _layouts.get(key)
     if cached and time.monotonic() - cached['created'] < 120:
         return cached
-    links = _query(graph, _relationship_pattern + " RETURN DISTINCT s.id,o.id ORDER BY s.id,o.id LIMIT 20001", jobs)
+    links = _query(graph, _relationship_pattern + " RETURN s.id,o.id,a.id,a.traversalStatus ORDER BY s.id,a.id LIMIT 20001", jobs)
     adjacent = defaultdict(set)
-    for source, target in links[:20000]:
+    for source, target, _, _ in links[:20000]:
+        adjacent[source]
+        adjacent[target]
         if source != target:
             adjacent[source].add(target)
             adjacent[target].add(source)
     pending = set(adjacent)
     components = []
+    membership = {}
     while pending:
         root = min(pending, key=lambda item: (-len(adjacent[item]), item))
         visited = {root}
@@ -71,30 +74,49 @@ def _coordinates(graph, jobs, namespace):
                 if neighbor not in visited:
                     visited.add(neighbor)
                     frontier.append((neighbor, depth + 1))
+        membership.update({identifier: len(components) for identifier in visited})
         components.append((root, layers, len(visited)))
+    source_defined = defaultdict(int)
+    for source, _, _, status in links[:20000]:
+        if status == 'source_structured':
+            source_defined[membership[source]] += 1
     positions = {}
+    component_rank = {}
+    depths = {}
     cursor_x = cursor_y = row_height = 0.0
-    for root, layers, count in sorted(components, key=lambda item: (-item[2], item[0])):
+    ordered_components = sorted(enumerate(components), key=lambda item: (-source_defined[item[0]], -item[1][2], item[1][0]))
+    for rank, (_, (root, layers, count)) in enumerate(ordered_components):
         radius = max(80.0, 50.0 * math.sqrt(count))
         diameter = 2 * radius
-        if cursor_x and cursor_x + diameter > max(3000.0, diameter * 1.6):
+        width = diameter * 2
+        if cursor_x and cursor_x + width > max(3000.0, width * 1.6):
             cursor_x = 0.0
             cursor_y += row_height + 120.0
             row_height = 0.0
-        center_x, center_y = cursor_x + radius, cursor_y + radius
+        center_x, center_y = cursor_x + width / 2, cursor_y + radius
         ordinal = 0
         for depth in sorted(layers):
             for identifier in layers[depth]:
+                component_rank[identifier] = rank
+                depths[identifier] = depth
                 if ordinal == 0:
                     positions[identifier] = (center_x, center_y)
                 else:
                     angle = ordinal * math.pi * (3 - math.sqrt(5))
                     distance = 50.0 * math.sqrt(ordinal)
-                    positions[identifier] = (center_x + math.cos(angle) * distance, center_y + math.sin(angle) * distance)
+                    positions[identifier] = (center_x + math.cos(angle) * distance * 2, center_y + math.sin(angle) * distance)
                 ordinal += 1
-        cursor_x += diameter + 120.0
+        cursor_x += width + 120.0
         row_height = max(row_height, diameter)
-    cached = {'positions': positions, 'created': time.monotonic(), 'truncated': len(links) > 20000, 'orphanY': cursor_y + row_height + 300}
+    pair_counts = defaultdict(int)
+    ordered = []
+    for source, target, assertion, _ in links[:20000]:
+        pair = (source, target)
+        ordinal = pair_counts[pair]
+        pair_counts[pair] += 1
+        ordered.append((component_rank[source], ordinal, max(depths[source], depths[target]), source, target, assertion))
+    ordered.sort()
+    cached = {'positions': positions, 'orderedAssertions': [item[-1] for item in ordered], 'created': time.monotonic(), 'truncated': len(links) > 20000, 'orphanY': cursor_y + row_height + 300}
     if len(_layouts) >= 8:
         _layouts.pop(next(iter(_layouts)))
     _layouts[key] = cached
@@ -124,7 +146,14 @@ def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(
     if q.strip():
         relation_filter += " AND (toLower(s.label) CONTAINS toLower($q) OR toLower(o.label) CONTAINS toLower($q) OR toLower(s.type) CONTAINS toLower($q) OR toLower(o.type) CONTAINS toLower($q))"
     relationship_total = _query(graph, _relationship_pattern + relation_filter + " RETURN count(r)", jobs, focus=focus, q=q)[0][0]
-    rows = _query(graph, _relationship_pattern + relation_filter + " RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset ORDER BY s.id,a.id SKIP $offset LIMIT $limit", jobs, focus=focus, q=q, offset=relationOffset, limit=relationLimit)
+    layout = _coordinates(graph, jobs, namespace)
+    if not focus and not q.strip() and not layout['truncated']:
+        page_ids = layout['orderedAssertions'][relationOffset:relationOffset + relationLimit]
+        rows = _query(graph, _relationship_pattern + " AND a.id IN $page RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset", jobs, page=page_ids) if page_ids else []
+        rank = {identifier: index for index, identifier in enumerate(page_ids)}
+        rows.sort(key=lambda row: rank[row[2]])
+    else:
+        rows = _query(graph, _relationship_pattern + relation_filter + " RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset ORDER BY s.id,a.id SKIP $offset LIMIT $limit", jobs, focus=focus, q=q, offset=relationOffset, limit=relationLimit)
     if path:
         path_rows = _query(graph, _relationship_pattern + " AND a.id IN $path RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset LIMIT 8", jobs, path=list(dict.fromkeys(path)))
         rows = list({row[2]: row for row in [*rows, *path_rows]}.values())
@@ -134,7 +163,6 @@ def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(
         identifiers.add(focus)
     catalog_rows = _query(graph, _entity_pattern + search + " WITH e,count(DISTINCT m) AS mentions RETURN e.id ORDER BY mentions DESC,e.id SKIP $offset LIMIT $limit", jobs, q=q, offset=offset, limit=limit)
     catalog_ids = [row[0] for row in catalog_rows]
-    layout = _coordinates(graph, jobs, namespace)
     entity_records = _entities(graph, jobs, sorted(identifiers | set(catalog_ids)), layout)
     catalog_map = {node['id']: node for node in entity_records}
     entity_page = [catalog_map[identifier] for identifier in catalog_ids if identifier in catalog_map]
@@ -156,7 +184,7 @@ def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(
     xs = [node['x'] for node in nodes] or [0]
     ys = [node['y'] for node in nodes] or [0]
     _verify_snapshot(project_id, jobs, namespace)
-    return {'nodes': nodes, 'entityPage': entity_page, 'edges': edges, 'bounds': {'minX': min(xs) - 120, 'maxX': max(xs) + 120, 'minY': min(ys) - 100, 'maxY': max(ys) + 100}, 'pagination': {'entityTotal': entity_total, 'entityOffset': offset, 'entityLimit': limit, 'hasMoreEntities': offset + limit < entity_total, 'relationshipTotal': relationship_total, 'relationshipOffset': relationOffset, 'relationshipLimit': relationLimit, 'hasMoreRelationships': relationOffset + relationLimit < relationship_total}, 'focusId': focus, 'source': 'falkordb', 'status': 'ready', 'layout': 'Static connected-component radial layout; isolated entities use deterministic positions', 'layoutTruncated': layout['truncated'], 'note': 'Edges are stored semantic relationships. Local model scores are uncalibrated; source-structured records and review statuses remain distinct. Source containment is available in the source graph view.'}
+    return {'nodes': nodes, 'entityPage': entity_page, 'edges': edges, 'bounds': {'minX': min(xs) - 120, 'maxX': max(xs) + 120, 'minY': min(ys) - 100, 'maxY': max(ys) + 100}, 'pagination': {'entityTotal': entity_total, 'connectedEntityTotal': None if layout['truncated'] else len(layout['positions']), 'entityOffset': offset, 'entityLimit': limit, 'hasMoreEntities': offset + limit < entity_total, 'relationshipTotal': relationship_total, 'relationshipOffset': relationOffset, 'relationshipLimit': relationLimit, 'hasMoreRelationships': relationOffset + relationLimit < relationship_total}, 'focusId': focus, 'source': 'falkordb', 'status': 'ready', 'layout': 'Static connected-component radial layout; isolated entities use deterministic positions', 'layoutTruncated': layout['truncated'], 'note': 'Edges are stored semantic relationships. Local model scores are uncalibrated; source-structured records and review statuses remain distinct. Source containment is available in the source graph view.'}
 
 
 @router.get('/entity/{identifier}/mentions')

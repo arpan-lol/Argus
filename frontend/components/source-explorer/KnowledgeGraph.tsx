@@ -7,10 +7,10 @@ import styles from './KnowledgeGraph.module.css';
 
 type Entity = { id: string; type: 'entity'; label: string; entityType: string; x: number; y: number; mentionCount?: number; documentCount?: number; aliases?: string[]; resolutionStatus?: string };
 type Relationship = { id: string; source: string; target: string; label: string; confidence?: number | null; traversalStatus?: string; extractionMethod?: string; quote?: string; chunkId?: string; documentId?: string };
-type KnowledgeView = { nodes: Entity[]; entityPage?: Entity[]; edges: Relationship[]; status?: string; pagination: { entityTotal: number; entityOffset: number; entityLimit: number; hasMoreEntities: boolean; relationshipTotal: number; relationshipOffset: number; relationshipLimit: number; hasMoreRelationships: boolean } };
+type KnowledgeView = { nodes: Entity[]; entityPage?: Entity[]; edges: Relationship[]; status?: string; pagination: { entityTotal: number; connectedEntityTotal?: number | null; entityOffset: number; entityLimit: number; hasMoreEntities: boolean; relationshipTotal: number; relationshipOffset: number; relationshipLimit: number; hasMoreRelationships: boolean } };
 type Mention = { id: string; text: string; chunkId: string; chunkText?: string; documentId: string; documentTitle: string; sourceSpans?: unknown[]; extractionMethod?: string; confidence?: number | null };
 type Mentions = { entity: Entity; mentions: Mention[]; counts: { documents: number; chunks: number; occurrences: number; occurrenceCountTruncated?: boolean; status?: string }; pagination: { total: number; offset: number; limit: number; hasMore: boolean } };
-type Props = { apiRoot: string; refreshToken?: number; focus?: { nodeId: string; nonce: number } | null; trace?: { assertionIds: string[]; nonce: number } | null; onSelect?: (node: Entity) => void; onSource?: (source: { nodeId: string; label?: string }) => void };
+type Props = { apiRoot: string; refreshToken?: number; expanded?: boolean; focus?: { nodeId: string; nonce: number } | null; trace?: { assertionIds: string[]; nonce: number } | null; onSelect?: (node: Entity) => void; onSource?: (source: { nodeId: string; label?: string }) => void };
 type Camera = { x: number; y: number; zoom: number };
 const ENTITY_PAGE = 40;
 const RELATION_PAGE = 60;
@@ -28,7 +28,7 @@ const structuredMention = (mention: Mention) => {
 const hue = (value: string) => { let hash = 0; for (const char of value) hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0; return Math.abs(hash) % 5; };
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 
-export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSelect, onSource }: Props) {
+export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, focus, trace, onSelect, onSource }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const animation = useRef(0);
   const drag = useRef<{ x: number; y: number; camera: Camera } | null>(null);
@@ -56,6 +56,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
   const [reload, setReload] = useState(0);
   const [detailTab, setDetailTab] = useState<'mentions' | 'relationships'>('mentions');
   const fitPending = useRef(true);
+  const previousExpanded = useRef(expanded);
   const externalSelection = useRef<string | null>(null);
   const nodes = useMemo(() => new Map(view.nodes.map(node => [node.id, node])), [view.nodes]);
   const edges = useMemo(() => view.edges.filter(edge => nodes.has(edge.source) && nodes.has(edge.target)), [view.edges, nodes]);
@@ -130,6 +131,13 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
   }, [apiRoot, offset, relationOffset, focusId, refreshToken, reload, query, trace]);
 
   useEffect(() => {
+    if (previousExpanded.current !== expanded) {
+      previousExpanded.current = expanded;
+      fitPending.current = true;
+    }
+  }, [expanded]);
+
+  useEffect(() => {
     if (!loading && fitPending.current && view.nodes.length) { fit(); fitPending.current = false; }
   }, [loading, view.nodes, fit]);
 
@@ -194,8 +202,13 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
   const visibleLabels = useMemo(() => {
     const occupied: { x: number; y: number; width: number }[] = [];
     const shown = new Set<string>();
-    const prioritized = [...view.nodes].sort((a, b) => Number(b.id === selected?.id || b.id === hoverId || b.id === focusId) - Number(a.id === selected?.id || a.id === hoverId || a.id === focusId));
+    const degrees = new Map<string, number>();
+    edges.forEach(edge => { degrees.set(edge.source, (degrees.get(edge.source) || 0) + 1); degrees.set(edge.target, (degrees.get(edge.target) || 0) + 1); });
+    const priority = (node: Entity) => (node.id === selected?.id || node.id === hoverId || node.id === focusId ? 10000 : 0) + (degrees.get(node.id) || 0) * 100 + Math.log1p(node.mentionCount || 0);
+    const prioritized = [...view.nodes].sort((a, b) => priority(b) - priority(a) || a.label.localeCompare(b.label));
+    const labelBudget = Math.max(6, Math.min(16, Math.floor(size.width * size.height / 18000)));
     for (const node of prioritized) {
+      if (shown.size >= labelBudget && node.id !== selected?.id && node.id !== hoverId) continue;
       const x = (node.x - camera.x) * camera.zoom + size.width / 2;
       const y = (node.y - camera.y) * camera.zoom + size.height / 2 + 18;
       const width = Math.min(180, clip(node.label, 30).length * 5.8);
@@ -203,7 +216,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
       if (node.id === selected?.id || node.id === hoverId || !occupied.some(box => Math.abs(box.x - x) < (box.width + width) / 2 + 7 && Math.abs(box.y - y) < 15)) { shown.add(node.id); occupied.push({ x, y, width }); }
     }
     return shown;
-  }, [view.nodes, camera, size, selected?.id, focusId, hoverId]);
+  }, [view.nodes, edges, camera, size, selected?.id, focusId, hoverId]);
   const hasPrevious = focusId ? relationOffset > 0 : offset > 0;
   const hasNext = focusId ? view.pagination.hasMoreRelationships : view.pagination.hasMoreEntities;
 
@@ -214,7 +227,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
         <button type="button" className={`${styles.iconButton} ${catalogOpen ? styles.activeTool : ''}`} title="Browse all entities" aria-label="Browse all entities" aria-expanded={catalogOpen} onClick={() => setCatalogOpen(value => !value)}><List size={16} /></button>
         <label className={styles.find}><Search size={14} aria-hidden="true" /><input aria-label="Search workspace entities" placeholder="Search entities" value={search} onChange={event => setSearch(event.target.value)} /></label>
       </div>
-      {help && <div className={styles.help}><strong>A knowledge graph, with sources one click away</strong><p>Nodes are extracted entities. Arrows show directed, labelled semantic relationships. Documents and chunks are available through each entity’s source mentions.</p><p>Solid arrows come from structured source records. Dashed arrows are unverified model extractions. Dotted arrows need review. A model score is not a probability of truth.</p><p>This is a bounded graph page. Browse more entities or explore one entity’s relationships without loading the whole corpus.</p></div>}
+      {help && <div className={styles.help}><strong>A knowledge graph, with sources one click away</strong><p>Nodes are extracted entities. Arrows show directed, labelled semantic relationships. Documents and chunks are available through each entity’s source mentions.</p><p>Solid arrows come from structured source records. Dashed arrows are unverified model extractions. Dotted arrows need review. A model score is not a probability of truth.</p><p>Loaded counts describe this page. Indexed entities include entities with no relationships, while connected entities participate in at least one. Browse more entities or explore one entity’s relationships without loading the whole corpus.</p></div>}
     </div>
     {search && <div className={styles.searchResults} aria-label="Matching entities">{matching.slice(0, 12).map(node => <button type="button" key={node.id} onClick={() => { select(node); explore(node.id); setCatalogOpen(false); }}>{node.label}<small>{human(node.entityType)}</small></button>)}{!matching.length && <span>No matching entities. Try another name or type.</span>}{matching.length > 12 && <span>Keep typing to narrow {matching.length} matches.</span>}</div>}
     {catalogOpen && <section className={styles.catalog} aria-label="Workspace entity catalog"><header><strong>Workspace entities</strong><button type="button" className={styles.iconButton} aria-label="Close entity catalog" onClick={() => setCatalogOpen(false)}><X size={14} /></button></header><div className={styles.catalogList}>{(view.entityPage || view.nodes).map(node => <button type="button" key={node.id} onClick={() => { select(node); explore(node.id); setCatalogOpen(false); }}><strong>{node.label}</strong><span>{human(node.entityType)}</span><small>{node.documentCount ?? 0} documents · {node.mentionCount ?? 0} mentions</small></button>)}{!loading && !(view.entityPage || view.nodes).length && <p>No entities match this search.</p>}</div><div className={styles.mentionPages}><button type="button" disabled={!offset || loading} onClick={() => setOffset(value => Math.max(0, value - ENTITY_PAGE))}><ArrowLeft size={13} />Previous</button><span>{view.pagination.entityTotal ? `${offset + 1}–${Math.min(offset + (view.entityPage || view.nodes).length, view.pagination.entityTotal)} of ${view.pagination.entityTotal.toLocaleString()}` : '0 entities'}</span><button type="button" disabled={!view.pagination.hasMoreEntities || loading} onClick={() => setOffset(value => value + ENTITY_PAGE)}>Next<ArrowRight size={13} /></button></div></section>}
@@ -245,7 +258,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
             return <g key={edge.id} data-graph-control="edge" className={`${styles.edge} ${native(edge) && !review(edge) ? styles.native : review(edge) ? styles.review : styles.unverified} ${tracedEdges.has(edge.id) ? styles.tracedEdge : ''} ${selectedEdge?.id === edge.id ? styles.activeEdge : ''} ${faded && !tracedEdges.has(edge.id) ? styles.faded : ''}`} role="button" tabIndex={0} aria-label={`${source.label} ${human(edge.label)} ${target.label}. ${relationshipStatus(edge)}`} onMouseEnter={() => setHoverId(edge.id)} onMouseLeave={() => setHoverId(null)} onClick={() => { setSelectedEdge(edge); setSelected(null); }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedEdge(edge); setSelected(null); } }}>
               <title>{`${source.label} → ${human(edge.label)} → ${target.label}\n${relationshipStatus(edge)}`}</title>
               <path className={styles.edgeHit} d={path} /><path className={styles.edgeLine} d={path} markerEnd={`url(#${id}-arrow)`} />
-              {(length * camera.zoom > 140 || selectedEdge?.id === edge.id || hoverId === edge.id) && <text className={styles.edgeLabel} style={{ fontSize: 10 / camera.zoom, strokeWidth: 4 / camera.zoom }} x={midX} y={midY - 5 / camera.zoom} textAnchor="middle">{clip(human(edge.label), 25)}</text>}
+              {(selectedEdge?.id === edge.id || hoverId === edge.id) && <text className={styles.edgeLabel} style={{ fontSize: 10 / camera.zoom, strokeWidth: 4 / camera.zoom }} x={midX} y={midY - 5 / camera.zoom} textAnchor="middle">{clip(human(edge.label), 25)}</text>}
             </g>;
           })}
           {view.nodes.map(node => <g key={node.id} data-graph-control="node" role="button" tabIndex={0} aria-label={`${node.label}, ${human(node.entityType)}, ${node.mentionCount ?? 0} mentions`} className={`${styles.node} ${styles[`hue${hue(node.entityType)}`]} ${tracedNodes.has(node.id) ? styles.tracedNode : ''} ${selected?.id === node.id ? styles.selectedNode : ''} ${search && !matching.some(match => match.id === node.id) && !tracedNodes.has(node.id) ? styles.faded : ''}`} transform={`translate(${node.x} ${node.y})`} onMouseEnter={() => setHoverId(node.id)} onMouseLeave={() => setHoverId(null)} onClick={() => select(node)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); select(node); } }}>
@@ -271,6 +284,6 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, focus, trace, onSele
         </div></>}
       {selectedEdge && <div className={styles.detailBody}><div className={styles.triple}><span>{sourceEntity?.label || 'Source entity'}</span><ArrowRight size={15} /><b>{human(selectedEdge.label)}</b><ArrowRight size={15} /><span>{targetEntity?.label || 'Target entity'}</span></div>{selectedEdge.quote && <blockquote>{selectedEdge.quote}</blockquote>}<p className={styles.mentionSummary}>{native(selectedEdge) ? 'Recorded explicitly in structured source data. This is source attribution, not independent verification.' : codebaseAgent(selectedEdge) ? 'Proposed by the GPT-4.1 mini codebase agent from the cited source line. The source match was checked; the relationship meaning was not independently verified.' : 'Extracted by a local model. Check the source passage and its context before relying on this relationship.'}{typeof selectedEdge.confidence === 'number' ? ` Model score: ${selectedEdge.confidence.toFixed(3)} · uncalibrated` : ''}</p>{selectedEdge.chunkId && onSource && <button type="button" className={styles.sourceLink} onClick={() => openSource(selectedEdge.chunkId, sourceEntity?.label)}>Open source passage<ArrowUpRight size={13} /></button>}</div>}
     </section>}
-    <footer className={styles.footer}><div className={styles.pageStatus} role="status"><span>{view.nodes.length.toLocaleString()} entities · {edges.length.toLocaleString()} relationships shown</span><small>{view.pagination.entityTotal.toLocaleString()} entities in workspace{focusId ? ` · ${view.pagination.relationshipTotal.toLocaleString()} relationships in neighborhood` : ''}</small></div><div className={styles.paging}>{focusId && <button type="button" title="Return to the graph overview" onClick={browse}>Overview</button>}<button type="button" aria-label={focusId ? 'Previous relationships' : 'Previous entities'} disabled={!hasPrevious || loading} onClick={() => page(-1)}><ArrowLeft size={14} /></button><button type="button" aria-label={focusId ? 'Next relationships' : 'Next entities'} disabled={!hasNext || loading} onClick={() => page(1)}><ArrowRight size={14} /></button></div></footer>
+    <footer className={styles.footer}><div className={styles.pageStatus} role="status"><span>{view.nodes.length.toLocaleString()} entities · {edges.length.toLocaleString()} relationships loaded</span><small>{view.pagination.connectedEntityTotal == null ? 'Connected total unavailable' : `${view.pagination.connectedEntityTotal.toLocaleString()} entities with relationships`} · {view.pagination.entityTotal.toLocaleString()} indexed entities · {view.pagination.relationshipTotal.toLocaleString()} {focusId ? 'relationships in neighborhood' : 'relationships total'}</small></div><div className={styles.paging}>{focusId && <button type="button" title="Return to the graph overview" onClick={browse}>Overview</button>}<button type="button" aria-label={focusId ? 'Previous relationships' : 'Previous entities'} disabled={!hasPrevious || loading} onClick={() => page(-1)}><ArrowLeft size={14} /></button><button type="button" aria-label={focusId ? 'Next relationships' : 'Next entities'} disabled={!hasNext || loading} onClick={() => page(1)}><ArrowRight size={14} /></button></div></footer>
   </section>;
 }
