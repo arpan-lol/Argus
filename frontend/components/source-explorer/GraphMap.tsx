@@ -469,7 +469,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     {tooltip && <div className={styles.tooltip} style={{ left: tooltip.x, top: tooltip.y }}><small>{names[tooltip.node.type]}</small><strong>{clip(tooltip.node.preview || tooltip.node.label, 100)}</strong></div>}
     {edgeTooltip && <div className={styles.tooltip} role="tooltip" style={{ left: edgeTooltip.x, top: edgeTooltip.y }}><strong>{edgeMeaning(edgeTooltip.edge)[0]}</strong><p>{edgeMeaning(edgeTooltip.edge)[1]}</p></div>}
     {loading && <div className={styles.notice} role="status"><Loader2 size={15} className={styles.spin} />Opening source map…</div>}
-    {navigatingTo && !loading && <div className={styles.navigationStatus} role="status"><Loader2 size={14} className={styles.spin} />Loading destination connections�</div>}
+    {navigatingTo && !loading && <div className={styles.navigationStatus} role="status"><Loader2 size={14} className={styles.spin} />Loading destination connections…</div>}
     {error && <div className={styles.error} role="alert"><span>{error}</span><button onClick={() => { setError(null); setReload(value => value + 1); }}><RotateCcw size={13} />Retry</button></div>}
     {truncated && !error && !connectionsOpen && <div className={styles.limit}>Zoom in to reveal more sources</div>}
     {connectionsOpen && <ConnectionPaths paths={connections?.paths || []} loading={connectionsLoading} error={connectionsError} truncated={connections?.truncated} activeTargetChunkId={activeConnection?.targetChunkId} onFollow={followConnection} onClose={clearConnections} />}
