@@ -90,7 +90,7 @@ def rank_entities(session, args):
         assertions = [row for row in projection["items"] if row["polarity"] == "affirmed"]
         scope = "Bounded neighborhood of the requested entity"
     else:
-        rows = session.cypher("MATCH (s:Entity)<-[:SUBJECT]-(a:Assertion)-[:OBJECT]->(o:Entity),(a)-[:SUPPORTED_BY]->(c:Chunk) WHERE a.active=true AND c.active=true AND a.jobId IN $jobs AND c.jobId=a.jobId AND a.polarity='affirmed' RETURN a.id,a.jobId,a.predicate,a.polarity,a.conditions,a.quote,a.startOffset,a.endOffset,c.id,s.id,s.label,o.id,o.label ORDER BY a.id LIMIT 201", {}, "bounded assertion ranking projection")
+        rows = session.cypher("MATCH (s:Entity)<-[:SUBJECT]-(a:Assertion)-[:OBJECT]->(o:Entity),(a)-[:SUPPORTED_BY]->(c:Chunk) WHERE a.active=true AND c.active=true AND a.jobId IN $jobs AND c.jobId=a.jobId AND a.polarity='affirmed' AND NOT coalesce(a.traversalStatus,'legacy_unclassified') IN ['needs_context_review','revoked','deprecated'] RETURN a.id,a.jobId,a.predicate,a.polarity,a.conditions,a.quote,a.startOffset,a.endOffset,c.id,s.id,s.label,o.id,o.label ORDER BY a.id LIMIT 201", {}, "bounded assertion ranking projection")
         if len(rows) > 200:
             session.truncate("Ranking projection capped at 200 assertions; this is not a corpus-wide ranking")
         assertions = supported_assertions(session, rows[:200])

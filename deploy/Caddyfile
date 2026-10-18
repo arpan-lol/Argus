@@ -1,0 +1,4 @@
+{$ARGUS_HOSTNAME} {
+	encode zstd gzip
+	reverse_proxy frontend:3001
+}

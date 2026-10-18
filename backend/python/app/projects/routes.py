@@ -55,6 +55,11 @@ class Description(BaseModel):
     categories: list[str] | None = Field(default=None, max_length=8)
 
 
+class IngestionControl(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    action: str = Field(pattern='^(pause|resume)$')
+
+
 def summary(row):
     return {**serialize({key: row[key] for key in ('id', 'name', 'description', 'categories', 'created_at', 'updated_at', 'entity_types', 'relationship_types')}), 'configurationLocked': bool(row.get('profile_id'))}
 
@@ -88,22 +93,32 @@ def project(project_id: str):
 
 @scoped.get('/metrics')
 def metrics(project_id: str):
+    from app.ingestion.metrics import project_metrics
+    return project_metrics(project_id)
+
+
+@scoped.post('/finalize-entities')
+def finalize_entity_vectors(project_id: str):
+    from app.ingestion.entity_finalization import finalize_entities
+    try:
+        return finalize_entities(pipeline, project_id)
+    except RuntimeError as error:
+        raise HTTPException(409, str(error))
+
+
+@scoped.post('/ingestion-control')
+def ingestion_control(project_id: str, body: IngestionControl):
     with connection() as conn:
-        receipts = conn.execute("SELECT i.payload FROM ingestion_items i JOIN ingestion_jobs j ON j.id=i.job_id WHERE j.project_id=%s AND i.stage='provider_call'", (project_id,)).fetchall()
-    totals = {'inputTokens': 0, 'outputTokens': 0, 'embeddingTokens': 0, 'llmCalls': 0, 'embeddingCalls': 0, 'failedCalls': 0, 'durationMs': 0, 'usageMissingCalls': 0}
-    for row in receipts:
-        value = row['payload']
-        usage = value.get('usage') or {}
-        embedding = value.get('kind') in ('embedding', 'query_embedding')
-        totals['embeddingCalls' if embedding else 'llmCalls'] += 1
-        totals['failedCalls'] += int(value.get('status') == 'failed')
-        totals['usageMissingCalls'] += int(not usage)
-        totals['durationMs'] += value.get('durationMs') or 0
-        tokens = usage.get('input_tokens', usage.get('prompt_tokens', 0)) or 0
-        totals['embeddingTokens' if embedding else 'inputTokens'] += tokens
-        if not embedding:
-            totals['outputTokens'] += usage.get('output_tokens', usage.get('completion_tokens', 0)) or 0
-    return {'actualReportedUsage': totals, 'costUsd': None, 'duplicateMode': 'sdk_basic', 'execution': {'queue': 'one job per file', 'workers': int(os.getenv('ARGUS_INGESTION_WORKERS', '1')), 'parallelStages': ['embed', 'mentions', 'configure'], 'chunkEmbeddingBatchSize': 64, 'embeddingTokensPerMinute': processing_config()['embeddingTokensPerMinute']}, 'estimate': {'duplicateLlmCalls': 0, 'extractionLlmCalls': 0, 'workspaceDiscovery': 'Batched random samples; no calls start after 30 seconds; each dispatched response may finish; shared workspace token budget'}}
+        if body.action == 'pause':
+            queued = conn.execute("UPDATE ingestion_jobs SET status='paused',queued_through=NULL,stop_requested=false,updated_at=now() WHERE project_id=%s AND status='queued'", (project_id,)).rowcount
+            active = conn.execute("UPDATE ingestion_jobs SET stop_requested=true,updated_at=now() WHERE project_id=%s AND status='running'", (project_id,)).rowcount
+            result = {'action': body.action, 'paused': queued, 'pausing': active, 'message': 'Queued files paused. Active batches finish before their saved checkpoint.'}
+        else:
+            contract = processing_config(project_id)['contract']
+            resumed = conn.execute("WITH eligible AS (SELECT id FROM ingestion_jobs WHERE project_id=%s AND status IN ('paused','interrupted') AND configuration->>'contract'=%s),locked AS (SELECT id FROM eligible WHERE pg_try_advisory_xact_lock(hashtextextended(id,0))) UPDATE ingestion_jobs j SET status='queued',queued_through='publish',stop_requested=false,error=NULL,updated_at=now() FROM locked WHERE j.id=locked.id AND j.status IN ('paused','interrupted')", (project_id, contract)).rowcount
+            result = {'action': body.action, 'resumed': resumed, 'message': 'Resumed saved checkpoints. Failed files and earlier pipeline versions require individual attention.'}
+    emit(project_id, 'queue_updated', result)
+    return result
 
 
 @scoped.put('/description')
@@ -215,12 +230,8 @@ async def upload_project_files(project_id, files, through, config=None):
             if not profile_id:
                 profile_id = create_profile(project['description'], [source for _, _, _, source in staged], config)['id']
                 conn.execute('UPDATE projects SET profile_id=%s WHERE id=%s', (profile_id, project_id))
-        jobs = [pipeline.register_file(path, source_id=source_id, filename=filename, profile_id=profile_id) for path, filename, source_id, _ in staged]
-        for job in jobs:
-            if job['status'] not in ('complete', 'running', 'queued'):
-                pipeline.enqueue(job['id'], through)
-            emit(project_id, 'file_registered', {'filename': job['filename']}, job['id'])
-        return {'jobs': [pipeline.get_job(job['id']) for job in jobs], 'archives': archives, 'skippedFiles': skipped}
+        jobs = pipeline.register_sources([source for _, _, _, source in staged], config, profile_id, through)
+        return {'jobs': jobs, 'archives': archives, 'skippedFiles': skipped}
     finally:
         for path in temporary:
             path.unlink(missing_ok=True)

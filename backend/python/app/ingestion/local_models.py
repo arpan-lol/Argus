@@ -1,6 +1,7 @@
 import threading
 import gc
 import logging
+import time
 
 
 _models = {}
@@ -8,7 +9,23 @@ _locks = {}
 _registry_lock = threading.Lock()
 _torch_configured = False
 _compute_lock = threading.Lock()
+_execution_lock = threading.RLock()
 logger = logging.getLogger('argus.local_models')
+_runtime = {}
+
+
+def runtime_status():
+    return {**_runtime, 'loadedModels': list(_models), 'availableMemoryBytes': available_memory_bytes()}
+
+
+def compute_device(config):
+    import torch
+    value = config.get('localModelDevice', 'auto')
+    if value not in {'auto', 'cpu', 'cuda'}:
+        raise ValueError('Local model device must be auto, cpu or cuda')
+    if value == 'cuda' and not torch.cuda.is_available():
+        raise ValueError('CUDA was requested but this PyTorch runtime cannot access a CUDA GPU')
+    return 'cuda' if value != 'cpu' and torch.cuda.is_available() else 'cpu'
 
 
 def available_memory_bytes():
@@ -33,16 +50,20 @@ def memory_failure(error):
 
 
 def relation_inference(model, texts, rows, labels, relations, config, batch_size):
-    effective = max(1, min(batch_size, available_memory_bytes() // (768 * 1024 * 1024)))
+    import torch
+    memory = torch.cuda.mem_get_info()[0] if compute_device(config) == 'cuda' else available_memory_bytes()
+    effective = max(1, min(batch_size, memory // (768 * 1024 * 1024)))
     rows = sorted(rows, key=lambda row: row[2] - row[1])
     results = []
     for start in range(0, len(rows), effective):
         group = rows[start:start + effective]
         failed = False
         try:
-            with _compute_lock:
+            with _compute_lock, torch.inference_mode():
                 entities, links = model.inference(texts=[texts[owner][left:right] for owner, left, right in group], labels=labels, relations=relations, threshold=config['relexEntityThreshold'], adjacency_threshold=config['relexAdjacencyThreshold'], relation_threshold=config['relexRelationThreshold'], flat_ner=True, multi_label=False, return_relations=True, batch_size=len(group))
-            results.extend(zip(group, entities, links, strict=True))
+                metrics = list(getattr(model.model, '_argus_span_metrics', []))
+            metrics = metrics if len(metrics) == len(group) else [{} for _ in group]
+            results.extend(zip(group, entities, links, metrics, strict=True))
         except (RuntimeError, MemoryError) as error:
             if not memory_failure(error):
                 raise
@@ -50,6 +71,8 @@ def relation_inference(model, texts, rows, labels, relations, config, batch_size
             logger.warning('Reducing local relation work after allocation failure: items=%s characters=%s error=%s', len(group), sum(right - left for _, left, right in group), str(error)[:180])
         if failed:
             gc.collect()
+            if compute_device(config) == 'cuda':
+                torch.cuda.empty_cache()
             if len(group) > 1:
                 middle = len(group) // 2
                 results.extend(relation_inference(model, texts, group[:middle], labels, relations, config, 1))
@@ -77,25 +100,43 @@ def configure_runtime(config):
             if not 1 <= threads <= 64:
                 raise ValueError('Local model thread count must be between 1 and 64')
             torch.set_num_threads(threads)
+            _runtime.update({'torchVersion': torch.__version__, 'device': compute_device(config), 'threads': threads, 'cudaAvailable': torch.cuda.is_available(), 'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else None})
             _torch_configured = True
 
 
 def model_lock(name):
-    with _registry_lock:
-        return _locks.setdefault(name, threading.Lock())
+    return _execution_lock
 
 
 def load_model(name, config):
     configure_runtime(config)
+    limit = config.get('localModelCacheSize', 0)
+    if limit == 0:
+        limit = 2 if compute_device(config) == 'cuda' or available_memory_bytes() >= 4 * 1024 ** 3 else 1
+    if not 1 <= limit <= 2:
+        raise ValueError('Local model cache size must be one or two')
+    while len(_models) >= limit:
+        previous = next(iter(_models))
+        del _models[previous]
+        gc.collect()
+        if compute_device(config) == 'cuda':
+            import torch
+            torch.cuda.empty_cache()
+        logger.info('Released idle local model %s before loading %s', previous, name)
+    _runtime['modelCacheLimit'] = limit
     from gliner import GLiNER
     from .relex_adapter import install
+    started = time.monotonic()
     try:
         with _compute_lock:
             model = GLiNER.from_pretrained(name, local_files_only=True)
     except OSError:
         with _compute_lock:
             model = GLiNER.from_pretrained(name)
-    return install(model)
+    model.to(compute_device(config))
+    model.eval()
+    logger.info('Loaded local model %s on %s in %.2fs', name, compute_device(config), time.monotonic() - started)
+    return install(model, maximum_spans=config.get('relexMaxSpans', 64))
 
 
 def relex(text, profile, config):
@@ -105,7 +146,7 @@ def relex(text, profile, config):
 def relex_many(texts, profile, config):
     from .batching import service
     from .config import fingerprint
-    key = fingerprint([profile['entityTypes'], profile['relationshipTypes'], profile.get('entityDescriptions'), {name: config.get(name) for name in ('relexModel', 'glinerOverlapWords', 'relexEntityThreshold', 'relexAdjacencyThreshold', 'relexRelationThreshold', 'relexBatchSize', 'localModelThreads')}])
+    key = fingerprint([profile['entityTypes'], profile['relationshipTypes'], profile.get('entityDescriptions'), {name: config.get(name) for name in ('relexModel', 'glinerOverlapWords', 'relexEntityThreshold', 'relexAdjacencyThreshold', 'relexRelationThreshold', 'relexBatchSize', 'relexMaxSpans', 'localModelThreads', 'localModelDevice')}])
     return service('relex').submit(key, texts, lambda values: relex_direct(values, profile, config))
 
 
@@ -125,7 +166,7 @@ def relex_direct(texts, profile, config):
         entity_labels = {value.replace("_", " "): profile.get("entityDescriptions", {}).get(value, value.replace("_", " ")) for value in profile["entityTypes"]}
         entity_names = {value.replace("_", " "): value for value in profile["entityTypes"]}
         relation_names = {value.replace("_", " "): value for value in profile["relationshipTypes"]}
-        outputs = [{'entities': {}, 'relationships': {}, 'windows': [], 'model': name} for text in texts]
+        outputs = [{'entities': {}, 'relationships': {}, 'windows': [], 'spanCandidates': [], 'model': name} for text in texts]
         windows = []
         for owner, text in enumerate(texts):
             words = list(model.data_processor.words_splitter(text))
@@ -144,8 +185,9 @@ def relex_direct(texts, profile, config):
         predictions = relation_inference(model, texts, windows, entity_labels, list(relation_names), config, batch_size)
         for output in outputs:
             output['windows'] = []
-        for (owner, left, right), items, links in predictions:
+        for (owner, left, right), items, links, metrics in predictions:
             outputs[owner]['windows'].append({'start': left, 'end': right})
+            outputs[owner]['spanCandidates'].append({'start': left, 'end': right, **metrics})
             entities, relations = outputs[owner]['entities'], outputs[owner]['relationships']
             for item in items:
                 value = {**item, "start": left + item["start"], "end": left + item["end"], "label": entity_names[item["label"]]}
@@ -160,7 +202,7 @@ def relex_direct(texts, profile, config):
         expected = set(windows)
         for owner, output in enumerate(outputs):
             output['memoryWindowSplit'] = any((owner, window['start'], window['end']) not in expected for window in output['windows'])
-        return [{**output, 'entities': list(output['entities'].values()), 'relationships': list(output['relationships'].values()), 'localAdapter': 'deduplicated-spans-bounded-projection-1' if getattr(model.model, '_argus_bounded_spans', False) else None} for output in outputs]
+        return [{**output, 'entities': list(output['entities'].values()), 'relationships': list(output['relationships'].values()), 'localAdapter': 'ranked-span-beam-pair-cap-2' if getattr(model.model, '_argus_bounded_spans', False) else None} for output in outputs]
 
 
 def ner_many(texts, types, config, stop_check=lambda: None):

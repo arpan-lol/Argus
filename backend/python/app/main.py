@@ -14,6 +14,7 @@ from app.investigation.routes import router as investigation_router
 from app.projects.routes import router as projects_router
 from app.projects.scope import project_scope
 from app.projects.graph import router as project_graph_router
+from app.ingestion.codebase.routes import router as codebase_router
 
 logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger=logging.getLogger("argus")
@@ -42,6 +43,7 @@ app.include_router(retrieval_router,prefix="/api")
 app.include_router(investigation_router,prefix="/api")
 app.include_router(projects_router,prefix='/api')
 app.include_router(project_graph_router,prefix='/api')
+app.include_router(codebase_router,prefix='/api')
 app.include_router(investigation_router,prefix='/api/projects/{project_id}',dependencies=[Depends(project_scope)])
 app.include_router(retrieval_router,prefix='/api/projects/{project_id}',dependencies=[Depends(project_scope)])
 try:

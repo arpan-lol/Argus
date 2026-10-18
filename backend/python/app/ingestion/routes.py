@@ -20,8 +20,8 @@ pipeline = IngestionPipeline()
 
 
 @router.get("/jobs")
-def jobs(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
-    return pipeline.list_jobs(limit, offset)
+def jobs(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0), latest_source: bool = False):
+    return pipeline.list_jobs(limit, offset, latest_source)
 
 
 @router.get("/jobs/{job_id}")
@@ -41,7 +41,8 @@ async def upload(file: UploadFile = File(...), source_id: str | None = Form(None
         if source_id or profile_id or prompt:
             raise HTTPException(400, 'Project uploads use the saved workspace description and shared profile')
         from app.projects.routes import upload_project_files
-        return (await upload_project_files(current_project.get(), [file], through))['jobs'][0]
+        result = await upload_project_files(current_project.get(), [file], through)
+        return pipeline.get_job(result['jobs'][0]['id'])
     if profile_id and prompt:
         raise HTTPException(400, "Supply either a saved corpus profile or a new prompt")
     if prompt is not None and (not prompt.strip() or len(prompt) > 12000):

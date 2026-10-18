@@ -103,14 +103,23 @@ class Providers:
     @staticmethod
     def embed_shared(rows):
         import uuid
+        from .embedding_limits import input_tokens
         batch_id = 'embedding-batch:' + str(uuid.uuid4())
         owners = {}
-        for _, provider in rows:
-            owners.setdefault(id(provider), [provider, 0])[1] += 1
+        for text, provider in rows:
+            entry = owners.setdefault(id(provider), [provider, 0, 0])
+            entry[1] += 1
+            entry[2] += input_tokens([text])
         first = rows[0][1]
         def record(receipt):
-            for index, (provider, count) in enumerate(owners.values()):
-                provider.record_call({**receipt, 'kind': receipt['kind'] if index == 0 else 'embedding_share', 'networkCall': index == 0, 'sharedBatchId': batch_id, 'batchItems': len(rows), 'items': count, 'usage': receipt.get('usage') if index == 0 else None, 'usageScope': 'whole_shared_batch' if index == 0 else 'accounted_by_batch_owner'})
+            total = sum(value[2] for value in owners.values())
+            reported = receipt.get('usage') or {}
+            tokens = reported.get('prompt_tokens', reported.get('input_tokens'))
+            assigned = 0
+            for index, (provider, count, owner_tokens) in enumerate(owners.values()):
+                share = None if tokens is None else tokens - assigned if index == len(owners) - 1 else int(tokens * owner_tokens / max(1, total))
+                assigned += share or 0
+                provider.record_call({**receipt, 'kind': receipt['kind'] if index == 0 else 'embedding_share', 'networkCall': index == 0, 'sharedBatchId': batch_id, 'batchItems': len(rows), 'items': count, 'usage': receipt.get('usage') if index == 0 else None, 'attributedUsage': {'prompt_tokens': share} if share is not None else None, 'estimatedAttributedInputTokens': owner_tokens, 'attribution': 'reported batch tokens allocated by tokenizer input share', 'usageScope': 'whole_shared_batch' if index == 0 else 'accounted_by_batch_owner'})
         provider = Providers(first.config, record)
         return provider.embed_direct([text for text, _ in rows])
 

@@ -56,6 +56,8 @@ def initialize():
                     conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s,0))", (row["id"],))
     with PostgresSaver.from_conn_string(settings.database_url) as saver:
         saver.setup()
+    from .codebase.storage import ensure
+    ensure()
 
 
 def serialize(value):
@@ -117,26 +119,57 @@ class IngestionPipeline:
             raise KeyError(job_id)
         return row
 
-    def get_job(self, job_id):
-        row = self.job_row(job_id)
-        with connection() as conn:
-            attempts = conn.execute("SELECT * FROM ingestion_attempts WHERE job_id=%s ORDER BY id", (job_id,)).fetchall()
-            artifacts = {r["stage"]: r["payload"] for r in conn.execute("SELECT stage,CASE WHEN stage='chunk' THEN jsonb_build_object('count',jsonb_array_length(payload->'chunks')) ELSE payload END AS payload FROM ingestion_artifacts WHERE job_id=%s AND stage IN ('chunk','publish')", (job_id,)).fetchall()}
-            item_counts = conn.execute("SELECT stage,count(*) AS count FROM ingestion_items WHERE job_id=%s GROUP BY stage", (job_id,)).fetchall()
+    def register_sources(self, sources, config, profile_id, through):
+        if through not in STAGES:
+            raise ValueError('Unknown ingestion stage')
+        config = {**config, 'corpusProfileId': profile_id}
+        version = fingerprint(config)
+        identifiers = ['job:' + fingerprint([source['sourceId'], source['revision'], version]) for source in sources]
+        with connection() as conn, conn.cursor() as cursor:
+            cursor.executemany('INSERT INTO ingestion_sources(id,filename,original_path,source_url,media_type,project_id) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET filename=excluded.filename,original_path=excluded.original_path,source_url=COALESCE(excluded.source_url,ingestion_sources.source_url)', [(source['sourceId'], source['filename'], source['originalPath'], source.get('sourceUrl'), mimetypes.guess_type(source['filename'])[0], config.get('projectId')) for source in sources])
+            cursor.executemany('INSERT INTO ingestion_jobs(id,source_id,revision,processing_version,configuration,original_path,project_id) VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING', [(identifier, source['sourceId'], source['revision'], version, Jsonb(config), source['originalPath'], config.get('projectId')) for identifier, source in zip(identifiers, sources, strict=True)])
+            conn.execute("WITH eligible AS (SELECT id FROM ingestion_jobs WHERE id=ANY(%s) AND status NOT IN ('complete','running','queued')),locked AS (SELECT id FROM eligible WHERE pg_try_advisory_xact_lock(hashtextextended(id,0))) UPDATE ingestion_jobs j SET status='queued',error=NULL,stop_requested=false,queued_through=%s,updated_at=now() FROM locked WHERE j.id=locked.id AND j.status NOT IN ('complete','running','queued')", (identifiers, through))
+            cursor.executemany("INSERT INTO project_events(project_id,job_id,kind,payload) VALUES(%s,%s,'file_registered',%s)", [(config['projectId'], identifier, Jsonb({'filename': source['filename']})) for identifier, source in zip(identifiers, sources, strict=True)])
+            rows = conn.execute('SELECT j.id,j.status,j.source_id,j.created_at,s.filename FROM ingestion_jobs j JOIN ingestion_sources s ON s.id=j.source_id WHERE j.id=ANY(%s) ORDER BY s.filename', (identifiers,)).fetchall()
+        return serialize([{'id': row['id'], 'status': row['status'], 'documentId': row['source_id'], 'filename': row['filename'], 'createdAt': row['created_at']} for row in rows])
+
+    def job_response(self, row, attempts, artifacts, item_counts, publication_state):
         stages = []
         for stage in STAGES:
-            history = [a for a in attempts if a["stage"] == stage]
+            history = [attempt for attempt in attempts if attempt["stage"] == stage]
             latest = history[-1] if history else {}
             stages.append({"name": stage, "status": latest.get("status", "queued"), "attempts": len(history), "error": latest.get("error"), "startedAt": latest.get("started_at"), "completedAt": latest.get("finished_at"), "durationMs": latest.get("duration_ms"), "metadata": latest.get("metadata", {}), "history": history})
-        return serialize({"id": row["id"], "filename": row["filename"], "documentId": row["source_id"], "status": row["status"], "currentStage": row["current_stage"], "createdAt": row["created_at"], "updatedAt": row["updated_at"], "error": row["error"], "revision": row["revision"], "processingVersion": row["processing_version"], "configuration": row["configuration"], "stages": stages, "chunkCount": artifacts.get("chunk", {}).get("count", 0), "itemCounts": item_counts, "counts": artifacts.get("publish", {})})
+        return serialize({"id": row["id"], "filename": row["filename"], "documentId": row["source_id"], "status": row["status"], "currentStage": row["current_stage"], "createdAt": row["created_at"], "updatedAt": row["updated_at"], "error": row["error"], "revision": row["revision"], "processingVersion": row["processing_version"], "configuration": row["configuration"], "stages": stages, "chunkCount": artifacts.get("chunk", {}).get("count", 0), "itemCounts": item_counts, "counts": artifacts.get("publish", {}), "publicationState": publication_state})
 
-    def list_jobs(self, limit=50, offset=0):
+    def job_details(self, rows):
+        identifiers = [row['id'] for row in rows]
+        grouped = {identifier: {'attempts': [], 'artifacts': {}, 'counts': [], 'publication': None} for identifier in identifiers}
+        if identifiers:
+            with connection() as conn:
+                for attempt in conn.execute('SELECT * FROM ingestion_attempts WHERE job_id=ANY(%s) ORDER BY id', (identifiers,)).fetchall():
+                    grouped[attempt['job_id']]['attempts'].append(attempt)
+                for artifact in conn.execute("SELECT job_id,stage,CASE WHEN stage='chunk' THEN jsonb_build_object('count',jsonb_array_length(payload->'chunks')) ELSE payload END AS payload FROM ingestion_artifacts WHERE job_id=ANY(%s) AND stage IN ('chunk','publish')", (identifiers,)).fetchall():
+                    grouped[artifact['job_id']]['artifacts'][artifact['stage']] = artifact['payload']
+                for count in conn.execute('SELECT job_id,stage,count(*) AS count FROM ingestion_items WHERE job_id=ANY(%s) GROUP BY job_id,stage', (identifiers,)).fetchall():
+                    grouped[count['job_id']]['counts'].append({'stage': count['stage'], 'count': count['count']})
+                for state in conn.execute("SELECT job_id,payload FROM ingestion_items WHERE job_id=ANY(%s) AND stage='publication_state' AND item_id='current'", (identifiers,)).fetchall():
+                    grouped[state['job_id']]['publication'] = state['payload']
+        return [self.job_response(row, grouped[row['id']]['attempts'], grouped[row['id']]['artifacts'], grouped[row['id']]['counts'], grouped[row['id']]['publication']) for row in rows]
+
+    def get_job(self, job_id):
+        return self.job_details([self.job_row(job_id)])[0]
+
+    def list_jobs(self, limit=50, offset=0, latest_source=False):
         from app.projects.scope import current_project
         project_id = current_project.get()
         with connection() as conn:
-            rows = conn.execute("SELECT id FROM ingestion_jobs WHERE project_id IS NOT DISTINCT FROM %s ORDER BY (status='running') DESC,(status IN ('failed','waiting_configuration','interrupted')) DESC,(status='registered') ASC,updated_at DESC LIMIT %s OFFSET %s", (project_id, limit, offset)).fetchall()
-            total = conn.execute("SELECT count(*) AS count FROM ingestion_jobs WHERE project_id IS NOT DISTINCT FROM %s", (project_id,)).fetchone()["count"]
-        return {"jobs": [self.get_job(row["id"]) for row in rows], "total": total, "limit": limit, "offset": offset}
+            if latest_source:
+                rows = conn.execute("SELECT * FROM (SELECT DISTINCT ON (j.source_id) j.*,s.filename FROM ingestion_jobs j JOIN ingestion_sources s ON s.id=j.source_id WHERE j.project_id IS NOT DISTINCT FROM %s ORDER BY j.source_id,j.created_at DESC,j.id DESC) latest ORDER BY (status='running') DESC,(status IN ('failed','waiting_configuration','interrupted')) DESC,(status='registered') ASC,updated_at DESC LIMIT %s OFFSET %s", (project_id, limit, offset)).fetchall()
+                total = conn.execute("SELECT count(DISTINCT source_id) AS count FROM ingestion_jobs WHERE project_id IS NOT DISTINCT FROM %s", (project_id,)).fetchone()["count"]
+            else:
+                rows = conn.execute("SELECT j.*,s.filename FROM ingestion_jobs j JOIN ingestion_sources s ON s.id=j.source_id WHERE j.project_id IS NOT DISTINCT FROM %s ORDER BY (j.status='running') DESC,(j.status IN ('failed','waiting_configuration','interrupted')) DESC,(j.status='registered') ASC,j.updated_at DESC LIMIT %s OFFSET %s", (project_id, limit, offset)).fetchall()
+                total = conn.execute("SELECT count(*) AS count FROM ingestion_jobs WHERE project_id IS NOT DISTINCT FROM %s", (project_id,)).fetchone()["count"]
+        return {"jobs": self.job_details(rows), "total": total, "limit": limit, "offset": offset}
 
     def artifact(self, job_id, stage):
         with connection() as conn:
@@ -200,6 +233,10 @@ class IngestionPipeline:
                     summaries.append(f"{result['fallbackChunks']} chunks kept local GLiNER mentions after failed extraction; no relationships extracted for those chunks.")
                 if result.get("deferredMentions"):
                     summaries.append(f"{result['deferredMentions']} mentions kept separate; duplicate checks deferred.")
+                if result.get('method') == 'codebase_graph_builder':
+                    summaries.append('Repository graph builder: ' + str(result.get('steps', 0)) + ' shared workspace steps; ' + result.get('quality', 'unverified') + ' coverage')
+                    receipt['codebaseRunId'] = result.get('codebaseRunId')
+                    receipt['codebaseCoverage'] = result.get('coverage')
                 coverage = result.get("metadata", {}).get("sourceCoverage", {})
                 if coverage.get("limitedSource"):
                     receipt["limitedSource"] = True
@@ -277,6 +314,9 @@ class IngestionPipeline:
         row = self.job_row(job_id)
         if row['configuration'].get('contract') != processing_config(row.get('project_id'))['contract']:
             raise RuntimeError('This upload uses an earlier ingestion pipeline. Create a new workspace and upload the original files to rebuild with local extraction.')
+        from .codebase import selected
+        if selected(row) and row['configuration'].get('codeAgentVersion') != processing_config(row.get('project_id')).get('codeAgentVersion'):
+            raise RuntimeError('This code upload predates the repository graph builder. Upload the originals again to use the new codebase pipeline.')
         with connection() as conn:
             acquired = conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS acquired", (job_id,)).fetchone()["acquired"]
             if not acquired:
@@ -328,7 +368,11 @@ class IngestionPipeline:
 
     def stage_parse(self, job):
         from .parser_routing import parse_source
+        from .codebase import selected
         result = parse_source(job["original_path"], job["configuration"], job["filename"])
+        if selected(job) and result['metadata'].get('parser') == 'python_ast':
+            result['metadata']['parser'] = 'source_text'
+            result['metadata']['parserRoute']['selected'] = 'source_text'
         if job["source_url"]:
             result["metadata"]["sourceUrl"] = job["source_url"]
         return result
@@ -336,7 +380,14 @@ class IngestionPipeline:
     def stage_normalize(self, job):
         from .profiles import source_quality
         from .parser_routing import attach_structure
-        result = attach_structure(source_quality(normalize(self.artifact(job["id"], "parse"))), job["filename"])
+        from .codebase import selected
+        result = source_quality(normalize(self.artifact(job["id"], "parse")))
+        if not selected(job):
+            result = attach_structure(result, job["filename"])
+        else:
+            result['metadata']['codeIngestionRoute'] = 'codebase_agent'
+            if result['metadata'].get('parser') == 'python_ast':
+                result['metadata']['parser'] = 'source_text'
         for block in result["blocks"]:
             block["id"] = "block:" + fingerprint([job["id"], block["ordinal"]])
         return result
@@ -359,6 +410,9 @@ class IngestionPipeline:
         return {"chunks": len(chunks), "model": job["configuration"]["embeddingModel"], "dimensions": job["configuration"]["embeddingDimensions"], "storage": "Durable PostgreSQL staging; FalkorDB vector properties/index published only after validation"}
 
     def stage_configure(self, job):
+        from .codebase import selected, configure
+        if selected(job):
+            return configure(job)
         config = job["configuration"]
         from .profiles import prepare_profile
         from .categories import seed_settings
@@ -367,10 +421,18 @@ class IngestionPipeline:
         return seed_settings(config["categories"], config["profileEntityCap"], config["profileRelationshipCap"])
 
     def stage_mentions(self, job):
+        from .codebase import selected
+        if selected(job, self.artifact(job['id'], 'configure')):
+            return {'method': 'codebase_graph_builder', 'mentions': 0, 'localInferenceSkipped': True}
         from .local_extraction import extract_early_mentions
         return extract_early_mentions(self, job)
 
     def stage_extract(self, job):
+        from .codebase import selected, extract
+        if selected(job, self.artifact(job['id'], 'configure')):
+            if not job['configuration'].get('codeAgentVersion'):
+                raise ConfigurationRequired('This code upload predates the repository graph builder. Upload the originals again; old extraction artifacts are not reused.')
+            return extract(self, job)
         from .local_extraction import extract_local
         return extract_local(self, job)
 
@@ -406,14 +468,16 @@ class IngestionPipeline:
         from .publication import supported_spans
         document = self.artifact(job["id"], "normalize")
         chunks = self.artifact(job["id"], "chunk")["chunks"]
+        with connection() as conn:
+            saved_items = {(row["stage"], row["item_id"]): row["payload"] for row in conn.execute("SELECT stage,item_id,payload FROM ingestion_items WHERE job_id=%s AND stage=ANY(%s)", (job["id"], ["embed", "extract", "resolve"])).fetchall()}
         assertions = 0
         for chunk in chunks:
             if document["text"][chunk["startOffset"]:chunk["endOffset"]] != chunk["text"]:
                 raise ValueError("Chunk source offset mismatch")
-            embedded = self.item(job["id"], "embed", chunk["id"])
+            embedded = saved_items.get(("embed", chunk["id"]))
             if not embedded or len(embedded["vector"]) != job["configuration"]["embeddingDimensions"] or not any(embedded["vector"]) or any(not math.isfinite(value) for value in embedded["vector"]):
                 raise ValueError("Chunk embedding missing, nonfinite or wrong dimensionality")
-            extraction = self.item(job["id"], "extract", chunk["id"])
+            extraction = saved_items.get(("extract", chunk["id"]))
             self.validate_extraction(chunk, extraction)
             for record in extraction["entities"] + extraction["relationships"]:
                 supported_spans(chunk, record)
@@ -421,7 +485,7 @@ class IngestionPipeline:
             assertions += len(facts)
             for entity in extraction["entities"]:
                 mention_id = "mention:" + fingerprint([chunk["id"], entity["key"]])
-                if not self.item(job["id"], "resolve", mention_id):
+                if not saved_items.get(("resolve", mention_id)):
                     raise ValueError("Entity resolution artifact missing")
         fallback_count = (self.artifact(job["id"], "extract") or {}).get("fallbackChunks", 0)
         graph = document.get("codeGraph", {})

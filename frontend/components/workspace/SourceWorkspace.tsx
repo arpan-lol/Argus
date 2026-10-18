@@ -1,23 +1,21 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowLeft, ArrowUp, ArrowUpRight, ChevronDown, FileText, Loader2, Maximize2, Minimize2, MessageSquare, Moon, Network, PanelLeftClose, PanelLeftOpen, Paperclip, Plus, Settings2, Sun, Upload, X } from 'lucide-react';
+import { ArrowLeft, ArrowUp, ArrowUpRight, ChevronDown, FileText, Loader2, Maximize2, Minimize2, MessageSquare, Moon, Network, Pause, PanelLeftClose, PanelLeftOpen, Paperclip, Play, Plus, Settings2, Sun, Upload, X } from 'lucide-react';
 import type { ImperativePanelHandle } from 'react-resizable-panels';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
-import { GlassChip, GlassHandle, GlassIconButton } from '@/components/liquid/glass-chrome';
-import { GlassSwitch } from '@/components/ui/glass-switch';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/glass-tabs';
+import { Switch } from '@/components/ui/switch';
 import { ChatResponse } from './ChatResponse';
 import { streamChat, type ChatTurn, type ChatSource, type ChatResult, type ChatEvent, type SavedChat, type ChatCoverage } from '@/lib/chat';
 import { ProjectSources } from '@/components/source-explorer/ProjectSources';
 import { ProcessingActivity } from '@/components/source-explorer/ProcessingActivity';
-import { projectRoot, type Project, type ProcessingEvent } from '@/lib/projects';
+import { projectApi, projectRoot, type Project, type ProcessingEvent } from '@/lib/projects';
 import { normalizeSourceDocument } from '@/lib/ingestion-types';
 import { GraphMap, type MapNode } from '@/components/source-explorer/GraphMap';
+import { KnowledgeGraph } from '@/components/source-explorer/KnowledgeGraph';
 import { useSearchOptions } from '@/hooks/use-search-options';
 import { api, type DocumentSummary, type EvidenceDocument } from '@/lib/evidence-types';
 import { statusLabel, type IngestionJob } from '@/lib/ingestion-types';
-import { GlassScene } from '@/components/liquid/glass-scene';
 
 
 
@@ -39,10 +37,14 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const [streamConnected, setStreamConnected] = useState(false);
   const [dataVersion, setDataVersion] = useState(0);
   const [graphVersion, setGraphVersion] = useState(0);
+  const [queueControlBusy, setQueueControlBusy] = useState<'pause' | 'resume' | null>(null);
+  const [queuePaused, setQueuePaused] = useState<boolean | null>(null);
+  const [queueControlStatus, setQueueControlStatus] = useState('');
+  const [queueControlError, setQueueControlError] = useState('');
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [dark, setDark] = useState(false);
-  const [mapMode, setMapMode] = useState<'network' | 'grouped'>('network');
+  const [graphView, setGraphView] = useState<'knowledge' | 'sources'>('knowledge');
   const [explorerExpanded, setExplorerExpanded] = useState(false);
   const [graphCompact, setGraphCompact] = useState(false);
   const [configurationOpen, setConfigurationOpen] = useState(false);
@@ -73,7 +75,6 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
     void workspaceApi<{model: string; coverage: ChatCoverage}>('/chat-config').then(setChatConfig).catch(() => undefined);
     const saved = savedRuns(projectId);
     void Promise.all(saved.slice(-12).map(id => workspaceApi<SavedChat>(`/chat/${id}`).catch(() => null))).then(runs => setTurns(runs.filter((run): run is SavedChat => !!run).map(run => ({id: run.runId, runId: run.runId, query: run.query, model: run.model, events: run.events, result: run.result || undefined, error: run.result ? undefined : run.error || 'This investigation has saved progress. Reconnect to continue.'}))));
-    setMapMode(localStorage.getItem('argus-map-mode') === 'grouped' ? 'grouped' : 'network');
     const value = localStorage.getItem('falkor-theme') === 'dark';
     setDark(value);
     window.document.documentElement.classList.toggle('dark', value);
@@ -96,9 +97,9 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
     if (!selectedNode) { setNodeDetails(null); return; }
     let active = true;
     setNodeDetails(null);
-    void workspaceApi<Record<string, unknown>>(`/map/node/${encodeURIComponent(selectedNode.id)}?mode=${mapMode}`).then(next => { if (active) setNodeDetails(next); }).catch(() => undefined);
+    void workspaceApi<Record<string, unknown>>(`/map/node/${encodeURIComponent(selectedNode.id)}`).then(next => { if (active) setNodeDetails(next); }).catch(() => undefined);
     return () => { active = false; };
-  }, [selectedNode, mapMode, workspaceApi]);
+  }, [selectedNode, workspaceApi]);
 
   useEffect(() => {
     const dialog = explorerDialog.current;
@@ -132,24 +133,51 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
     let active = true;
     let stream: EventSource | undefined;
     let refreshTimer: number | undefined;
+    let reconnectTimer: number | undefined;
+    let cursor = 0;
+    let lastMessageAt = Date.now();
+    let published = -1;
+    let snapshotRequest = 0;
+    const refreshSnapshot = async (forceGraph = false) => {
+      const request = ++snapshotRequest;
+      try {
+        const next = await workspaceApi<{model: string; coverage: ChatCoverage}>('/chat-config');
+        if (!active || request !== snapshotRequest) return;
+        if (forceGraph || next.coverage.publishedDocuments !== published) setGraphVersion(version => version + 1);
+        published = next.coverage.publishedDocuments;
+        setChatConfig(next);
+        setDataVersion(version => version + 1);
+      } catch { if (active) setStreamConnected(false); }
+    };
+    const connect = () => {
+      if (!active) return;
+      stream = new EventSource(`/api${root}/events?after=${cursor}`);
+      stream.onopen = () => { lastMessageAt = Date.now(); setStreamConnected(true); void refreshSnapshot(true); };
+      stream.onerror = () => {
+        if (!active) return;
+        setStreamConnected(false);
+        stream?.close();
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = window.setTimeout(connect, 3000);
+      };
+      stream.onmessage = message => {
+        if (!active) return;
+        lastMessageAt = Date.now();
+        const event = JSON.parse(message.data) as ProcessingEvent;
+        cursor = Math.max(cursor, event.sequence);
+        setProcessingEvents(previous => previous.some(item => item.sequence === event.sequence) ? previous : [...previous, event].slice(-300));
+        if (event.type === 'graph_updated') { setGraphVersion(version => version + 1); void refreshSnapshot(); }
+        if (!refreshTimer) refreshTimer = window.setTimeout(() => { refreshTimer = undefined; setDataVersion(version => version + 1); }, 1000);
+      };
+    };
     void workspaceApi<Project>('').then(value => {
       if (!active) return;
       setProject(value);
-      stream = new EventSource(`/api${root}/events?after=${Math.max(0, (value.lastEventSequence || 0) - 300)}`);
-      stream.onopen = () => { setStreamConnected(true); setDataVersion(version => version + 1); };
-      stream.onerror = () => setStreamConnected(false);
-      stream.onmessage = message => {
-        const event = JSON.parse(message.data) as ProcessingEvent;
-        setProcessingEvents(previous => previous.some(item => item.sequence === event.sequence) ? previous : [...previous, event].slice(-300));
-        if (event.type === 'graph_updated') {
-          setGraphVersion(version => version + 1);
-          void workspaceApi<{model: string; coverage: ChatCoverage}>('/chat-config').then(setChatConfig).catch(() => undefined);
-        }
-        window.clearTimeout(refreshTimer);
-        refreshTimer = window.setTimeout(() => setDataVersion(version => version + 1), 200);
-      };
+      cursor = Math.max(0, (value.lastEventSequence || 0) - 300);
+      connect();
     }).catch(error => { if (active) setProjectError(error.message); });
-    return () => { active = false; stream?.close(); window.clearTimeout(refreshTimer); };
+    const fallback = window.setInterval(() => { if (Date.now() - lastMessageAt > 15000) void refreshSnapshot(); }, 10000);
+    return () => { active = false; stream?.close(); window.clearTimeout(refreshTimer); window.clearTimeout(reconnectTimer); window.clearInterval(fallback); };
   }, [workspaceApi, root]);
 
   const toggleTheme = () => {
@@ -165,11 +193,25 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
       setSelectedId(chunkId || nextDocumentId);
     }
   };
-  const selectCitation = (source: ChatSource) => { graphPanel.current?.resize(65); setPipelineFocus(source); setDocumentId(source.documentId); setMapFocus({nodeId: source.chunkId || source.documentId, nonce: Date.now()}); };
-  const selectNode = (node: MapNode) => { if (node.documentId) focusSource(node.documentId, node.chunkId); setSelectedId(node.id); setSelectedNode(node); };
+  const selectCitation = (source: ChatSource) => { setGraphView('sources'); graphPanel.current?.resize(65); setPipelineFocus(source); setDocumentId(source.documentId); setMapFocus({nodeId: source.chunkId || source.documentId, nonce: Date.now()}); };
+  const selectNode = (node: MapNode) => { if (node.type === 'entity') { setSelectedNode(null); setGraphView('knowledge'); setMapFocus({nodeId: node.id, nonce: Date.now()}); return; } if (node.documentId) focusSource(node.documentId, node.chunkId); setSelectedId(node.id); setSelectedNode(node); };
   const showFiles = () => filePanel.current?.resize(85);
   const showGraph = () => graphPanel.current?.resize(70);
   const upload = () => { setUploadRequest(previous => previous + 1); };
+  const controlIngestion = async (action: 'pause' | 'resume') => {
+    setQueueControlBusy(action); setQueueControlError(''); setQueueControlStatus('');
+    try {
+      const result = await projectApi<{ action?: 'pause' | 'resume'; counts?: Record<string, number>; [key: string]: unknown }>(projectId, '/ingestion-control', { method: 'POST', body: JSON.stringify({ action }) });
+      const appliedAction = result.action || action;
+      setQueuePaused(appliedAction === 'pause');
+      const counts = result.counts || Object.fromEntries(Object.entries(result).filter(([key, value]) => key !== 'action' && typeof value === 'number')) as Record<string, number>;
+      const summary = Object.entries(counts).map(([name, count]) => `${count.toLocaleString()} ${name}`).join(' · ');
+      setQueueControlStatus(`Ingestion ${appliedAction === 'pause' ? 'paused' : 'resumed'}${summary ? ` · ${summary}` : ''}`);
+      setDataVersion(version => version + 1);
+    } catch (reason) {
+      setQueueControlError(reason instanceof Error ? reason.message : 'Ingestion queue control failed. Try again.');
+    } finally { setQueueControlBusy(null); }
+  };
   const activeStages = new Set<string>();
   for (const event of processingEvents) {
     const key = `${event.jobId || ''}:${event.stage || ''}`;
@@ -189,6 +231,12 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const queuedFiles = workspaceJobs.filter(job => ['registered', 'queued'].includes(job.status)).length;
   const stoppedFiles = workspaceJobs.filter(job => ['failed', 'interrupted', 'budget_exceeded', 'waiting_configuration'].includes(job.status)).length;
   const pausedFiles = workspaceJobs.filter(job => job.status === 'paused').length;
+  useEffect(() => {
+    if (queuePaused !== null) return;
+    const activeOrQueued = workspaceJobs.some(job => ['registered', 'queued', 'running', 'processing'].includes(job.status));
+    if (pausedFiles && !activeOrQueued) setQueuePaused(true);
+    else if (workspaceJobs.length) setQueuePaused(false);
+  }, [workspaceJobs, pausedFiles, queuePaused]);
   const activeStage = lastProcessingEvent?.stage || runningJob?.currentStage || '';
   const stageSummary = runningJob?.stages.find(stage => stage.name === activeStage)?.metadata?.summary?.join(' ');
   const liveProcessingStatus = runningJob ? `${statusLabel(activeStage || runningJob.status)}${lastProcessingEvent?.counts ? ` · ${Object.entries(lastProcessingEvent.counts).map(([name, count]) => `${count.toLocaleString()} ${name}`).join(', ')}` : stageSummary ? ` · ${stageSummary}` : ''} · ${elapsedLabel}` : [queuedFiles ? `${queuedFiles} queued` : '', stoppedFiles ? `${stoppedFiles} needs attention` : '', pausedFiles ? `${pausedFiles} paused` : ''].filter(Boolean).join(' · ') || (workspaceJobs.length ? 'Up to date' : '');
@@ -239,9 +287,8 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const selectedSource = document?.id === selectedNode?.documentId ? document : null;
   const sourceTitle = selectedSource?.title || (selectedNode?.type === 'document' ? selectedNode.preview || selectedNode.label : null);
 
-  return <div className={`ce-workspace lg-root ${sidebarOpen ? '' : 'ce-sidebar-collapsed'}`}>
-    <GlassScene variant="workspace" />
-    <aside className="ce-sidebar" data-glass-anchor="workspace:sidebar" data-glass-radius={20}>
+  return <div className={`ce-workspace ${sidebarOpen ? '' : 'ce-sidebar-collapsed'}`}>
+    <aside className="ce-sidebar">
       <div className="ce-brand"><img src="/argus-logo.svg" alt="" width={29} height={29} /><strong>Argus</strong><button className="ce-icon" onClick={() => setSidebarOpen(false)} aria-label="Collapse sidebar"><PanelLeftClose size={17} /></button></div>
       <a className="ce-project-return" href="/"><ArrowLeft size={17} />Projects</a>
       <div className="ce-navigation-label ce-project-name">{project?.name || 'Workspace'}</div>
@@ -252,30 +299,29 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
     <main className="ce-main">
       <ResizablePanelGroup direction="horizontal" className="ce-panels">
         <ResizablePanel defaultSize={52} minSize={30} className="ce-chat-panel">
-          <div className="ce-glass-anchor" data-glass-anchor="workspace:chat" data-glass-radius={20} />
-          <div className="ce-chat-heading">{!sidebarOpen && <><GlassIconButton size={30} onClick={() => setSidebarOpen(true)} aria-label="Expand sidebar"><PanelLeftOpen size={15} /></GlassIconButton><span className="ce-mobile-brand">Argus</span></>}<span>Chat</span><GlassIconButton size={30} className="ce-mobile-theme" onClick={toggleTheme} aria-label={`Switch to ${dark ? 'light' : 'dark'} mode`}>{dark ? <Sun size={15} /> : <Moon size={15} />}</GlassIconButton><GlassIconButton size={30} className="ce-mobile-source" onClick={() => window.document.querySelector('.ce-explorer-panel')?.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'})} aria-label="Open files and graph"><Network size={15} /></GlassIconButton></div>
+          <div className="ce-chat-heading">{!sidebarOpen && <><button className="ce-icon" onClick={() => setSidebarOpen(true)} aria-label="Expand sidebar"><PanelLeftOpen size={18} /></button><span className="ce-mobile-brand">Argus</span></>}<span>Chat</span><button className="ce-icon ce-mobile-theme" onClick={toggleTheme} aria-label={`Switch to ${dark ? 'light' : 'dark'} mode`}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button><button className="ce-icon ce-mobile-source" onClick={() => window.document.querySelector('.ce-explorer-panel')?.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'})} aria-label="Open files and graph"><Network size={17} /></button></div>
           <div className="ce-messages" ref={messages}>
-            {!turns.length && <div className="ce-chat-empty"><img src="/argus-logo.svg" alt="" width={46} height={46} /><h1>Start with a question.</h1><p>Ask Argus a question and open its citations.<br />{chatConfig ? `${chatConfig.model.toUpperCase()} · ${chatConfig.coverage.publishedDocuments} published sources available` : 'Connecting to the assistant…'}</p><div className="ce-suggestions"><GlassChip onClick={() => void submit(undefined, 'Summarize a published source')}>Summarize a published source<ArrowUp size={13} className="rotate-45" /></GlassChip><GlassChip onClick={() => void submit(undefined, 'What sources can you search?')}>What can you search?<ArrowUp size={13} className="rotate-45" /></GlassChip></div></div>}
+            {!turns.length && <div className="ce-chat-empty"><img src="/argus-logo.svg" alt="" width={46} height={46} /><h1>Start with a question.</h1><p>Ask Argus a question and open its citations.<br />{chatConfig ? `${chatConfig.model.toUpperCase()} · ${chatConfig.coverage.publishedDocuments} published sources available` : 'Connecting to the assistant…'}</p><div className="ce-suggestions"><button onClick={() => void submit(undefined, 'Summarize a published source')}>Summarize a published source<ArrowUp size={14} /></button><button onClick={() => void submit(undefined, 'What sources can you search?')}>What can you search?<ArrowUp size={14} /></button></div></div>}
             {turns.map(turn => <div className="ce-turn" key={turn.id}><div className="ce-user-message">{turn.query}</div><ChatResponse turn={turn} pending={busy && turn.id === activeTurnId && !turn.result && !turn.error} onCitation={selectCitation} onResume={() => void resume(turn)} /></div>)}
           </div>
-          <form className="ce-composer-wrap" onSubmit={submit}><div className="ce-composer"><GlassIconButton size={35} onClick={upload} aria-label="Add files"><Paperclip size={17} /></GlassIconButton><textarea ref={composer} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit(); } }} rows={1} placeholder="Ask about your sources…" aria-label="Message" disabled={busy} /><GlassIconButton tone="accent" size={35} type="submit" disabled={busy || !query.trim()} aria-label="Send message">{busy ? <Loader2 size={16} className="spinning" /> : <ArrowUp size={17} />}</GlassIconButton></div></form>
+          <form className="ce-composer-wrap" onSubmit={submit}><div className="ce-composer"><button type="button" className="ce-icon" onClick={upload} aria-label="Add files"><Paperclip size={20} /></button><textarea ref={composer} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit(); } }} rows={1} placeholder="Ask about your sources…" aria-label="Message" disabled={busy} /><button type="submit" className="ce-send" disabled={busy || !query.trim()} aria-label="Send message">{busy ? <Loader2 size={18} className="spinning" /> : <ArrowUp size={19} />}</button></div></form>
         </ResizablePanel>
-        <ResizableHandle className="ce-resize"><GlassHandle /></ResizableHandle>
+        <ResizableHandle withHandle className="ce-resize" />
         <ResizablePanel defaultSize={48} minSize={28} className="ce-explorer-panel">
-          <div className="ce-glass-anchor" data-glass-anchor="workspace:explorer" data-glass-radius={20} />
           <dialog open ref={explorerDialog} className={`ce-explorer-shell ${explorerExpanded ? 'is-expanded' : ''}`} aria-labelledby="source-explorer-title" onCancel={event => { event.preventDefault(); if (explorerExpanded) setExplorerExpanded(false); }}>
-          <div className="ce-explorer-heading"><div className="ce-workspace-title"><h2 id="source-explorer-title" className="ce-project-name">{project?.name || 'Workspace'}</h2><span className={`ce-live-processing ${runningJob ? 'is-working' : ''}`} role="status" aria-live="polite" title={liveProcessingStatus}>{liveProcessingStatus}</span></div><div className="ce-explorer-actions"><GlassChip className="ce-add-files" disabled={!project} onClick={upload}><span>Add files</span><Plus size={14} /></GlassChip></div></div>
-          {configurationOpen && <section id="engine-configuration" className="ce-configuration"><div><strong>Engine configuration</strong><GlassIconButton size={28} onClick={() => setConfigurationOpen(false)} aria-label="Close engine configuration"><X size={14} /></GlassIconButton></div><label><span>Graph expansion<small>Follow shared connections after search</small></span><GlassSwitch checked={options.graphExpansion} onCheckedChange={checked => updateOptions({ graphExpansion: checked })} ariaLabel="Graph expansion" /></label><p>{chatConfig?.model.toUpperCase() || 'GPT-5'} · {chatConfig?.coverage.publishedDocuments ?? '…'} searchable sources in this project.</p><p>{project?.description || 'Add sources to describe this workspace.'}</p></section>}
+          <div className="ce-explorer-heading"><div className="ce-workspace-title"><h2 id="source-explorer-title" className="ce-project-name">{project?.name || 'Workspace'}</h2><span className={`ce-live-processing ${runningJob ? 'is-working' : ''}`} role="status" aria-live="polite" title={liveProcessingStatus}>{liveProcessingStatus}</span></div><div className="ce-explorer-actions"><button className="ce-queue-control" onClick={() => void controlIngestion('pause')} disabled={!project || queueControlBusy !== null || queuePaused === true} aria-label="Pause ingestion">{queueControlBusy === 'pause' ? <Loader2 size={14} className="spinning" /> : <Pause size={14} />}<span>Pause ingestion</span></button><button className="ce-queue-control" onClick={() => void controlIngestion('resume')} disabled={!project || queueControlBusy !== null || queuePaused === false} aria-label="Resume ingestion">{queueControlBusy === 'resume' ? <Loader2 size={14} className="spinning" /> : <Play size={14} />}<span>Resume ingestion</span></button><button className="ce-add-files" onClick={upload} disabled={!project}><Plus size={16} />Add files</button></div></div>
+          {(queueControlError || queueControlStatus) && <div className={`ce-queue-control-message ${queueControlError ? 'is-error' : ''}`} role={queueControlError ? 'alert' : 'status'} aria-live="polite">{queueControlError || queueControlStatus}</div>}
+          {configurationOpen && <section id="engine-configuration" className="ce-configuration"><div><strong>Engine configuration</strong><button className="ce-icon" onClick={() => setConfigurationOpen(false)} aria-label="Close engine configuration"><X size={16} /></button></div><label><span>Graph expansion<small>Follow shared connections after search</small></span><Switch checked={options.graphExpansion} onCheckedChange={checked => updateOptions({ graphExpansion: checked })} /></label><p>{chatConfig?.model.toUpperCase() || 'GPT-5'} · {chatConfig?.coverage.publishedDocuments ?? '…'} searchable sources in this project.</p><p>{project?.description || 'Add sources to describe this workspace.'}</p></section>}
           {projectError && <p className="ce-inline-error" role="alert">{projectError} <a href="/">Return to projects</a></p>}
           <div className="ce-explorer-content">
             <ResizablePanelGroup direction="vertical" className="ce-source-panels" autoSaveId={`argus-source-split:${projectId}`}>
               <ResizablePanel ref={filePanel} defaultSize={45} minSize={15} className="ce-project-file-panel">
-                {project ? <ProjectSources project={project} uploadRequest={uploadRequest} refreshVersion={dataVersion} focus={pipelineFocus} documentId={documentId} chunkId={selectedNode?.type === 'chunk' ? selectedNode.id : undefined} onProject={setProject} onJobsChange={setWorkspaceJobs} onUploaded={() => setDataVersion(version => version + 1)} onBackToGraph={() => { setDocumentId(undefined); setPipelineFocus(null); graphPanel.current?.resize(55); }} onFocus={(id, chunkId) => { focusSource(id, chunkId); setMapFocus({nodeId: chunkId || id, nonce: Date.now()}); }} /> : !projectError && <div className="ce-file-empty" role="status">Loading workspace…</div>}
+                {project ? <ProjectSources project={project} uploadRequest={uploadRequest} refreshVersion={dataVersion} focus={pipelineFocus} documentId={documentId} chunkId={selectedNode?.type === 'chunk' ? selectedNode.id : undefined} onProject={setProject} onJobsChange={setWorkspaceJobs} onUploaded={() => setDataVersion(version => version + 1)} onBackToGraph={() => { setDocumentId(undefined); setPipelineFocus(null); setGraphView('knowledge'); graphPanel.current?.resize(55); }} onFocus={(id, chunkId) => { focusSource(id, chunkId); setGraphView('sources'); setMapFocus({nodeId: chunkId || id, nonce: Date.now()}); }} /> : !projectError && <div className="ce-file-empty" role="status">Loading workspace…</div>}
               </ResizablePanel>
-              <ResizableHandle className="ce-source-resize" aria-label="Resize files and graph"><GlassHandle /></ResizableHandle>
+              <ResizableHandle withHandle className="ce-source-resize" aria-label="Resize files and graph" />
               <ResizablePanel ref={graphPanel} defaultSize={55} minSize={10} onResize={size => setGraphCompact(size < 20)} className={`ce-project-graph-panel ${graphCompact ? 'is-compact' : ''}`}>
-              <div className="ce-map-toolbar"><h2>Graph</h2><Tabs value={mapMode} onValueChange={value => { setMapMode(value as 'network' | 'grouped'); localStorage.setItem('argus-map-mode', value); }} className="ce-map-modes" aria-label="Graph layout"><TabsList><TabsTrigger value="network" className="px-3.5 py-1.5 text-[11px]">Network</TabsTrigger><TabsTrigger value="grouped" className="px-3.5 py-1.5 text-[11px]">Trees</TabsTrigger></TabsList></Tabs><GlassIconButton size={28} onClick={() => setExplorerExpanded(value => !value)} aria-label={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'} title={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'}>{explorerExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</GlassIconButton></div>
-              <div className="ce-project-graph-content"><GraphMap apiRoot={root} refreshToken={graphVersion} mode={mapMode} focus={mapFocus} onSelect={selectNode} onFocus={target => { if (target.documentId) focusSource(target.documentId, target.chunkId); }} />{chatConfig?.coverage.publishedDocuments === 0 && <div className="ce-project-graph-empty"><p>Your graph starts here.<br />Connections appear as source files finish ingestion.</p></div>}</div>
+              <div className="ce-map-toolbar"><div className="ce-map-modes" role="group" aria-label="Graph view"><button aria-pressed={graphView === 'knowledge'} onClick={() => setGraphView('knowledge')}>Knowledge graph</button><button aria-pressed={graphView === 'sources'} onClick={() => setGraphView('sources')}>Source graph</button></div><button className="ce-icon" onClick={() => setExplorerExpanded(value => !value)} aria-label={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'} title={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'}>{explorerExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button></div>
+              <div className="ce-project-graph-content">{graphView === 'knowledge' ? <KnowledgeGraph apiRoot={root} refreshToken={graphVersion} focus={mapFocus} onSource={target => { setGraphView('sources'); setMapFocus({nodeId: target.nodeId, nonce: Date.now()}); graphPanel.current?.resize(75); }} /> : <GraphMap apiRoot={root} refreshToken={graphVersion} focus={mapFocus} onSelect={selectNode} onFocus={target => { if (target.documentId) focusSource(target.documentId, target.chunkId); }} />}{chatConfig?.coverage.publishedDocuments === 0 && <div className="ce-project-graph-empty"><p>Your graph starts here.<br />Connections appear as source files finish ingestion.</p></div>}</div>
               </ResizablePanel>
             </ResizablePanelGroup>
           </div>
@@ -284,9 +330,9 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
       </ResizablePanelGroup>
     </main>
     <dialog ref={nodeDialog} className="ce-node-dialog" onCancel={() => setSelectedNode(null)} onClick={event => { if (event.target === event.currentTarget) setSelectedNode(null); }} aria-labelledby="node-title">
-      <div className="ce-node-dialog-heading"><h2 id="node-title">{selectedNode?.type === 'chunk' ? 'Chunk preview' : selectedNode?.type === 'document' ? 'Source document' : selectedNode?.label}</h2><GlassIconButton size={30} onClick={() => setSelectedNode(null)} aria-label="Close node details"><X size={15} /></GlassIconButton></div>
+      <div className="ce-node-dialog-heading"><h2 id="node-title">{selectedNode?.type === 'chunk' ? 'Chunk preview' : selectedNode?.type === 'document' ? 'Source document' : selectedNode?.label}</h2><button className="ce-icon" onClick={() => setSelectedNode(null)} aria-label="Close node details"><X size={18} /></button></div>
       {selectedNode?.documentId && <div className="ce-node-source"><span>Source</span><button disabled={!sourceTitle} onClick={() => { if (selectedNode?.documentId) { showGraph(); setMapFocus({nodeId:selectedNode.documentId,nonce:Date.now()}); } setSelectedNode(null); }}>{sourceTitle || 'Loading document…'}{sourceTitle && <ArrowUpRight size={15} />}</button></div>}
-      {(selectedNode?.type === 'entity' || selectedNode?.type === 'group') && typeof nodeDetails?.description === 'string' && <p className="ce-node-description">{nodeDetails.description}</p>}
+      {selectedNode?.type === 'entity' && typeof nodeDetails?.description === 'string' && <p className="ce-node-description">{nodeDetails.description}</p>}
       {selectedNode?.type !== 'document' && <p className="ce-node-content">{typeof recordContent?.text === 'string' ? recordContent.text : selectedChunk?.text || selectedSection?.title || selectedNode?.preview}</p>}
       <div className="ce-node-actions">{selectedNode?.type === 'chunk' && <button className="ce-open-file" onClick={() => { setMapFocus({nodeId:selectedNode.id,nonce:Date.now()}); showGraph(); setSelectedNode(null); }}><Network size={15} />Explore connections</button>}<button className="ce-open-file" onClick={() => { if (selectedNode) setMapFocus({nodeId:selectedNode.id,nonce:Date.now()}); showGraph(); setSelectedNode(null); }}><Network size={15} />Show in graph</button></div>
     </dialog>

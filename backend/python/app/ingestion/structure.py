@@ -11,7 +11,7 @@ def sections_for(document, job):
     for index, (start, label, location) in enumerate(boundaries):
         end = boundaries[index + 1][0] if index + 1 < len(boundaries) else len(document["text"])
         if end > start:
-            sections.append({"id": "section:" + fingerprint([job["id"], start, end]), "documentId": job["source_id"], "title": label, "ordinal": len(sections) + 1, "startOffset": start, "endOffset": end, "locationKind": "source_heading" if location else "source", "sourceLocation": location})
+            sections.append({"id": "section:" + fingerprint([job["id"], start, end]), "documentId": job["source_id"], "title": label, "ordinal": len(sections) + 1, "startOffset": start, "endOffset": end, "locationKind": "source_heading" if location else "source", "sourceLocation": location, "sectionPath": location.get("sectionPath", [label]) if location else [label]})
     return sections
 
 
