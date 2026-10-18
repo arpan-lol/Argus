@@ -118,6 +118,22 @@ class InvestigationTest(TestCase):
         self.assertIn("no published semantic sources", answer)
         model.assert_not_called()
 
+    def test_tool_inventory_formatting_followup_uses_previous_question(self):
+        self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
+        self.row["request"]["query"] = "list then with formating"
+        self.row["request"]["history"] = [
+            {"role": "user", "content": "tell me how many tools you have & also their names"},
+            {"role": "assistant", "content": "Argus has 9 retrieval tools configured for this chat."},
+        ]
+        self.row["request"]["graph_expansion"] = True
+        model = mock.Mock(side_effect=AssertionError("formatting the tool list should not use the model"))
+        state = self.runtime(model).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "tool-list-followup"}})
+        answer = state["report"]["paragraphs"][0]["text"]
+        self.assertIn("1. search_sources\n2. find_entities", answer)
+        self.assertIn("9. rank_entities", answer)
+        self.assertIn("no published semantic sources", answer)
+        model.assert_not_called()
+
     def test_checkpoint_resume_keeps_sources_tools_and_budget(self):
         self.row["request"]["query"] = "Find the published hello source"
         model = mock.Mock(side_effect=[(call("search_sources", {"query": "hello", "mode": "lexical"}), None), RuntimeError("interrupted")])

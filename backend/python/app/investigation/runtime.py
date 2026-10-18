@@ -141,7 +141,13 @@ class Investigation:
 
     def tool_inventory_question(self):
         query = self.request["query"].casefold()
-        return any(phrase in query for phrase in ("tools you have", "tools do you have", "your tools", "argus tools", "tools available to you", "tools can you use"))
+        inventory_phrases = ("tools you have", "tools do you have", "your tools", "argus tools", "tools available to you", "tools can you use")
+        if any(phrase in query for phrase in inventory_phrases):
+            return True
+        history = self.request["history"][-2:]
+        return (len(history) == 2 and history[0]["role"] == "user" and history[1]["role"] == "assistant"
+                and any(phrase in history[0]["content"].casefold() for phrase in inventory_phrases)
+                and any(phrase in query for phrase in ("list", "format", "formating", "name", "them", "then")))
 
     def tool_names(self):
         return [name for name in TOOLS if self.request["graph_expansion"] or name not in ("expand_connections", "find_paths", "rank_entities")]
@@ -294,9 +300,9 @@ class Investigation:
     def synthesize(self, state):
         if self.tool_inventory_question():
             names = self.tool_names()
-            answer = f"Argus has {len(names)} retrieval tools configured for this chat: {', '.join(names)}."
+            answer = f"Argus has {len(names)} retrieval tools configured for this chat:\n\n" + "\n".join(f"{index}. {name}" for index, name in enumerate(names, 1))
             if not self.config["coverage"]["publishedDocuments"]:
-                answer += " This project has no published semantic sources, so the retrieval tools cannot return project source results yet."
+                answer += "\n\nThis project has no published semantic sources, so the retrieval tools cannot return project source results yet."
             report = Report.model_validate({"purpose": "conversation", "paragraphs": [{"text": answer, "citations": []}], "comparison": [], "gaps": []})
             return {**state, "report": report.model_dump()}
         schema_tokens = len(self.encoding.encode(json.dumps(pydantic_function_tool(Report)))) + 256
