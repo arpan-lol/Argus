@@ -1,5 +1,6 @@
 import threading
 import gc
+import logging
 
 
 _models = {}
@@ -7,6 +8,7 @@ _locks = {}
 _registry_lock = threading.Lock()
 _torch_configured = False
 _compute_lock = threading.Lock()
+logger = logging.getLogger('argus.local_models')
 
 
 def available_memory_bytes():
@@ -36,6 +38,7 @@ def relation_inference(model, texts, rows, labels, relations, config, batch_size
             if not memory_failure(error):
                 raise
             failed = True
+            logger.warning('Reducing local relation work after allocation failure: items=%s characters=%s error=%s', len(group), sum(right - left for _, left, right in group), str(error)[:180])
         if failed:
             gc.collect()
             if len(group) > 1:
@@ -45,8 +48,8 @@ def relation_inference(model, texts, rows, labels, relations, config, batch_size
             else:
                 owner, left, right = group[0]
                 words = list(model.data_processor.words_splitter(texts[owner][left:right]))
-                overlap = config['glinerOverlapWords']
-                if len(words) <= 2 * overlap + 16:
+                overlap = min(config['glinerOverlapWords'], max(1, len(words) // 8))
+                if len(words) <= 16:
                     raise RuntimeError('Local relation extraction exceeded available memory even at its smallest safe window')
                 half = len(words) // 2
                 a_end = left + words[min(len(words) - 1, half + overlap)][2]
