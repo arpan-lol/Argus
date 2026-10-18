@@ -4,6 +4,8 @@ import math
 import random
 import re
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextvars import copy_context
 from pathlib import Path
 
 import tiktoken
@@ -39,6 +41,29 @@ PROFILE_PROMPT = """Find additional reusable entity TYPE labels and relationship
 def profile_signature(config):
     keys = ("projectId", "workspaceDescription", "categories", "extractionModel", "llmResourceIdentity", "promptVersion", "profileTokenEncoding", "profileTokenBudget", "profileBatchTokens", "profileOutputTokens")
     return {**{key: config.get(key) for key in keys}, "profileVersion": "sampled-label-batches-2"}
+
+
+def profile_compatible(profile, config):
+    expected = profile_signature(config)
+    actual = profile["model_configuration"]
+    if actual == expected:
+        return True
+    ignored = {"profileTokenBudget", "profileBatchTokens"} if profile["settings"] is not None else set()
+    return {key: value for key, value in actual.items() if key not in ignored} == {key: value for key, value in expected.items() if key not in ignored}
+
+
+def discovery_plan(sources, config):
+    total_bytes = 0
+    for source in sources:
+        try:
+            total_bytes += Path(source["originalPath"]).stat().st_size
+        except OSError:
+            pass
+    estimated_tokens = max(len(sources) * 128, math.ceil(total_bytes / 4))
+    maximum = min(10000, config["profileBatchTokens"])
+    batch_tokens = min(maximum, max(min(1000, maximum), math.ceil(estimated_tokens / 6)))
+    parallel_requests = min(config.get("profileConcurrencyLimit", 4), max(1, math.ceil(estimated_tokens / 10000)))
+    return {"sourceFiles": len(sources), "sourceBytes": total_bytes, "estimatedSourceTokens": estimated_tokens, "batchSourceTokens": batch_tokens, "parallelRequests": parallel_requests, "estimation": "Disk bytes divided by four; an admission heuristic, not a token count"}
 
 
 def public_profile(row):
@@ -85,8 +110,8 @@ def source_quality(document):
 def sampled_batches(sources, config, deadline=None):
     encoding = tiktoken.get_encoding(config["profileTokenEncoding"])
     maximum = config["profileBatchTokens"]
-    if not 256 <= maximum <= 16000:
-        raise ConfigurationRequired("Profile batches must contain 256–16000 source tokens")
+    if not 256 <= maximum <= 10000:
+        raise ConfigurationRequired("Profile batches must contain 256–10000 source tokens")
     randomizer = random.SystemRandom()
     ordered = list(sources)
     randomizer.shuffle(ordered)
@@ -108,6 +133,8 @@ def sampled_batches(sources, config, deadline=None):
             starts = list(range(0, len(tokens), width))
             randomizer.shuffle(starts)
             for index, start in enumerate(starts):
+                if deadline is not None and time.time() >= deadline:
+                    break
                 if index and spare_tokens >= config['profileTokenBudget']:
                     break
                 excerpt = {"sourceId": source["sourceId"], "filename": source["filename"], "tokenStart": start, "text": encoding.decode(tokens[start:start + width])}
@@ -150,48 +177,64 @@ def run_discovery(settings, batches, prompt, config, provider, ledger, deadline,
     excluded = []
     stop_reason = "samples_exhausted"
     batches = iter(batches)
-    while True:
-        stop_check()
-        if clock() >= deadline:
-            stop_reason = "start_window_elapsed"
-            break
-        try:
-            batch, excluded = next(batches)
-        except StopIteration:
-            break
-        if clock() >= deadline:
-            stop_reason = 'start_window_elapsed'
-            break
-        payload = {"workspaceDescription": prompt, "existingEntityTypes": settings["entityTypes"], "existingRelationshipTypes": settings["relationshipTypes"], "samples": batch}
-        serialized = json.dumps({"system": PROFILE_PROMPT, "payload": payload, "schema": ExtractionSettings.model_json_schema()}, ensure_ascii=False)
-        input_reserve = math.ceil(len(encoding.encode(serialized, disallowed_special=())) * 1.25) + 1024
-        reservation = input_reserve + config["profileOutputTokens"]
-        sequence = ledger.reserve(reservation, {"inputTokenReserve": input_reserve, "outputTokenLimit": config["profileOutputTokens"], "sources": [item["sourceId"] for item in batch]})
-        if sequence is None:
-            stop_reason = "token_budget"
-            break
-        if clock() >= deadline:
-            ledger.complete(sequence, "not_dispatched", {"reason": "start_window_elapsed"})
-            stop_reason = "start_window_elapsed"
-            break
-        try:
-            additions = provider.structured(ExtractionSettings, PROFILE_PROMPT, payload, start_before=deadline)
-            additions = ExtractionSettings.model_validate(additions).model_dump()
-            merge_labels(settings, additions, config)
-            ledger.complete(sequence, "complete", {"additions": additions})
-            sampled.update(item["sourceId"] for item in batch)
-            calls += 1
-        except CallWindowClosed:
-            ledger.complete(sequence, "not_dispatched", {"reason": "start_window_elapsed"})
-            stop_reason = "start_window_elapsed"
-            break
-        except ConfigurationRequired as error:
-            ledger.complete(sequence, "configuration_failed", {"error": provider.safe_error(error)})
-            raise
-        except Exception as error:
-            ledger.complete(sequence, "failed", {"error": provider.safe_error(error)})
-            calls += 1
-    return {**settings, "sampling": {"sampledDocuments": len(sampled), "callsThisRun": calls, "excluded": excluded, "stopReason": stop_reason, "startWindowSeconds": config["profileStartWindowSeconds"], "tokenBudget": config["profileTokenBudget"], "strategy": "Randomized files and chunks, grouped source-token batches; bounded spare sample pool"}}
+    parallel = min(4, max(1, config.get("profileParallelRequests", 1)))
+    pending = {}
+    admitting = True
+    configuration_error = None
+    with ThreadPoolExecutor(max_workers=parallel, thread_name_prefix="label-discovery") as executor:
+        while admitting or pending:
+            stop_check()
+            while admitting and len(pending) < parallel:
+                if clock() >= deadline:
+                    stop_reason, admitting = "start_window_elapsed", False
+                    break
+                try:
+                    batch, excluded = next(batches)
+                except StopIteration:
+                    admitting = False
+                    break
+                if clock() >= deadline:
+                    stop_reason, admitting = "start_window_elapsed", False
+                    break
+                payload = {"workspaceDescription": prompt, "existingEntityTypes": list(settings["entityTypes"]), "existingRelationshipTypes": list(settings["relationshipTypes"]), "samples": batch}
+                serialized = json.dumps({"system": PROFILE_PROMPT, "payload": payload, "schema": ExtractionSettings.model_json_schema()}, ensure_ascii=False)
+                input_reserve = math.ceil(len(encoding.encode(serialized, disallowed_special=())) * 1.25) + 1024
+                reservation = input_reserve + config["profileOutputTokens"]
+                sequence = ledger.reserve(reservation, {"inputTokenReserve": input_reserve, "outputTokenLimit": config["profileOutputTokens"], "sources": [item["sourceId"] for item in batch]})
+                if sequence is None:
+                    stop_reason, admitting = "token_budget", False
+                    break
+                if clock() >= deadline:
+                    ledger.complete(sequence, "not_dispatched", {"reason": "start_window_elapsed"})
+                    stop_reason, admitting = "start_window_elapsed", False
+                    break
+                context = copy_context()
+                future = executor.submit(context.run, provider.structured, ExtractionSettings, PROFILE_PROMPT, payload, start_before=deadline)
+                pending[future] = (sequence, batch)
+            if not pending:
+                continue
+            completed, _ = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+            for future in completed:
+                sequence, batch = pending.pop(future)
+                try:
+                    additions = ExtractionSettings.model_validate(future.result()).model_dump()
+                    merge_labels(settings, additions, config)
+                    ledger.complete(sequence, "complete", {"additions": additions})
+                    sampled.update(item["sourceId"] for item in batch)
+                    calls += 1
+                except CallWindowClosed:
+                    ledger.complete(sequence, "not_dispatched", {"reason": "start_window_elapsed"})
+                    stop_reason, admitting = "start_window_elapsed", False
+                except ConfigurationRequired as error:
+                    ledger.complete(sequence, "configuration_failed", {"error": provider.safe_error(error)})
+                    configuration_error = error
+                    admitting = False
+                except Exception as error:
+                    ledger.complete(sequence, "failed", {"error": provider.safe_error(error)})
+                    calls += 1
+    if configuration_error is not None:
+        raise configuration_error
+    return {**settings, "sampling": {"sampledDocuments": len(sampled), "callsThisRun": calls, "excluded": excluded, "stopReason": stop_reason, "startWindowSeconds": config["profileStartWindowSeconds"], "tokenBudget": config["profileTokenBudget"], "batchSourceTokens": config.get("profileBatchTokens"), "parallelRequests": parallel, "strategy": "Randomized files and chunks; adaptive source-token batches with bounded parallel admission"}}
 
 
 class ProfileLedger:
@@ -216,7 +259,7 @@ class ProfileLedger:
 def prepare_profile(pipeline, job, profile_id):
     config = job["configuration"]
     profile = get_profile(profile_id)
-    if profile["model_configuration"] != profile_signature(config):
+    if not profile_compatible(profile, config):
         raise ConfigurationRequired("Workspace extraction profile belongs to a different configuration")
     with connection() as lease:
         while not lease.execute("SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS ok", (profile_id,)).fetchone()["ok"]:
@@ -230,7 +273,8 @@ def prepare_profile(pipeline, job, profile_id):
             profile = get_profile(profile_id)
             if profile["settings"] is not None:
                 return {**profile["settings"], "profileId": profile_id, "sampling": profile["sampling"]}
-            config = {**config, "maxOutputTokens": config["profileOutputTokens"]}
+            plan = discovery_plan(profile["source_manifest"], config)
+            config = {**config, "maxOutputTokens": config["profileOutputTokens"], "profileBatchTokens": plan["batchSourceTokens"], "profileParallelRequests": plan["parallelRequests"]}
             settings = seed_settings(config["categories"], config["profileEntityCap"], config["profileRelationshipCap"])
             settings["extractionInstructions"] = profile["prompt"]
             with connection() as conn:
@@ -247,7 +291,7 @@ def prepare_profile(pipeline, job, profile_id):
                     from .pipeline import PauseRequested
                     raise PauseRequested()
             settings = run_discovery(settings, batches, profile["prompt"], config, provider, ProfileLedger(profile_id, config["profileTokenBudget"]), deadline, stop_check=stop_check)
-            sampling = settings.pop("sampling")
+            sampling = {**settings.pop("sampling"), "plan": plan}
             settings["profileOrigin"] = "category_defaults_plus_sampled_labels"
             with connection() as conn:
                 conn.execute("UPDATE ingestion_profiles SET settings=%s,sampling=%s,completed_at=now() WHERE id=%s", (Jsonb(settings), Jsonb(sampling), profile_id))
