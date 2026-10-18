@@ -133,24 +133,51 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
     let active = true;
     let stream: EventSource | undefined;
     let refreshTimer: number | undefined;
+    let reconnectTimer: number | undefined;
+    let cursor = 0;
+    let lastMessageAt = Date.now();
+    let published = -1;
+    let snapshotRequest = 0;
+    const refreshSnapshot = async (forceGraph = false) => {
+      const request = ++snapshotRequest;
+      try {
+        const next = await workspaceApi<{model: string; coverage: ChatCoverage}>('/chat-config');
+        if (!active || request !== snapshotRequest) return;
+        if (forceGraph || next.coverage.publishedDocuments !== published) setGraphVersion(version => version + 1);
+        published = next.coverage.publishedDocuments;
+        setChatConfig(next);
+        setDataVersion(version => version + 1);
+      } catch { if (active) setStreamConnected(false); }
+    };
+    const connect = () => {
+      if (!active) return;
+      stream = new EventSource(`/api${root}/events?after=${cursor}`);
+      stream.onopen = () => { lastMessageAt = Date.now(); setStreamConnected(true); void refreshSnapshot(true); };
+      stream.onerror = () => {
+        if (!active) return;
+        setStreamConnected(false);
+        stream?.close();
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = window.setTimeout(connect, 3000);
+      };
+      stream.onmessage = message => {
+        if (!active) return;
+        lastMessageAt = Date.now();
+        const event = JSON.parse(message.data) as ProcessingEvent;
+        cursor = Math.max(cursor, event.sequence);
+        setProcessingEvents(previous => previous.some(item => item.sequence === event.sequence) ? previous : [...previous, event].slice(-300));
+        if (event.type === 'graph_updated') { setGraphVersion(version => version + 1); void refreshSnapshot(); }
+        if (!refreshTimer) refreshTimer = window.setTimeout(() => { refreshTimer = undefined; setDataVersion(version => version + 1); }, 1000);
+      };
+    };
     void workspaceApi<Project>('').then(value => {
       if (!active) return;
       setProject(value);
-      stream = new EventSource(`/api${root}/events?after=${Math.max(0, (value.lastEventSequence || 0) - 300)}`);
-      stream.onopen = () => { setStreamConnected(true); setDataVersion(version => version + 1); };
-      stream.onerror = () => setStreamConnected(false);
-      stream.onmessage = message => {
-        const event = JSON.parse(message.data) as ProcessingEvent;
-        setProcessingEvents(previous => previous.some(item => item.sequence === event.sequence) ? previous : [...previous, event].slice(-300));
-        if (event.type === 'graph_updated') {
-          setGraphVersion(version => version + 1);
-          void workspaceApi<{model: string; coverage: ChatCoverage}>('/chat-config').then(setChatConfig).catch(() => undefined);
-        }
-        window.clearTimeout(refreshTimer);
-        refreshTimer = window.setTimeout(() => setDataVersion(version => version + 1), 200);
-      };
+      cursor = Math.max(0, (value.lastEventSequence || 0) - 300);
+      connect();
     }).catch(error => { if (active) setProjectError(error.message); });
-    return () => { active = false; stream?.close(); window.clearTimeout(refreshTimer); };
+    const fallback = window.setInterval(() => { if (Date.now() - lastMessageAt > 15000) void refreshSnapshot(); }, 10000);
+    return () => { active = false; stream?.close(); window.clearTimeout(refreshTimer); window.clearTimeout(reconnectTimer); window.clearInterval(fallback); };
   }, [workspaceApi, root]);
 
   const toggleTheme = () => {
