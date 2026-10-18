@@ -17,6 +17,9 @@ class CheckResult(BaseModel):
 
 class AzureProvidersTest(TestCase):
     def setUp(self):
+        pacing = mock.patch('app.ingestion.embedding_limits.wait_for_capacity', return_value=0)
+        pacing.start()
+        self.addCleanup(pacing.stop)
         environment = mock.patch.dict(os.environ, {key: "" for key in ("LLM1_DEPLOYMENT_NAME", "LLM1_DEPLOYMENT_URL", "LLM2_DEPLOYMENT_NAME", "LLM2_DEPLOYMENT_URL", "AZURE_API_KEY")})
         environment.start()
         self.addCleanup(environment.stop)
@@ -96,7 +99,7 @@ class AzureProvidersTest(TestCase):
     def test_configuration_records_routes_without_keys(self):
         with mock.patch.dict(os.environ, {"ARGUS_LLM_PROVIDER": "azure_inference", "ARGUS_RESOLUTION_PROVIDER": "azure_openai", "AZURE_INFERENCE_API_KEY": "private-inference-test-key", "AZURE_OPENAI_API_KEY": "private-openai-test-key", "AZURE_INFERENCE_ENDPOINT": "https://inference.example/models", "AZURE_OPENAI_BASE_URL": "https://openai.example/openai/v1"}):
             config = processing_config()
-        self.assertEqual(config["llmProvider"], "azure_inference")
-        self.assertEqual(config["resolutionProvider"], "azure_openai")
+        self.assertEqual(config["llmProvider"], "azure_openai")
+        self.assertNotIn('resolutionProvider', config)
         self.assertNotIn("private-inference-test-key", json.dumps(config))
         self.assertNotIn("private-openai-test-key", json.dumps(config))

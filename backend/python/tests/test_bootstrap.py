@@ -27,7 +27,8 @@ class BootstrapTest(unittest.TestCase):
                     result = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True, timeout=60)
                     self.assertEqual(result.returncode, 0, result.stderr)
                 with psycopg.connect(target) as conn:
-                    self.assertEqual(conn.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 5)
+                    applied = {row[0] for row in conn.execute('SELECT version FROM schema_migrations').fetchall()}
+                    self.assertEqual(applied, {path.name for path in (root / 'backend' / 'python' / 'migrations').glob('*.sql')})
                     self.assertEqual(conn.execute("SELECT count(*) FROM ingestion_publications").fetchone()[0], 0)
                     self.assertIsNotNone(conn.execute("SELECT to_regclass('ingestion_publications_active_sources')").fetchone()[0])
                     self.assertIsNotNone(conn.execute("SELECT to_regclass('retrieval_query_embeddings')").fetchone()[0])

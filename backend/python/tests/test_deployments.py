@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 from unittest import TestCase, mock
 
@@ -8,7 +9,7 @@ from pydantic import BaseModel
 
 from app.ingestion.config import processing_config
 from app.ingestion.deployments import base_url, deployment
-from app.ingestion.providers import Providers
+from app.ingestion.providers import Providers, ConfigurationRequired
 from app.ingestion.publication import semantic_graph_name
 
 
@@ -26,10 +27,13 @@ class DeploymentNamesTest(TestCase):
         }, clear=True)
         environment.start()
         self.addCleanup(environment.stop)
+        pacing = mock.patch('app.ingestion.embedding_limits.wait_for_capacity', return_value=0)
+        pacing.start()
+        self.addCleanup(pacing.stop)
         self.requests = []
         self.receipts = []
         self.config = processing_config()
-        self.embedding_rows = [{"object": "embedding", "index": 0, "embedding": [1., 2., 3.]}]
+        self.embedding_rows = [{"object": "embedding", "index": 0, "embedding": [1.] * 3072}]
 
     def transport(self, request):
         self.requests.append(request)
@@ -44,42 +48,42 @@ class DeploymentNamesTest(TestCase):
         with mock.patch.dict(os.environ, {"ARGUS_LLM_PROVIDER": "azure_inference", "ARGUS_EXTRACTION_MODEL": "old-model"}):
             config = processing_config()
         self.assertEqual(config["extractionModel"], "gpt-4.1-mini")
-        self.assertEqual(config["resolutionModel"], "gpt-4.1-mini")
+        self.assertNotIn('resolutionModel', config)
         self.assertEqual(config["llmBaseUrl"], "https://secondary.example/openai/v1")
         self.assertEqual(config["llmApi"], "responses")
         self.assertEqual(config["embeddingDimensions"], 3072)
         self.assertEqual(config["embeddingBaseUrl"], "https://embeddings.example/openai/v1")
         self.assertNotIn("test-key", json.dumps(config))
 
-    def test_primary_and_secondary_use_their_own_keys_and_protocol(self):
+    def test_ingestion_uses_secondary_with_no_duplicate_llm(self):
         provider = Providers(self.config, self.receipts.append)
         with mock.patch("openai.OpenAI", side_effect=self.client), mock.patch.object(provider, "wait_for_capacity", return_value=0):
             self.assertEqual(provider.structured(Check, "Return JSON", {}), {"ok": True})
-            self.assertEqual(provider.structured(Check, "Return JSON", {}, judge=True), {"ok": True})
+            with self.assertRaises(ConfigurationRequired):
+                provider.structured(Check, "Return JSON", {}, judge=True)
         self.assertEqual(self.requests[0].headers["api-key"], "secondary-test-key")
-        self.assertEqual(self.requests[1].headers["api-key"], "secondary-test-key")
+        self.assertEqual(len(self.requests), 1)
         for request in self.requests:
             self.assertEqual(request.url.path, "/openai/v1/responses")
             body = json.loads(request.content)
             self.assertFalse(body["store"])
             self.assertTrue(body["text"]["format"]["strict"])
         self.assertNotIn("reasoning", json.loads(self.requests[0].content))
-        self.assertNotIn("reasoning", json.loads(self.requests[1].content))
         self.assertNotIn("test-key", json.dumps(self.receipts))
 
     def test_embedding_ingestion_and_queries_use_same_endpoint_and_key(self):
-        provider = Providers({**self.config, "embeddingDimensions": 3}, self.receipts.append)
+        provider = Providers(self.config, self.receipts.append)
         with mock.patch("openai.OpenAI", side_effect=self.client):
-            self.assertEqual(provider.embed(["source"]), [[1., 2., 3.]])
-            self.assertEqual(provider.embed_query("question"), [1., 2., 3.])
+            self.assertEqual(provider.embed(["source"]), [[1.] * 3072])
+            self.assertEqual(provider.embed_query("question"), [1.] * 3072)
         for request in self.requests:
             self.assertEqual(str(request.url), "https://embeddings.example/openai/v1/embeddings")
             self.assertEqual(request.headers["api-key"], "embedding-test-key")
-            self.assertEqual(json.loads(request.content)["dimensions"], 3)
+            self.assertEqual(json.loads(request.content)["dimensions"], 3072)
         self.assertNotIn("test-key", json.dumps(self.receipts))
 
     def test_embedding_rejects_malformed_dimensions_and_indexes(self):
-        provider = Providers({**self.config, "embeddingDimensions": 3})
+        provider = Providers(self.config)
         with mock.patch("openai.OpenAI", side_effect=self.client):
             self.embedding_rows[0]["embedding"] = [1.]
             with self.assertRaisesRegex(ValueError, "dimensions"):
@@ -89,7 +93,8 @@ class DeploymentNamesTest(TestCase):
                 provider.embed(["source"])
 
     def test_vector_namespace_is_endpoint_specific(self):
-        other = {**self.config, "embeddingBaseUrl": "https://other.example/openai/v1"}
+        endpoint = 'https://other.example/openai/v1'
+        other = {**self.config, "embeddingBaseUrl": endpoint, 'embeddingResourceIdentity': hashlib.sha256((endpoint + '/').encode()).hexdigest()}
         self.assertNotEqual(semantic_graph_name(self.config), semantic_graph_name(other))
         self.assertNotEqual(semantic_graph_name(self.config), semantic_graph_name({**self.config, "provider": "google"}))
 

@@ -4,19 +4,26 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const venv = path.join(root, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+const environment = path.join(root, 'backend', 'python', '.venv');
+const binary = process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python';
+const venv = path.join(environment, binary);
+const legacyVenv = path.join(root, '.venv', binary);
 const mode = process.argv[2] || 'dev';
 if (mode === 'setup' && !existsSync(venv)) {
-  const created = spawnSync(process.env.PYTHON || 'python', ['-m', 'venv', path.join(root, '.venv')], { cwd: root, stdio: 'inherit', windowsHide: true });
+  const created = spawnSync(process.env.PYTHON || 'python', ['-m', 'venv', environment], { cwd: root, stdio: 'inherit', windowsHide: true });
   if (created.error) throw created.error;
   if (created.status !== 0) process.exit(created.status ?? 1);
 }
-const python = existsSync(venv) ? venv : (process.env.PYTHON || 'python');
+const python = existsSync(venv) ? venv : existsSync(legacyVenv) ? legacyVenv : (process.env.PYTHON || 'python');
+if (mode === 'setup' && spawnSync(python, ['-m', 'pip', '--version'], { cwd: root, stdio: 'ignore', windowsHide: true }).status !== 0) {
+  const seeded = spawnSync(python, ['-m', 'ensurepip', '--upgrade'], { cwd: root, stdio: 'inherit', windowsHide: true });
+  if (seeded.status !== 0) process.exit(seeded.status ?? 1);
+}
 const commands = {
   dev: ['-m', 'uvicorn', 'app.main:app', '--app-dir', 'backend/python', '--host', '127.0.0.1', '--port', '4000', '--reload', '--reload-dir', 'backend/python/app'],
   start: ['-m', 'uvicorn', 'app.main:app', '--app-dir', 'backend/python', '--host', '127.0.0.1', '--port', '4000'],
   build: ['-m', 'compileall', '-q', 'backend/python/app', 'backend/python/scripts'],
-  setup: ['-m', 'pip', 'install', '-r', 'backend/python/requirements.txt', '-r', 'backend/python/requirements-ingestion.txt'],
+  setup: ['-m', 'pip', 'install', '-r', 'backend/python/requirements-lock.txt'],
   migrate: ['backend/python/scripts/migrate_legacy.py'],
   ingest: ['scripts/python/ingest.py'],
 };

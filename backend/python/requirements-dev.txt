@@ -1,0 +1,3 @@
+-r requirements.txt
+-r requirements-ingestion.txt
+pytest>=8,<10
