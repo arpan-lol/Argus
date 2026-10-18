@@ -10,7 +10,7 @@ logger = logging.getLogger("argus.worker")
 
 class IngestionWorkers:
     def __init__(self):
-        self.count = int(os.getenv("ARGUS_INGESTION_WORKERS", "1"))
+        self.count = int(os.getenv("ARGUS_INGESTION_WORKERS", "4"))
         self.poll_seconds = float(os.getenv("ARGUS_INGESTION_POLL_SECONDS", "1"))
         self.shutdown_seconds = float(os.getenv("ARGUS_INGESTION_SHUTDOWN_SECONDS", "5"))
         if not 0 <= self.count <= 32:
@@ -91,6 +91,7 @@ class IngestionWorkers:
             logger.warning("Shutdown wait ended with %s active ingestion jobs; persisted stage artifacts remain resumable",len(remaining))
 
     def status(self):
+        from app.ingestion.batching import status
         with self.state_lock:
             active = list(self.active.values())
-        return {"configuredWorkers":self.count,"activeJobs":active,"stopping":self.stop_event.is_set(),"queue":"postgres","automaticRetry":False,"concurrencyScope":"database advisory worker slots"}
+        return {"configuredWorkers":self.count,"activeJobs":active,"stopping":self.stop_event.is_set(),"queue":"postgres","automaticRetry":False,"concurrencyScope":"database advisory worker slots", "batches":status()}

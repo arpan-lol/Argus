@@ -38,8 +38,8 @@ def resolve_basic(pipeline, job):
         if vector and len(vector) == job['configuration']['embeddingDimensions'] and all(math.isfinite(value) for value in vector) and any(vector):
             vectors_by_id[canonical_id] = vector
     missing = [(entity, canonical_id) for canonical_id, entity in unique.items() if canonical_id not in vectors_by_id]
-    for start in range(0, len(missing), 64):
-        batch = missing[start:start + 64]
+    for start in range(0, len(missing), 256):
+        batch = missing[start:start + 256]
         key = fingerprint([job['configuration']['embeddingModel'], [mention_id for _, mention_id in batch]])
         vectors = pipeline.retry_call(job, 'entity_embed_batch', key, lambda rows=batch: {'vectors': provider.embed([entity['name'] + '\n' + entity['entity_type'] + '\n' + entity['description'] for entity, _ in rows])})['vectors']
         with connection() as conn, conn.cursor() as cursor:

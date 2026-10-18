@@ -91,6 +91,30 @@ class Providers:
         return message
 
     def embed(self, texts):
+        from .batching import service
+        from .config import fingerprint
+        from .embedding_limits import input_tokens
+        if not texts:
+            return []
+        key = fingerprint({name: self.config.get(name) for name in ('provider', 'embeddingModel', 'embeddingDimensions', 'embeddingBaseUrl', 'embeddingApiVersion', 'embeddingCredentialEnv', 'embeddingTokensPerMinute')})
+        values = [(text, self) for text in texts]
+        return service('embedding').submit(key, values, self.embed_shared, [input_tokens([text]) for text in texts], self.stop_check)
+
+    @staticmethod
+    def embed_shared(rows):
+        import uuid
+        batch_id = 'embedding-batch:' + str(uuid.uuid4())
+        owners = {}
+        for _, provider in rows:
+            owners.setdefault(id(provider), [provider, 0])[1] += 1
+        first = rows[0][1]
+        def record(receipt):
+            for index, (provider, count) in enumerate(owners.values()):
+                provider.record_call({**receipt, 'kind': receipt['kind'] if index == 0 else 'embedding_share', 'networkCall': index == 0, 'sharedBatchId': batch_id, 'batchItems': len(rows), 'items': count, 'usage': receipt.get('usage') if index == 0 else None, 'usageScope': 'whole_shared_batch' if index == 0 else 'accounted_by_batch_owner'})
+        provider = Providers(first.config, record)
+        return provider.embed_direct([text for text, _ in rows])
+
+    def embed_direct(self, texts):
         key = self.credentials(credential_env=self.config.get("embeddingCredentialEnv"))
         if self.config["provider"] == "google":
             from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -256,32 +280,8 @@ class Providers:
         return parsed.model_dump()
 
     def gliner(self, chunk, types):
-        with _model_lock:
-            if self.config["glinerModel"] not in _models:
-                from .local_models import load_model
-                _models[self.config["glinerModel"]] = load_model(self.config["glinerModel"], self.config)
-            model = _models[self.config["glinerModel"]]
-        with _model_lock:
-            words = list(model.data_processor.words_splitter(chunk))
-            cap = int(model.config.max_len)
-            overlap = int(self.config["glinerOverlapWords"])
-            if cap < 1 or overlap < 0 or overlap >= cap:
-                raise ValueError("GLiNER overlap must be nonnegative and smaller than the loaded model word cap")
-            windows = []
-            mentions = {}
-            start = 0
-            while start < len(words):
-                end = min(start + cap, len(words))
-                left = words[start][1] if start else 0
-                right = words[end - 1][2] if end < len(words) else len(chunk)
-                predictions = model.predict_entities(chunk[left:right], types, threshold=self.config["glinerThreshold"])
-                for prediction in predictions:
-                    adjusted = {**prediction, "start": left + prediction["start"], "end": left + prediction["end"]}
-                    key = (adjusted["start"], adjusted["end"], adjusted["label"])
-                    if key not in mentions or adjusted["score"] > mentions[key]["score"]:
-                        mentions[key] = adjusted
-                windows.append({"wordStart": start, "wordEndExclusive": end, "startOffset": left, "endOffset": right})
-                if end == len(words):
-                    break
-                start = end - overlap
-            return {"mentions": sorted(mentions.values(), key=lambda item: (item["start"], item["end"])), "coverage": {"status": "complete", "strategy": self.config["glinerWindowing"], "modelWordCap": cap, "overlapWords": overlap, "wordCount": len(words), "windows": windows, "offsetUnit": "unicode_code_point"}}
+        return self.gliner_many([chunk], types)[0]
+
+    def gliner_many(self, chunks, types):
+        from .local_models import ner_many
+        return ner_many(chunks, types, self.config, self.stop_check)

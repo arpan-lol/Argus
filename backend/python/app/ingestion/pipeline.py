@@ -347,13 +347,15 @@ class IngestionPipeline:
     def stage_embed(self, job):
         provider = Providers(job["configuration"], self.call_recorder(job["id"]), lambda: self.check_paused(job['id']))
         chunks = self.artifact(job["id"], "chunk")["chunks"]
-        missing = [chunk for chunk in chunks if self.item(job["id"], "embed", chunk["id"]) is None]
-        for start in range(0, len(missing), 64):
-            batch = missing[start:start + 64]
+        with connection() as conn:
+            completed = {row['item_id'] for row in conn.execute("SELECT item_id FROM ingestion_items WHERE job_id=%s AND stage='embed'", (job['id'],)).fetchall()}
+        missing = [chunk for chunk in chunks if chunk['id'] not in completed]
+        for start in range(0, len(missing), 128):
+            batch = missing[start:start + 128]
             key = fingerprint([job["configuration"]["embeddingModel"], [chunk["id"] for chunk in batch]])
             vectors = self.retry_call(job, "embed_batch", key, lambda rows=batch: {"vectors": provider.embed([chunk["text"] for chunk in rows])})["vectors"]
-            for chunk, vector in zip(batch, vectors, strict=True):
-                self.save_item(job["id"], "embed", chunk["id"], {"vector": vector, "model": job["configuration"]["embeddingModel"]})
+            with connection() as conn, conn.cursor() as cursor:
+                cursor.executemany("INSERT INTO ingestion_items(job_id,stage,item_id,payload) VALUES(%s,'embed',%s,%s) ON CONFLICT(job_id,stage,item_id) DO UPDATE SET payload=excluded.payload", [(job['id'], chunk['id'], Jsonb({'vector': vector, 'model': job['configuration']['embeddingModel']})) for chunk, vector in zip(batch, vectors, strict=True)])
         return {"chunks": len(chunks), "model": job["configuration"]["embeddingModel"], "dimensions": job["configuration"]["embeddingDimensions"], "storage": "Durable PostgreSQL staging; FalkorDB vector properties/index published only after validation"}
 
     def stage_configure(self, job):

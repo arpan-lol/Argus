@@ -50,36 +50,51 @@ def extract_local(pipeline, job):
     document = pipeline.artifact(job["id"], "normalize")
     profile = pipeline.artifact(job["id"], "configure")
     counts = {"entities": 0, "relationships": 0}
-    for chunk in pipeline.artifact(job["id"], "chunk")["chunks"]:
-        def operation(c=chunk):
-            started = time.monotonic()
-            output = {"entities": [], "relationships": []}
-            windows = 0
-            segments = prose_segments(document, c)
-            predictions = relex_many([text for _, text in segments], profile, job['configuration']) if segments else []
-            for (offset, text), raw in zip(segments, predictions, strict=True):
-                converted = convert_output(c, raw, offset)
-                output["entities"].extend(converted["entities"])
-                output["relationships"].extend(converted["relationships"])
-                windows += len(raw["windows"])
-            initial = pipeline.item(job['id'], 'local_ner', c['id']) or {}
-            retained = {(entity['sourceSpan']['chunkStart'], entity['sourceSpan']['chunkEnd']) for entity in output['entities']}
-            for mention in initial.get('mentions', []):
-                start, end = mention['start'], mention['end']
-                if (start, end) in retained:
-                    continue
-                quote = c['text'][start:end]
-                if not quote or quote != mention['text']:
-                    raise ValueError('Initial GLiNER mention offsets do not match the source')
-                span = source_span(c, start, end)
-                output['entities'].append({'key': 'early_' + str(len(output['entities'])), 'name': quote, 'entity_type': mention['label'], 'description': '', 'quote': quote, 'confidence': float(mention['score']), 'sourceSpan': span, 'sourceSpans': [span], 'sourceSpanStatus': 'exact', 'extractionMethod': 'gliner', 'llmVerified': False})
-                retained.add((start, end))
-            output["metadata"] = {"method": "gliner_relex" if windows else "python_ast_structure", "model": job["configuration"]["relexModel"], "llmVerified": False, "fallback": False, "llmAttempts": 0, "windows": windows, "durationMs": (time.monotonic() - started) * 1000, "scoreMeaning": "Uncalibrated local model score; source offsets and structure are checked, semantic correctness is not independently verified"}
-            pipeline.validate_extraction(c, output)
-            return output
-        output = pipeline.retry_call(job, "extract", chunk["id"], operation, max_attempts=1)
-        for key in counts:
-            counts[key] += len(output[key])
+    chunks = pipeline.artifact(job['id'], 'chunk')['chunks']
+    for first in range(0, len(chunks), 16):
+        batch = chunks[first:first + 16]
+        pending = [chunk for chunk in batch if pipeline.item(job['id'], 'extract', chunk['id']) is None]
+        segments_by_chunk = {chunk['id']: prose_segments(document, chunk) for chunk in pending}
+        owners = [(chunk['id'], text) for chunk in pending for _, text in segments_by_chunk[chunk['id']]]
+        pipeline.check_paused(job['id'])
+        inference_started = time.monotonic()
+        predictions = relex_many([text for _, text in owners], profile, job['configuration']) if owners else []
+        inference_ms = (time.monotonic() - inference_started) * 1000
+        predictions_by_chunk = {chunk['id']: [] for chunk in pending}
+        for (identifier, _), prediction in zip(owners, predictions, strict=True):
+            predictions_by_chunk[identifier].append(prediction)
+        pipeline.check_paused(job['id'])
+        for chunk in batch:
+            def operation(c=chunk):
+                started = time.monotonic()
+                output = {"entities": [], "relationships": []}
+                windows = 0
+                segments = prose_segments(document, c)
+                predictions = predictions_by_chunk[c["id"]]
+                for (offset, text), raw in zip(segments, predictions, strict=True):
+                    converted = convert_output(c, raw, offset)
+                    output["entities"].extend(converted["entities"])
+                    output["relationships"].extend(converted["relationships"])
+                    windows += len(raw["windows"])
+                initial = pipeline.item(job['id'], 'local_ner', c['id']) or {}
+                retained = {(entity['sourceSpan']['chunkStart'], entity['sourceSpan']['chunkEnd']) for entity in output['entities']}
+                for mention in initial.get('mentions', []):
+                    start, end = mention['start'], mention['end']
+                    if (start, end) in retained:
+                        continue
+                    quote = c['text'][start:end]
+                    if not quote or quote != mention['text']:
+                        raise ValueError('Initial GLiNER mention offsets do not match the source')
+                    span = source_span(c, start, end)
+                    output['entities'].append({'key': 'early_' + str(len(output['entities'])), 'name': quote, 'entity_type': mention['label'], 'description': '', 'quote': quote, 'confidence': float(mention['score']), 'sourceSpan': span, 'sourceSpans': [span], 'sourceSpanStatus': 'exact', 'extractionMethod': 'gliner', 'llmVerified': False})
+                    retained.add((start, end))
+                output["metadata"] = {"method": "gliner_relex" if windows else "python_ast_structure", "model": job["configuration"]["relexModel"], "llmVerified": False, "fallback": False, "llmAttempts": 0, "windows": windows, "durationMs": (time.monotonic() - started) * 1000, "sharedInferenceDurationMs": inference_ms, "inferenceBatchChunks": len(pending), "scoreMeaning": "Uncalibrated local model score; source offsets and structure are checked, semantic correctness is not independently verified"}
+                output['metadata']['memoryWindowSplit'] = any(raw.get('memoryWindowSplit') for raw in predictions)
+                pipeline.validate_extraction(c, output)
+                return output
+            output = pipeline.retry_call(job, "extract", chunk["id"], operation, max_attempts=1)
+            for key in counts:
+                counts[key] += len(output[key])
     graph = document.get("codeGraph", {})
     return {**counts, "structuralEntities": len(graph.get("entities", [])), "structuralRelationships": len(graph.get("relationships", [])), "quality": "local_model_and_parser", "method": "gliner_relex_plus_format_parser", "extractionLlmCalls": 0, "fallbackChunks": 0, "warnings": [], "entityTypes": profile["entityTypes"]}
 
@@ -92,9 +107,15 @@ def extract_early_mentions(pipeline, job):
         return {"entities": len(graph["entities"]), "method": "python_ast", "llmCalls": 0}
     config = job["configuration"]
     types = seed_settings(config["categories"])["entityTypes"]
-    provider = Providers(config)
+    provider = Providers(config, stop_check=lambda: pipeline.check_paused(job["id"]))
     count = 0
-    for chunk in pipeline.artifact(job["id"], "chunk")["chunks"]:
-        found = pipeline.retry_call(job, "local_ner", chunk["id"], lambda c=chunk: provider.gliner(c["text"], types), max_attempts=1)
-        count += len(found["mentions"])
-    return {"entities": count, "method": "gliner", "llmCalls": 0, "entityTypes": types}
+    chunks = pipeline.artifact(job['id'], 'chunk')['chunks']
+    for first in range(0, len(chunks), 16):
+        batch = chunks[first:first + 16]
+        pending = [chunk for chunk in batch if pipeline.item(job['id'], 'local_ner', chunk['id']) is None]
+        found = provider.gliner_many([chunk['text'] for chunk in pending], types) if pending else []
+        predictions = {chunk['id']: value for chunk, value in zip(pending, found, strict=True)}
+        for chunk in batch:
+            result = pipeline.retry_call(job, 'local_ner', chunk['id'], lambda c=chunk: predictions[c['id']], max_attempts=1)
+            count += len(result['mentions'])
+    return {'entities': count, 'method': 'gliner', 'llmCalls': 0, 'entityTypes': types}
