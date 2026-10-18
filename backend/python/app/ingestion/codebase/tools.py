@@ -142,7 +142,9 @@ class RepositoryTools:
                     claims.append(claim)
             for relation in relations:
                 claim = {'kind': 'relationship', 'relationship': relation, 'citation': relation['citation']}
-                if claim not in claims:
+                signature = (relation['subject'], relation['predicate'], relation['object'], relation['polarity'], relation['citation']['source_id'], relation['citation']['startOffset'], relation['citation']['endOffset'])
+                existing = any(item['kind'] == 'relationship' and (item['relationship']['subject'], item['relationship']['predicate'], item['relationship']['object'], item['relationship']['polarity'], item['citation']['source_id'], item['citation']['startOffset'], item['citation']['endOffset']) == signature for item in claims)
+                if not existing:
                     claims.append(claim)
             result = {'accepted_entities': len(entities), 'accepted_relationships': len(relations), 'identities': [{key: item[key] for key in ('key', 'name', 'entity_type')} for item in entities], 'publication': 'Validated staging; each file publishes through the shared ingestion lifecycle', 'validation': 'Exact source support and typed endpoints, not independent semantic verification'}
         elif tool == 'finish':

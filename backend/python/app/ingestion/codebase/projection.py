@@ -19,10 +19,19 @@ def project_claims(pipeline, job, result):
             output['entities'].append({'key': local, 'name': entity['name'], 'entity_type': entity['entity_type'], 'description': entity['description'], 'quote': citation['quote'], 'sourceSpan': span, 'sourceSpans': [span], 'sourceSpanStatus': 'exact', 'extractionMethod': 'codebase_graph_builder', 'llmVerified': False, 'codeResolverKey': key, 'referenceMeaning': 'Source-supported software concept; quote is supporting context, not necessarily a verbatim entity name'})
         return local
 
+    seen_claims = set()
     for claim in result['claims']:
         citation = claim['citation']
         if citation['source_id'] != job['source_id']:
             continue
+        if claim['kind'] == 'entity':
+            signature = ('entity', claim['entity']['key'], citation['source_id'], citation['startOffset'], citation['endOffset'])
+        else:
+            relation = claim['relationship']
+            signature = ('relationship', relation['subject'], relation['predicate'], relation['object'], relation['polarity'], citation['source_id'], citation['startOffset'], citation['endOffset'])
+        if signature in seen_claims:
+            continue
+        seen_claims.add(signature)
         if citation['revision'] != job['revision']:
             raise ValueError('Codebase builder citation belongs to another source revision')
         if citation['chunk_id'] not in by_id:
