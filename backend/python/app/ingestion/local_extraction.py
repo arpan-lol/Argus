@@ -4,7 +4,7 @@ from .extraction import source_span
 from .local_models import relex_many
 from .providers import Providers
 from .relation_schema import endpoint_types_allowed, relation_constraints
-from .semantic_context import sentence_context, source_context, valid_entity_mention
+from .semantic_context import relation_scope, sentence_context, source_context, valid_entity_mention
 from .native_records import extract_native_chunk
 from .extraction_context import contextual_input, remove_context
 
@@ -49,7 +49,7 @@ def convert_output(chunk, result, offset=0, constraints=None):
         right = offset + max(edge["head"]["end"], edge["tail"]["end"])
         context_start, context_end, context = sentence_context(chunk["text"], left, right)
         span = source_span(chunk, context_start, context_end)
-        relations.append({"subject": subject, "predicate": edge["relation"], "object": target, "quote": context, **source_context(context), "confidence": float(edge["score"]), "sourceSpan": span, "sourceSpans": [span], "sourceSpanStatus": "exact", "extractionMethod": "gliner_relex", "llmVerified": False})
+        relations.append({"subject": subject, "predicate": edge["relation"], "object": target, "quote": context, **source_context(context), **relation_scope(chunk["text"], left, right, context), "confidence": float(edge["score"]), "sourceSpan": span, "sourceSpans": [span], "sourceSpanStatus": "exact", "extractionMethod": "gliner_relex", "llmVerified": False})
     return {"entities": entities, "relationships": relations}
 
 
