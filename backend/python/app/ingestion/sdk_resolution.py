@@ -28,6 +28,7 @@ def resolve_basic(pipeline, job):
             entity = {'name': item['name'], 'entity_type': item['type'], 'description': 'Python source module or symbol', 'quote': occurrence['quote']}
             records.append((entity, mention_id, canonical_id, False))
     unique = {canonical_id: entity for entity, _, canonical_id, _ in records}
+    unique = dict(sorted(unique.items()))
     with connection() as conn:
         existing = {row['id']: row for row in conn.execute('SELECT id,embedding,embedding_model FROM ingestion_entities WHERE id=ANY(%s)', (list(unique),)).fetchall()} if unique else {}
         cached_vectors = {row['item_id']: row['payload']['vector'] for row in conn.execute("SELECT item_id,payload FROM ingestion_items WHERE job_id=%s AND stage='entity_embed'", (job['id'],)).fetchall()}

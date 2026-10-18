@@ -207,7 +207,7 @@ def _publish(pipeline, job):
     graph.query("MATCH (r:SourceRevision {id:$job}) SET r.graphComplete=true", {"job": job["id"]})
     with connection() as conn:
         conn.execute("UPDATE ingestion_publications SET active=false WHERE source_id=%s AND job_id<>%s", (job["source_id"], job["id"]))
-        for canonical_id, aliases in accepted_aliases.items():
-            conn.execute("UPDATE ingestion_entities SET aliases=(SELECT jsonb_agg(DISTINCT value) FROM jsonb_array_elements(aliases || %s::jsonb)) WHERE id=%s", (Jsonb(sorted(aliases)), canonical_id))
+        with conn.cursor() as cursor:
+            cursor.executemany("UPDATE ingestion_entities SET aliases=(SELECT jsonb_agg(DISTINCT value) FROM jsonb_array_elements(aliases || %s::jsonb)) WHERE id=%s", [(Jsonb(sorted(accepted_aliases[canonical_id])), canonical_id) for canonical_id in sorted(accepted_aliases)])
         conn.execute("UPDATE ingestion_publications SET active=true,published_at=now() WHERE job_id=%s", (job["id"],))
     return counts
