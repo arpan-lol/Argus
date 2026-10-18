@@ -161,7 +161,7 @@ def shared_document_connections(nodes):
     ranked = sorted(scores.items(), key=lambda item: (-item[1]['score'], -item[1]['shared'], item[0]))
     if len(ranked) > 1200:
         truncated = True
-    edges = [{'id': a + '|SHARES_TERM|' + b, 'source': a, 'target': b, 'type': 'SHARES_TERM', 'derived': True, 'sharedEntities': score['shared'], 'sharedScore': round(score['score'], 6), 'labels': score['labels'], 'entityIds': score['entityIds']} for (a, b), score in ranked[:1200]]
+    edges = [{'id': a + '|SHARES_ENTITY|' + b, 'source': a, 'target': b, 'type': 'SHARES_ENTITY', 'derived': True, 'sharedEntities': score['shared'], 'sharedScore': round(score['score'], 6), 'labels': score['labels'], 'entityIds': score['entityIds']} for (a, b), score in ranked[:1200]]
     if len(_summary_cache) >= 64:
         _summary_cache.pop(next(iter(_summary_cache)))
     _summary_cache[key] = (time.monotonic(), edges, truncated)
@@ -212,3 +212,9 @@ def neighborhood(project_id: str, identifier: str, mode: str = Query('network', 
     titles = {node['id']: node['label'] for node in nodes if node['type'] == 'document'}
     paths = [{'sourceChunkId': identifier, 'targetChunkId': chunk, 'entityId': entity, 'label': label, 'documentId': document, 'documentTitle': titles.get(document, 'Connected source')} for entity, label, chunk, document in shared[:40]]
     return {'nodes': nodes, 'edges': connections(nodes), 'paths': paths, 'truncated': truncated or len(rows) > 200 or len(shared) > 40, 'note': 'Published local connections. Shared mentions are navigation, not agreement between sources.', 'focusId': focus['id']}
+
+
+from .knowledge_map import router as knowledge_router
+
+router.include_router(knowledge_router)
+
