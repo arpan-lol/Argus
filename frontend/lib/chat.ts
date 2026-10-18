@@ -47,8 +47,8 @@ export interface ChatEvent {
   message?: string;
   coverage?: ChatCoverage;
   result?: {
-    items: { id?: string; name?: string; predicate?: string; subject?: { id: string; name: string }; object?: { id: string; name: string }; quote?: string; documentTitle?: string; chunkId?: string; documentId?: string; polarity?: string; extractionMethod?: string; traversalStatus?: string }[];
-    tree: { assertionId: string; from: string; to: string; predicate: string; subject: { id: string; name: string }; object: { id: string; name: string }; quote: string; documentTitle?: string; chunkId?: string; documentId?: string; polarity?: string; extractionMethod?: string; traversalStatus?: string }[];
+    items: { id?: string; name?: string; predicate?: string; subject?: { id: string; name: string }; object?: { id: string; name: string }; quote?: string; documentTitle?: string; chunkId?: string; documentId?: string; jobId?: string; polarity?: string; extractionMethod?: string; traversalStatus?: string }[];
+    tree: { assertionId: string; from: string; to: string; predicate: string; subject: { id: string; name: string }; object: { id: string; name: string }; quote: string; documentTitle?: string; chunkId?: string; documentId?: string; jobId?: string; polarity?: string; extractionMethod?: string; traversalStatus?: string }[];
     pathCount: number;
     shownItems: number;
     totalItems: number;

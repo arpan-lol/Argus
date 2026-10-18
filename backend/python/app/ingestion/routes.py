@@ -270,7 +270,7 @@ def document_for_job(record):
         raise HTTPException(409, "Source text is not parsed yet")
     chunks = pipeline.artifact(record["id"], "chunk") or {"chunks": []}
     extraction = pipeline.artifact(record["id"], "extract") or {}
-    processing_warnings = [*normalized["metadata"].get("warnings", []), *[warning["message"] for warning in extraction.get("warnings", [])]]
+    processing_warnings = [*normalized["metadata"].get("warnings", []), *[warning.get("message", "") if isinstance(warning, dict) else str(warning) for warning in extraction.get("warnings", [])]]
     title = normalized["metadata"].get("title", record["filename"])
     source_url = normalized["metadata"].get("sourceUrl") or record["source_url"]
     sections = sections_for(normalized, record)

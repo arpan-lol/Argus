@@ -50,7 +50,7 @@ function getFileTypeFromFilename(filename: string): string {
   if (ext === 'docx') return 'document';
   if (['xls', 'xlsx', 'csv'].includes(ext)) return 'spreadsheet';
   if (['ppt', 'pptx'].includes(ext)) return 'presentation';
-  if (['txt', 'json', 'md', 'xml', 'html', 'log'].includes(ext)) return 'text';
+  if (['txt', 'json', 'jsonl', 'md', 'mdx', 'xml', 'html', 'log', 'py', 'pyi', 'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'css', 'scss', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'sql', 'sh', 'go', 'rs', 'java', 'kt', 'c', 'h', 'cpp', 'hpp', 'cs', 'rb', 'php', 'swift', 'r', 'ipynb'].includes(ext)) return 'text';
   
   return 'unknown';
 }

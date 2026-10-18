@@ -16,6 +16,7 @@ interface Props {
   uploadRequest: number;
   refreshVersion: number;
   focus?: ChatSource | null;
+  readerRequest?: { documentId: string; chunkId?: string; jobId?: string; nonce: number } | null;
   documentId?: string;
   chunkId?: string;
   onProject: (project: Project) => void;
@@ -26,7 +27,7 @@ interface Props {
   onJobsChange?: (jobs: IngestionJob[]) => void;
 }
 
-export function ProjectSources({ project, uploadRequest, refreshVersion, focus, documentId, chunkId, onProject, onUploaded, onFocus, onOpenReader, onBackToGraph, onJobsChange }: Props) {
+export function ProjectSources({ project, uploadRequest, refreshVersion, focus, readerRequest, documentId, chunkId, onProject, onUploaded, onFocus, onOpenReader, onBackToGraph, onJobsChange }: Props) {
   const [open, setOpen] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [queuedFromCreation, setQueuedFromCreation] = useState<File[] | null>(null);
@@ -126,7 +127,7 @@ export function ProjectSources({ project, uploadRequest, refreshVersion, focus, 
   const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
   return <>
     {report && <div className="argus-source-report" role="status"><div><span>{report.queued.toLocaleString()} files queued{report.skipped.length ? ` · ${report.skipped.length.toLocaleString()} skipped` : ''}</span><button type="button" onClick={() => setReport(undefined)} aria-label="Dismiss upload report"><X size={14} /></button></div>{report.skipped.length > 0 && <details><summary>Review skipped files</summary><ul>{report.skipped.map((file, index) => <li key={`${file.filename}-${index}`}><span>{file.filename}</span><small>{file.reason}</small></li>)}</ul></details>}</div>}
-    <FileExplorer projectId={project.id} focusDocumentId={focus?.documentId || documentId} focusChunkId={focus?.chunkId || chunkId} focusJobId={focus?.jobId} focusCollection="pipeline" refreshToken={refreshVersion} onUpload={() => setOpen(true)} onDocumentFocus={onFocus} onOpenReader={onOpenReader} onBackToGraph={onBackToGraph} onJobsChange={onJobsChange} />
+    <FileExplorer projectId={project.id} focusDocumentId={focus?.documentId || documentId} focusChunkId={focus?.chunkId || chunkId} focusJobId={focus?.jobId} readerRequest={readerRequest} focusCollection="pipeline" refreshToken={refreshVersion} onUpload={() => setOpen(true)} onDocumentFocus={onFocus} onOpenReader={onOpenReader} onBackToGraph={onBackToGraph} onJobsChange={onJobsChange} />
     <dialog ref={dialog} className="argus-source-onboarding" onCancel={event => { if (busy) event.preventDefault(); else setOpen(false); }} aria-labelledby="source-onboarding-title">
       <div className="argus-source-onboarding-heading"><h2 id="source-onboarding-title">{project.description ? 'Add data sources' : files.length ? 'What is the data in this workspace about?' : 'Start by adding data sources.'}</h2><button disabled={busy} onClick={() => setOpen(false)} aria-label="Close source upload"><X size={18} /></button></div>
       <input ref={input} hidden type="file" multiple disabled={busy} onChange={selectFiles} />
