@@ -162,8 +162,13 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const selectCitation = (source: ChatSource) => { setPipelineFocus(source); setDocumentId(source.documentId); setMapFocus({nodeId: source.chunkId, nonce: Date.now()}); };
   const selectNode = (node: MapNode) => { if (node.documentId) focusSource(node.documentId, node.chunkId); setSelectedId(node.id); setSelectedNode(node); };
   const upload = () => { setView('files'); setUploadRequest(previous => previous + 1); };
-  const recentEvent = processingEvents.at(-1);
-  const lastProcessingEvent = recentEvent && ['stage_start', 'item_start', 'item_complete', 'item_failed'].includes(recentEvent.type) ? recentEvent : undefined;
+  const activeStages = new Set<string>();
+  for (const event of processingEvents) {
+    const key = `${event.jobId || ''}:${event.stage || ''}`;
+    if (event.type === 'stage_start') activeStages.add(key);
+    if (event.type === 'stage_complete' || event.type === 'stage_failed') activeStages.delete(key);
+  }
+  const lastProcessingEvent = [...processingEvents].reverse().find(event => event.stage && activeStages.has(`${event.jobId || ''}:${event.stage}`));
   const processingStart = lastProcessingEvent && processingEvents.find(event => event.jobId === lastProcessingEvent.jobId && event.type === 'stage_start')?.at;
   useEffect(() => {
     if (!lastProcessingEvent) return;
@@ -261,7 +266,7 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
       {selectedNode?.documentId && <div className="ce-node-source"><span>Source</span><button disabled={!sourceTitle} onClick={() => { if (selectedNode?.documentId) { setView('graph'); setMapFocus({nodeId:selectedNode.documentId,nonce:Date.now()}); } setSelectedNode(null); }}>{sourceTitle || 'Loading document…'}{sourceTitle && <ArrowUpRight size={15} />}</button></div>}
       {(selectedNode?.type === 'entity' || selectedNode?.type === 'group') && typeof nodeDetails?.description === 'string' && <p className="ce-node-description">{nodeDetails.description}</p>}
       {selectedNode?.type !== 'document' && <p className="ce-node-content">{typeof recordContent?.text === 'string' ? recordContent.text : selectedChunk?.text || selectedSection?.title || selectedNode?.preview}</p>}
-      <div className="ce-node-actions">{selectedNode?.type === 'chunk' && <button className="ce-open-file" onClick={() => { setMapFocus({nodeId:selectedNode.id,nonce:Date.now()}); setView('graph'); setSelectedNode(null); }}><Network size={15} />Explore connections</button>}{selectedNode?.documentId ? <button className="ce-open-file" onClick={() => { if (selectedNode?.documentId) focusSource(selectedNode.documentId, selectedNode.chunkId || (selectedNode.type === 'chunk' ? selectedNode.id : undefined)); setView('files'); setSelectedNode(null); }}><FileText size={15} />Read file</button> : <button className="ce-open-file" onClick={() => { if (selectedNode) setMapFocus({nodeId:selectedNode.id,nonce:Date.now()}); setSelectedNode(null); }}><Network size={15} />Show in graph</button>}</div>
+      <div className="ce-node-actions">{selectedNode?.type === 'chunk' && <button className="ce-open-file" onClick={() => { setMapFocus({nodeId:selectedNode.id,nonce:Date.now()}); setView('graph'); setSelectedNode(null); }}><Network size={15} />Explore connections</button>}{selectedNode?.documentId ? <button className="ce-open-file" onClick={() => { if (selectedNode?.documentId) focusSource(selectedNode.documentId, selectedNode.chunkId || (selectedNode.type === 'chunk' ? selectedNode.id : undefined)); setView('files'); setSelectedNode(null); }}><FileText size={15} />Open file</button> : <button className="ce-open-file" onClick={() => { if (selectedNode) setMapFocus({nodeId:selectedNode.id,nonce:Date.now()}); setSelectedNode(null); }}><Network size={15} />Show in graph</button>}</div>
     </dialog>
   </div>;
 }
