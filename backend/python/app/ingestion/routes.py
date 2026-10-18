@@ -20,8 +20,8 @@ pipeline = IngestionPipeline()
 
 
 @router.get("/jobs")
-def jobs(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
-    return pipeline.list_jobs(limit, offset)
+def jobs(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0), latest_source: bool = False):
+    return pipeline.list_jobs(limit, offset, latest_source)
 
 
 @router.get("/jobs/{job_id}")

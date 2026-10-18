@@ -122,7 +122,7 @@ export function FileExplorer({ projectId, refreshToken = 0, onUpload, focusDocum
     const refresh = async () => {
       try {
         const [jobResult, documentResult] = await Promise.all([
-          fileApi<{ jobs: IngestionJob[]; total: number }>(`/ingestion/jobs?limit=50&offset=${jobOffset}`),
+          fileApi<{ jobs: IngestionJob[]; total: number }>(`/ingestion/jobs?limit=50&offset=${jobOffset}${projectId ? '&latest_source=true' : ''}`),
           fileApi<{ documents: UploadedDocument[]; total: number }>(`/ingestion/documents?limit=${limit}&offset=${uploadedOffset}`),
         ]);
         if (active) { setJobs(jobResult.jobs); setJobTotal(jobResult.total); setUploaded(documentResult.documents); setUploadedTotal(documentResult.total); setPauseRequested(current => current && jobResult.jobs.some(job => job.id === current && ['paused', 'complete', 'failed', 'interrupted'].includes(job.status)) ? undefined : current); }

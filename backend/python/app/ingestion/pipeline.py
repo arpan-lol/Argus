@@ -159,12 +159,16 @@ class IngestionPipeline:
     def get_job(self, job_id):
         return self.job_details([self.job_row(job_id)])[0]
 
-    def list_jobs(self, limit=50, offset=0):
+    def list_jobs(self, limit=50, offset=0, latest_source=False):
         from app.projects.scope import current_project
         project_id = current_project.get()
         with connection() as conn:
-            rows = conn.execute("SELECT j.*,s.filename FROM ingestion_jobs j JOIN ingestion_sources s ON s.id=j.source_id WHERE j.project_id IS NOT DISTINCT FROM %s ORDER BY (j.status='running') DESC,(j.status IN ('failed','waiting_configuration','interrupted')) DESC,(j.status='registered') ASC,j.updated_at DESC LIMIT %s OFFSET %s", (project_id, limit, offset)).fetchall()
-            total = conn.execute("SELECT count(*) AS count FROM ingestion_jobs WHERE project_id IS NOT DISTINCT FROM %s", (project_id,)).fetchone()["count"]
+            if latest_source:
+                rows = conn.execute("SELECT * FROM (SELECT DISTINCT ON (j.source_id) j.*,s.filename FROM ingestion_jobs j JOIN ingestion_sources s ON s.id=j.source_id WHERE j.project_id IS NOT DISTINCT FROM %s ORDER BY j.source_id,j.created_at DESC,j.id DESC) latest ORDER BY (status='running') DESC,(status IN ('failed','waiting_configuration','interrupted')) DESC,(status='registered') ASC,updated_at DESC LIMIT %s OFFSET %s", (project_id, limit, offset)).fetchall()
+                total = conn.execute("SELECT count(DISTINCT source_id) AS count FROM ingestion_jobs WHERE project_id IS NOT DISTINCT FROM %s", (project_id,)).fetchone()["count"]
+            else:
+                rows = conn.execute("SELECT j.*,s.filename FROM ingestion_jobs j JOIN ingestion_sources s ON s.id=j.source_id WHERE j.project_id IS NOT DISTINCT FROM %s ORDER BY (j.status='running') DESC,(j.status IN ('failed','waiting_configuration','interrupted')) DESC,(j.status='registered') ASC,j.updated_at DESC LIMIT %s OFFSET %s", (project_id, limit, offset)).fetchall()
+                total = conn.execute("SELECT count(*) AS count FROM ingestion_jobs WHERE project_id IS NOT DISTINCT FROM %s", (project_id,)).fetchone()["count"]
         return {"jobs": self.job_details(rows), "total": total, "limit": limit, "offset": offset}
 
     def artifact(self, job_id, stage):
