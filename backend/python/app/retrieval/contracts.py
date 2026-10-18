@@ -72,7 +72,7 @@ class Invocation(Arguments):
 TOOLS = {
     "search_sources": (SearchSources, "Find published source chunks with BM25, vectors or reciprocal-rank fusion. Scores measure relevance, never confidence."),
     "find_entities": (FindEntities, "Find published entities by literal canonical name or current source mention. Return source-supported identities; do not silently choose between ambiguous matches."),
-    "read_chunks": (ReadChunks, "Read published passages by retrieved chunkId, not by names or record labels. This is not a content search: use search_sources to discover IDs first. Shared mentions are navigation, not scientific claims."),
+    "read_chunks": (ReadChunks, "Read retrieved chunkIds plus one following passage per seed, capped at 10 total chunks. Discover IDs with search_sources first; names/record labels are not chunk IDs. Adjacency and shared mentions are navigation, not scientific claims."),
     "inspect_assertions": (InspectAssertions, "Inspect source-grounded assertions involving an existing entity. Preserve polarity, conditions and source quotations."),
     "expand_connections": (ExpandConnections, "Follow bounded, directed semantic assertion hops from existing entity identities. Each hop retains its supporting source; composition is not a new scientific fact."),
     "find_paths": (FindPaths, "Find shortest discovered assertion paths between known entities within a bounded search. An empty bounded search does not establish that no path exists."),

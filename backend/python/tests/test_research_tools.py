@@ -7,10 +7,11 @@ from unittest import TestCase, mock
 from pydantic import ValidationError
 
 from app.investigation.runtime import collect_sources, validate_sources
-from app.retrieval.contracts import ARTICLE_TOOLS, RankEntities, RecentSourceUpdates, SourceAuthors
+from app.retrieval.contracts import ARTICLE_TOOLS, RankEntities, ReadChunks, RecentSourceUpdates, SourceAuthors
 from app.retrieval.mcp_server import call_tool, list_tools
 from app.retrieval.research import pagerank, rank_entities, recent_source_updates, source_authors
 from app.retrieval.routes import execute
+from app.retrieval.tools import read_chunks
 
 
 class Session:
@@ -42,6 +43,38 @@ def edge(identifier, left, right):
 
 
 class ResearchToolsTest(TestCase):
+    def test_read_chunks_includes_the_next_source_passage(self):
+        session = Session()
+        first = session.chunks.return_value['chunk-1']
+        second = {**first, 'id': 'chunk-2', 'payload': {**first['payload'], 'text': 'the following source passage'}}
+        session.chunks.side_effect = [{'chunk-1': first}, {'chunk-2': second}]
+        session.cypher.side_effect = [[['chunk-1', 'chunk-2']], [], []]
+        session.excerpt = lambda row: {'chunkId': row['id'], 'text': row['payload']['text']}
+        result = read_chunks(session, ReadChunks(chunk_ids=['chunk-1']))
+        self.assertEqual([item['chunkId'] for item in result['items']], ['chunk-1', 'chunk-2'])
+        self.assertEqual(result['items'][1]['text'], 'the following source passage')
+        self.assertEqual(result['adjacentChunkIds'], ['chunk-2'])
+        self.assertEqual(result['unknownChunkIds'], [])
+
+    def test_unknown_chunk_names_do_not_expand_or_search(self):
+        session = Session()
+        session.chunks.return_value = {}
+        result = read_chunks(session, ReadChunks(chunk_ids=['human-label']))
+        self.assertEqual(result['items'], [])
+        self.assertEqual(result['unknownChunkIds'], ['human-label'])
+        session.cypher.assert_not_called()
+
+    def test_adjacent_source_context_respects_total_chunk_limit(self):
+        session = Session()
+        chunks = {f'chunk-{index}': {'id': f'chunk-{index}'} for index in range(10)}
+        session.chunks.return_value = chunks
+        session.cypher.side_effect = [[['chunk-9', 'extra-chunk']], *([[]] * 10)]
+        session.excerpt = lambda row: {'chunkId': row['id'], 'text': 'source'}
+        result = read_chunks(session, ReadChunks(chunk_ids=list(chunks)))
+        self.assertEqual(len(result['items']), 10)
+        self.assertEqual(result['adjacentChunkIds'], [])
+        self.assertTrue(session.truncations)
+
     def test_unknown_chunks_are_input_errors_instead_of_empty_searches(self):
         session = mock.Mock(jobs=['job-1'])
         session.finish.side_effect = lambda payload, outcome=None: {'outcome': outcome, **payload}

@@ -57,16 +57,24 @@ def find_entities(session, args):
 
 
 def read_chunks(session, args):
-    rows = session.chunks(args.chunk_ids)
+    requested = list(dict.fromkeys(args.chunk_ids))
+    rows = session.chunks(requested)
+    unknown = [key for key in requested if key not in rows]
+    following = session.cypher("MATCH (c:Chunk)-[:NEXT_CHUNK]->(n:Chunk) WHERE c.id IN $ids AND c.active=true AND n.active=true AND c.jobId IN $jobs AND n.jobId=c.jobId AND n.documentId=c.documentId RETURN c.id,n.id ORDER BY c.id,n.id LIMIT 11", {"ids": list(rows)}, "adjacent source context") if rows else []
+    neighbors = list(dict.fromkeys(row[1] for row in following if row[1] not in requested))
+    if len(neighbors) > 10 - len(requested):
+        session.truncate("Adjacent source context capped at 10 total chunks")
+    adjacent = neighbors[:10 - len(requested)]
+    rows.update(session.chunks(adjacent) if adjacent else {})
     items = []
-    for chunk_id in dict.fromkeys(args.chunk_ids):
+    for chunk_id in requested + adjacent:
         if chunk_id not in rows:
             continue
         entities = session.cypher("MATCH (c:Chunk {id:$chunk})-[:MENTIONS]->(e:Entity) WHERE c.active=true AND c.jobId IN $jobs RETURN e.id,e.label,e.type ORDER BY e.label,e.id LIMIT 41", {"chunk": chunk_id}, "chunk entities")
         if len(entities) > 40:
             session.truncate("Chunk entity list capped at 40")
         items.append({**session.excerpt(rows[chunk_id]), "entities": [{"id": row[0], "name": row[1], "type": row[2]} for row in entities[:40]]})
-    return {"items": items, "unknownChunkIds": [key for key in args.chunk_ids if key not in rows], "connectionMeaning": "Chunk mentions an entity; this alone does not assert a semantic relationship"}
+    return {"items": items, "unknownChunkIds": unknown, "adjacentChunkIds": [key for key in adjacent if key in rows], "connectionMeaning": "Additional chunks follow requested passages in the same published source. Adjacency and shared mentions do not assert semantic relationships."}
 
 
 def assertion_rows(session, entity_id, direction="both", predicates=None, polarity=None, limit=20):
