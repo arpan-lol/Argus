@@ -25,6 +25,8 @@ def store_layout(pipeline, job):
     document = pipeline.artifact(job['id'], 'normalize')
     sections = sections_for(document, job)
     chunks = pipeline.artifact(job['id'], 'chunk')['chunks']
+    with connection() as conn:
+        items = {(row['stage'], row['item_id']): row['payload'] for row in conn.execute("SELECT stage,item_id,payload FROM ingestion_items WHERE job_id=%s AND stage=ANY(%s)", (job['id'], ['extract', 'resolve'])).fetchall()}
     for mode in ('network', 'grouped'):
         with connection() as conn:
             conn.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))', ('project-layout:' + project_id + mode,))
@@ -33,9 +35,10 @@ def store_layout(pipeline, job):
             angle = count * math.pi * (3 - math.sqrt(5))
             radius = 1200 * math.sqrt(count)
             x, y = (root['x'], root['y']) if root else (radius * math.cos(angle), radius * math.sin(angle))
+            pending = []
             def put(identifier, kind, px, py, label, **metadata):
                 payload = {'id': identifier, 'type': kind, 'label': label[:100], 'preview': label[:180], 'jobId': job['id'], **metadata}
-                conn.execute('INSERT INTO project_layouts(project_id,mode,node_id,x,y,payload) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(project_id,mode,node_id) DO UPDATE SET payload=excluded.payload', (project_id, mode, identifier, px, py, Jsonb(payload)))
+                pending.append((project_id, mode, identifier, px, py, Jsonb(payload)))
             put(job['source_id'], 'document', x, y, document['metadata'].get('title', job['filename']), documentId=job['source_id'])
             section_positions = {}
             for position, section in enumerate(sections):
@@ -55,11 +58,11 @@ def store_layout(pipeline, job):
                 cx, cy = (sx + (ordinal % 9 - 4) * 28, sy + 90 + ordinal // 9 * 30) if mode == 'grouped' else (sx + r * math.cos(angle), sy + r * math.sin(angle))
                 put(chunk['id'], 'chunk', cx, cy, chunk['text'], documentId=job['source_id'], sectionId=primary['id'], chunkId=chunk['id'])
                 chunk_positions[chunk['id']] = (cx, cy)
-                extracted = pipeline.item(job['id'], 'extract', chunk['id'])
+                extracted = items['extract', chunk['id']]
                 for entity in extracted['entities']:
                     from app.ingestion.config import fingerprint
                     mention_id = 'mention:' + fingerprint([chunk['id'], entity['key']])
-                    decision = pipeline.item(job['id'], 'resolve', mention_id)
+                    decision = items['resolve', mention_id]
                     entity_id = decision['canonicalId']
                     h = int(hashlib.sha256(entity_id.encode()).hexdigest()[:12], 16)
                     ea = h / (16 ** 12) * math.tau
@@ -74,6 +77,8 @@ def store_layout(pipeline, job):
                     h = int(hashlib.sha256(entity_id.encode()).hexdigest()[:12], 16)
                     ea = h / (16 ** 12) * math.tau
                     put(entity_id, 'entity', ax + 80 * math.cos(ea), ay + 80 * math.sin(ea), entity['name'], entityType=entity['type'], extractionMethod='python_ast')
+            with conn.cursor() as cursor:
+                cursor.executemany('INSERT INTO project_layouts(project_id,mode,node_id,x,y,payload) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(project_id,mode,node_id) DO UPDATE SET payload=excluded.payload', pending)
 
 
 def nodes_for(project_id, mode, bounds=None, limit=800, documents_only=False, identifiers=None):
