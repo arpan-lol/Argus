@@ -230,12 +230,8 @@ async def upload_project_files(project_id, files, through, config=None):
             if not profile_id:
                 profile_id = create_profile(project['description'], [source for _, _, _, source in staged], config)['id']
                 conn.execute('UPDATE projects SET profile_id=%s WHERE id=%s', (profile_id, project_id))
-        jobs = [pipeline.register_file(path, source_id=source_id, filename=filename, profile_id=profile_id) for path, filename, source_id, _ in staged]
-        for job in jobs:
-            if job['status'] not in ('complete', 'running', 'queued'):
-                pipeline.enqueue(job['id'], through)
-            emit(project_id, 'file_registered', {'filename': job['filename']}, job['id'])
-        return {'jobs': [pipeline.get_job(job['id']) for job in jobs], 'archives': archives, 'skippedFiles': skipped}
+        jobs = pipeline.register_sources([source for _, _, _, source in staged], config, profile_id, through)
+        return {'jobs': jobs, 'archives': archives, 'skippedFiles': skipped}
     finally:
         for path in temporary:
             path.unlink(missing_ok=True)

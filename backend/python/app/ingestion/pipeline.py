@@ -117,6 +117,20 @@ class IngestionPipeline:
             raise KeyError(job_id)
         return row
 
+    def register_sources(self, sources, config, profile_id, through):
+        if through not in STAGES:
+            raise ValueError('Unknown ingestion stage')
+        config = {**config, 'corpusProfileId': profile_id}
+        version = fingerprint(config)
+        identifiers = ['job:' + fingerprint([source['sourceId'], source['revision'], version]) for source in sources]
+        with connection() as conn, conn.cursor() as cursor:
+            cursor.executemany('INSERT INTO ingestion_sources(id,filename,original_path,source_url,media_type,project_id) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET filename=excluded.filename,original_path=excluded.original_path,source_url=COALESCE(excluded.source_url,ingestion_sources.source_url)', [(source['sourceId'], source['filename'], source['originalPath'], source.get('sourceUrl'), mimetypes.guess_type(source['filename'])[0], config.get('projectId')) for source in sources])
+            cursor.executemany('INSERT INTO ingestion_jobs(id,source_id,revision,processing_version,configuration,original_path,project_id) VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING', [(identifier, source['sourceId'], source['revision'], version, Jsonb(config), source['originalPath'], config.get('projectId')) for identifier, source in zip(identifiers, sources, strict=True)])
+            conn.execute("WITH eligible AS (SELECT id FROM ingestion_jobs WHERE id=ANY(%s) AND status NOT IN ('complete','running','queued')),locked AS (SELECT id FROM eligible WHERE pg_try_advisory_xact_lock(hashtextextended(id,0))) UPDATE ingestion_jobs j SET status='queued',error=NULL,stop_requested=false,queued_through=%s,updated_at=now() FROM locked WHERE j.id=locked.id AND j.status NOT IN ('complete','running','queued')", (identifiers, through))
+            cursor.executemany("INSERT INTO project_events(project_id,job_id,kind,payload) VALUES(%s,%s,'file_registered',%s)", [(config['projectId'], identifier, Jsonb({'filename': source['filename']})) for identifier, source in zip(identifiers, sources, strict=True)])
+            rows = conn.execute('SELECT j.id,j.status,j.source_id,j.created_at,s.filename FROM ingestion_jobs j JOIN ingestion_sources s ON s.id=j.source_id WHERE j.id=ANY(%s) ORDER BY s.filename', (identifiers,)).fetchall()
+        return serialize([{'id': row['id'], 'status': row['status'], 'documentId': row['source_id'], 'filename': row['filename'], 'createdAt': row['created_at']} for row in rows])
+
     def get_job(self, job_id):
         row = self.job_row(job_id)
         with connection() as conn:

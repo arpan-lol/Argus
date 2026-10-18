@@ -41,7 +41,8 @@ async def upload(file: UploadFile = File(...), source_id: str | None = Form(None
         if source_id or profile_id or prompt:
             raise HTTPException(400, 'Project uploads use the saved workspace description and shared profile')
         from app.projects.routes import upload_project_files
-        return (await upload_project_files(current_project.get(), [file], through))['jobs'][0]
+        result = await upload_project_files(current_project.get(), [file], through)
+        return pipeline.get_job(result['jobs'][0]['id'])
     if profile_id and prompt:
         raise HTTPException(400, "Supply either a saved corpus profile or a new prompt")
     if prompt is not None and (not prompt.strip() or len(prompt) > 12000):
