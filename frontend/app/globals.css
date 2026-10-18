@@ -351,6 +351,17 @@ button:disabled { cursor:not-allowed; }
 .ce-answer-trail strong { font-size:11px; }
 .ce-answer-trail small { font-size:10px; color:var(--ce-muted); }
 .ce-answer-trail:hover { border-color:#e85b59; }
+.ce-answer-graph { display:block; width:100%; max-width:100%; margin-top:7px; padding:8px 10px 10px; overflow-x:auto; border:1px solid #e85b594d; border-radius:8px; background:#e85b5908; color:var(--ce-text); text-align:left; cursor:pointer; }
+.ce-answer-graph:hover { border-color:#e85b59; }
+.ce-answer-graph:focus-visible { outline:2px solid #e85b59; outline-offset:2px; }
+.ce-answer-graph svg { display:block; max-width:none; }
+.ce-answer-graph-edge { color:#c74745; }
+.ce-answer-graph-edge path { fill:none; stroke:currentColor; stroke-width:2; }
+.ce-answer-graph-edge text { fill:var(--ce-muted); font-size:10px; paint-order:stroke; stroke:var(--ce-bg); stroke-width:4px; stroke-linejoin:round; }
+.ce-answer-graph-node circle { fill:#e85b59; stroke:#a33130; stroke-width:1.5; }
+.ce-answer-graph-node text { fill:var(--ce-text); font-size:11px; font-weight:600; paint-order:stroke; stroke:var(--ce-bg); stroke-width:4px; stroke-linejoin:round; }
+.ce-answer-graph > span { display:block; color:var(--ce-muted); font-size:10px; text-align:right; }
+.ce-answer-graph.is-candidate .ce-answer-graph-edge path { stroke-dasharray:5 4; }
 .ce-answer-paragraph { margin: 12px 0 0; }
 .ce-answer-paragraph p { margin: 0; white-space: pre-wrap; line-height: 1.75; overflow-wrap: anywhere; }
 .ce-answer-citations { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }

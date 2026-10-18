@@ -3,6 +3,7 @@
 import { ArrowUpRight, Check, GitBranch, Loader2, RotateCcw } from 'lucide-react';
 import { CitationButton } from '@/components/CitationButton';
 import type { ChatSource, ChatTurn } from '@/lib/chat';
+import { ChatGraphPreview } from './ChatGraphPreview';
 
 const toolLabels: Record<string, string> = {
   inspect_available_tools: 'Inspect available tools',
@@ -18,9 +19,13 @@ export function ChatResponse({ turn, pending, onCitation, onToolSource, onTrace,
   const sources = result?.sources || [];
   const starts = turn.events.filter(event => event.type === 'tool_start');
   const latest = turn.events.filter(event => event.type === 'model' || event.type === 'tool_start' || event.type === 'tool_end').at(-1);
-  const finalTrail = turn.events.filter(event => event.type === 'tool_end' && event.result?.tree.length).at(-1)?.result?.tree || [];
+  const trailEvents = turn.events.filter(event => event.type === 'tool_end' && event.result?.tree.length);
+  const trailEvent = trailEvents.filter(event => event.tool === 'path_between' || event.tool === 'find_paths').at(-1) || trailEvents.at(-1);
+  const finalTrail = trailEvent?.result?.tree || [];
   const excludedHops = new Set(turn.events.filter(event => event.type === 'tool_end' && event.tool === 'review_path').flatMap(event => event.result?.excludedAssertionIds || []));
-  const candidateTrail = finalTrail.some(hop => excludedHops.has(hop.assertionId));
+  const answerReferences = new Set([...(result?.report.paragraphs.flatMap(paragraph => paragraph.citations) || []), ...(result?.report.comparison.flatMap(row => row.citations) || [])]);
+  const citedTrail = finalTrail.length > 0 && finalTrail.every(hop => hop.sourceReference && answerReferences.has(hop.sourceReference));
+  const candidateTrail = trailEvent?.result?.pathUsable === false || finalTrail.some(hop => excludedHops.has(hop.assertionId)) || !citedTrail;
   const citations = (references: string[]) => references.map(reference => {
     const index = sources.findIndex(source => source.id === reference);
     const source = sources[index];
@@ -44,7 +49,8 @@ export function ChatResponse({ turn, pending, onCitation, onToolSource, onTrace,
       {excludedHops.size > 0 && <p className="ce-tool-outcome" role="status">Path review excluded {excludedHops.size} {excludedHops.size === 1 ? 'hop' : 'hops'}. The displayed route is a candidate, not a verified connection.</p>}
     </div>}
     {result && <div className="ce-answer-body" aria-live="polite">
-      {finalTrail.length > 0 && <button type="button" className="ce-answer-trail" onClick={() => onTrace(finalTrail.map(hop => hop.assertionId))}><GitBranch size={17} /><span><strong>{candidateTrail ? 'Candidate graph trail' : 'Explored graph trail'} · {finalTrail.length} {finalTrail.length === 1 ? 'hop' : 'hops'}</strong><small>{candidateTrail ? 'Path review excluded a hop; inspect the graph before relying on this route' : 'Inspect the visited relationships and their sources'}</small></span><ArrowUpRight size={15} /></button>}
+      {finalTrail.length > 0 && <button type="button" className="ce-answer-trail" onClick={() => onTrace(finalTrail.map(hop => hop.assertionId))}><GitBranch size={17} /><span><strong>{candidateTrail ? 'Explored graph trail' : 'Cited graph trail'} · {finalTrail.length} {finalTrail.length === 1 ? 'hop' : 'hops'}</strong><small>{excludedHops.size ? 'Path review excluded a hop; inspect the graph before relying on this route' : !citedTrail ? 'This route was explored but not fully cited in the answer' : 'Inspect the visited relationships and their sources'}</small></span><ArrowUpRight size={15} /></button>}
+      {finalTrail.length > 0 && <ChatGraphPreview hops={finalTrail} candidate={candidateTrail} onOpen={() => onTrace(finalTrail.map(hop => hop.assertionId))} />}
       {result.report.paragraphs.map((paragraph, index) => <div className="ce-answer-paragraph" key={index}><p>{paragraph.text}</p>{paragraph.citations.length > 0 && <div className="ce-answer-citations">{citations(paragraph.citations)}</div>}</div>)}
       {result.report.comparison.length > 0 && <div className="ce-comparison-scroll"><table><thead><tr><th>Subject</th><th>Reported finding</th><th>Conditions</th><th>Sources</th></tr></thead><tbody>{result.report.comparison.map((row, index) => <tr key={index}><th scope="row">{row.subject}</th><td>{row.finding}</td><td>{row.conditions}</td><td>{citations(row.citations)}</td></tr>)}</tbody></table></div>}
       {result.report.gaps.length > 0 && <div className="ce-answer-gaps"><strong>Open questions</strong><ul>{result.report.gaps.map((gap, index) => <li key={index}>{gap}</li>)}</ul></div>}
