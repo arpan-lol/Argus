@@ -51,6 +51,7 @@ export function GlassIconButton({ size = 32, tone = "plain", className, children
   return (
     <button
       type="button"
+      data-tone={tone === "accent" ? "accent" : undefined}
       className={cn("argus-gl-icon relative select-none outline-none", className)}
       style={{ width: size, height: size }}
       {...press.handlers}
