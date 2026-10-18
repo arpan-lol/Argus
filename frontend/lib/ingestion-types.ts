@@ -27,6 +27,8 @@ export interface IngestionJob {
   status: string;
   currentStage?: string | null;
   stages: IngestionStage[];
+  chunkCount?: number;
+  itemCounts?: {stage: string; count: number}[];
   documentId?: string | null;
   createdAt: string;
   error?: string | null;

@@ -2,7 +2,7 @@
   "name": "argus-workspace",
   "version": "0.1.0",
   "private": true,
-  "description": "An inspectable source workspace built on Cosmic Engine and FalkorDB",
+  "description": "An inspectable source workspace powered by FalkorDB",
   "engines": { "node": ">=22.13.0" },
   "scripts": {
     "setup": "npm --prefix frontend install && node scripts/python.mjs setup",

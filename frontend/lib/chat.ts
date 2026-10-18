@@ -76,7 +76,8 @@ export async function streamChat(path: string, body: unknown, onEvent: (event: C
   let pending = '';
   let finished = false;
   const consume = (line: string) => {
-    if (!line.trim()) return;
+    if (!line.trim() || line.startsWith(':') || line.startsWith('id:')) return;
+    if (line.startsWith('data:')) line = line.slice(5).trimStart();
     const event = JSON.parse(line) as ChatEvent;
     if (event.type === 'done' || event.type === 'error') finished = true;
     if (event.type !== 'heartbeat') onEvent(event);

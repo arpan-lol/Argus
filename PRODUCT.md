@@ -8,7 +8,7 @@ web
 
 ## Stack
 
-Current stack: Next.js/React/TypeScript frontend extended from Cosmic Engine, Python/FastAPI backend, LangGraph ingestion with Postgres checkpoints, Postgres with pg_search, and FalkorDB semantic graphs and vectors. A bounded Postgres queue processes uploaded and acquired files through shared stages. The earlier Express implementation and independent Python spike are inactive migration references.
+Current stack: Next.js/React/TypeScript frontend, Python/FastAPI backend, LangGraph ingestion with Postgres checkpoints, Postgres with pg_search, and FalkorDB semantic graphs and vectors. A bounded Postgres queue processes uploaded and acquired files through shared stages. The earlier Express implementation and independent Python spike are inactive migration references.
 
 ## Users
 
@@ -20,7 +20,7 @@ Build a generic engine in a strong direction that demonstrably removes source-re
 
 ## Operating Context
 
-FalkorDB hackathon, 15–18 October 2026. The user brings existing experience building Cosmic Engine and wants ingestion processing, DB inspection, scores, timing analytics and graph operations visible on the UI. The user has no chemistry/materials reviewer available during this event.
+FalkorDB hackathon, 15–18 October 2026. The user brings experience building retrieval engines and wants ingestion processing, DB inspection, scores, timing analytics and graph operations visible on the UI. The user has no chemistry/materials reviewer available during this event.
 
 ## Product Principles
 
@@ -34,7 +34,7 @@ FalkorDB hackathon, 15–18 October 2026. The user brings existing experience bu
 
 Use Case A: materials literature source review, beginning with adsorption/remediation source and a broader catalysis discovery collection. Use Case B: standards implementation review. These are two adapters for one engine, not fallback plans. Scientific interpretation remains unvalidated without a researcher reviewer.
 
-Project name: Argus (two syllables), named for a character from Greek mythology. Preserve Cosmic Engine's dashboard design language and controller/service/route organization. Open directly into a visual source-review dashboard with a full inspector, colored chunks, article section navigation, and citation-linked graph neighborhoods. Authentication and long-term memory are explicitly deferred. Production deployment remains open. Future architectural decisions require asking Arpan; the user granted creative freedom for this first implementation slice.
+Project name: Argus (two syllables), named for a character from Greek mythology. Preserve Argus's dashboard design language and controller/service/route organization. The requested entry page is a project grid, opening each project's dashboard with central chat, files above a graph, colored chunks, source navigation, and citation-linked neighborhoods. Authentication and long-term memory are explicitly deferred. Production deployment remains open. Future architectural decisions require asking Arpan.
 
 ## Source and Assets
 

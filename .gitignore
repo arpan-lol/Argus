@@ -12,3 +12,6 @@ dist/
 *.log
 data/
 .gstack/
+/agents.md
+/AGENTS.md
+/agent.md

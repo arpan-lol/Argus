@@ -20,7 +20,7 @@ interface Profile {
   sampling?: Settings['sampling'];
 }
 
-export function IngestionSettings({ job }: { job: IngestionJob }) {
+export function IngestionSettings({ job, apiRoot = '' }: { job: IngestionJob; apiRoot?: string }) {
   const [open, setOpen] = useState(false);
   const [profile, setProfile] = useState<Profile>();
   const [loading, setLoading] = useState(false);
@@ -40,13 +40,13 @@ export function IngestionSettings({ job }: { job: IngestionJob }) {
     }
     setLoading(true);
     const request = profileId
-      ? api<Profile>(`/ingestion/profiles/${encodeURIComponent(profileId)}`)
-      : api<Settings>(`/ingestion/jobs/${encodeURIComponent(job.id)}/artifacts/configure`).then(settings => ({ settings }));
+      ? api<Profile>(`${apiRoot}/ingestion/profiles/${encodeURIComponent(profileId)}`)
+      : api<Settings>(`${apiRoot}/ingestion/jobs/${encodeURIComponent(job.id)}/artifacts/configure`).then(settings => ({ settings }));
     request.then(result => { if (active) setProfile(result); })
       .catch(reason => { if (active) setError(reason instanceof Error ? reason.message : 'Could not load settings. Try again.'); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [open, job.id, profileId, ready, refresh]);
+  }, [open, job.id, profileId, ready, refresh, apiRoot]);
 
   const settings = profile?.settings;
   const sampling = profile?.sampling || settings?.sampling;

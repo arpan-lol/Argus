@@ -18,6 +18,8 @@ type Camera = { x: number; y: number; zoom: number };
 type Neighborhood = { nodes: MapNode[]; edges: MapEdge[]; paths: ConnectionPath[]; truncated?: boolean; status?: string; note?: string };
 type ScreenEdge = { edge: MapEdge; points: { x: number; y: number }[]; minX: number; maxX: number; minY: number; maxY: number };
 type Props = {
+  apiRoot?: string;
+  refreshToken?: number;
   mode?: 'network' | 'grouped';
   expanded?: boolean;
   onExpand?: () => void;
@@ -32,6 +34,7 @@ const empty: MapView = { nodes: [], edges: [], level: 'overview' };
 const clip = (text: string, size = 34) => text.length > size ? `${text.slice(0, size - 1)}…` : text;
 const scale = (zoom: number) => Math.max(.003, Math.min(7, zoom));
 const edgeMeaning = (edge: MapEdge) => {
+  if (edge.type === 'RELATES') return [String(edge.predicate || 'Related to'), 'An extracted relationship. Open its source to inspect supporting text and conditions.'];
   const labels = Array.isArray(edge.labels) ? edge.labels.filter(label => typeof label === 'string').join(', ') : '';
   const meanings: Record<string, [string, string]> = {
     HAS_SECTION: ['Contains heading', 'This heading belongs to the connected document.'],
@@ -43,14 +46,14 @@ const edgeMeaning = (edge: MapEdge) => {
   return meanings[edge.type] || ['Source connection', 'A recorded relationship between these sources.'];
 };
 
-async function request<T>(path: string, signal?: AbortSignal, mode = 'network'): Promise<T> {
-  const response = await fetch(`/api/map${path}${path.includes('?') ? '&' : '?'}mode=${mode}`, { cache: 'no-store', signal });
+async function request<T>(path: string, signal?: AbortSignal, mode = 'network', apiRoot = ''): Promise<T> {
+  const response = await fetch(`/api${apiRoot}/map${path}${path.includes('?') ? '&' : '?'}mode=${mode}`, { cache: 'no-store', signal });
   if (!response.ok) throw new Error('The source map could not load. Retry when the server is available.');
   return response.json();
 }
 
-export function GraphMap({ focus, onSelect, onFocus, mode = 'network', expanded = false, onExpand }: Props) {
-  const mapRequest = useCallback(<T,>(path: string, signal?: AbortSignal) => request<T>(path, signal, mode), [mode]);
+export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFocus, mode = 'network', expanded = false, onExpand }: Props) {
+  const mapRequest = useCallback(<T,>(path: string, signal?: AbortSignal) => request<T>(path, signal, mode, apiRoot), [mode, apiRoot, refreshToken]);
   const host = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const camera = useRef<Camera>({ x: 0, y: 0, zoom: .015 });
