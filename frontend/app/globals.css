@@ -270,7 +270,6 @@ button:disabled { cursor:not-allowed; }
 .ce-source-panels { min-height:0; }
 .ce-source-resize { flex:0 0 20px !important; height:20px !important; background:transparent; border:0; cursor:row-resize; z-index:3; }
 .ce-source-resize::before { content:''; position:absolute; top:50%; left:0; right:0; height:1px; background:var(--ce-line); pointer-events:none; }
-.ce-map-toolbar .ce-map-modes { margin-left:auto; }
 
 .ce-project-graph-panel.is-compact .ce-project-graph-content { display:none; }
 .ce-workspace-title { display:flex; align-items:center; gap:8px; flex:1; min-width:0; }
