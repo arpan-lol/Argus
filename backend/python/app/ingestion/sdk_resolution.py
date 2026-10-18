@@ -20,12 +20,9 @@ def resolve_basic(pipeline, job):
             identifier = stable_identifier(entity['name'])
             native_key = entity.get('nativeResolverKey')
             surface = entity['name'].strip().lower()
-            ambiguous_short = len(surface) <= 3 and identifier is None and not native_key
             identity_key = ['identifier', identifier.lower(), entity['entity_type'].strip().lower()] if identifier else ['surface', surface, entity['entity_type'].strip().lower()]
             if native_key:
                 identity_key = ['native_stix', native_key.lower(), entity['entity_type'].strip().lower()]
-            if ambiguous_short:
-                identity_key.append(job['source_id'])
             canonical_id = 'entity:' + fingerprint([space, identity_key]) if not deferred else 'entity:' + fingerprint([job['id'], mention_id])
             records.append((entity, mention_id, canonical_id, deferred))
     structure = pipeline.artifact(job['id'], 'normalize').get('codeGraph', {})
@@ -53,7 +50,7 @@ def resolve_basic(pipeline, job):
         verdict = 'deferred' if deferred else 'same'
         rationale = 'GLiNER fallback mention kept separate.' if deferred else 'STIX object ID and consistent native type key.' if entity.get('nativeResolverKey') else 'Exact qualified Python symbol, preserving case.' if entity['entity_type'].startswith('code_') else 'Stable identifier candidate grouping.' if stable_identifier(entity['name']) else 'Exact normalized name and type candidate grouping; identity is unverified and homonyms may remain.'
         decisions.append((decision_id, job['id'], mention_id, canonical_id, verdict, rationale, Jsonb([])))
-        items.append((job['id'], mention_id, Jsonb({'mentionId': mention_id, 'canonicalId': canonical_id, 'decisionId': decision_id, 'deferred': deferred, 'reason': rationale, 'identityStatus': 'native_stix_id' if entity.get('nativeResolverKey') else 'exact_symbol' if entity['entity_type'].startswith('code_') else 'stable_identifier' if stable_identifier(entity['name']) else 'source_scoped_short_surface_form' if len(entity['name'].strip()) <= 3 else 'unverified_surface_form', 'nativeResolverKey': entity.get('nativeResolverKey'), 'nativeFormat': entity.get('nativeFormat')})))
+        items.append((job['id'], mention_id, Jsonb({'mentionId': mention_id, 'canonicalId': canonical_id, 'decisionId': decision_id, 'deferred': deferred, 'reason': rationale, 'identityStatus': 'native_stix_id' if entity.get('nativeResolverKey') else 'exact_symbol' if entity['entity_type'].startswith('code_') else 'stable_identifier' if stable_identifier(entity['name']) else 'unverified_surface_form', 'nativeResolverKey': entity.get('nativeResolverKey'), 'nativeFormat': entity.get('nativeFormat')})))
         mentions += 1
         deferred_count += int(deferred)
     with connection() as conn, conn.cursor() as cursor:
@@ -61,4 +58,4 @@ def resolve_basic(pipeline, job):
         cursor.executemany('INSERT INTO ingestion_resolution_decisions(id,job_id,mention_id,canonical_id,decision,rationale,votes) VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO UPDATE SET canonical_id=excluded.canonical_id,decision=excluded.decision,rationale=excluded.rationale WHERE NOT ingestion_resolution_decisions.reverted', decisions)
         cursor.executemany("INSERT INTO ingestion_items(job_id,stage,item_id,payload) VALUES(%s,'resolve',%s,%s) ON CONFLICT(job_id,stage,item_id) DO UPDATE SET payload=excluded.payload", items)
         conn.execute('UPDATE ingestion_jobs SET updated_at=now() WHERE id=%s', (job['id'],))
-    return {'resolvedMentions': mentions, 'deferredMentions': deferred_count, 'candidatePairs': 0, 'duplicateLlmCalls': 0, 'entityEmbeddingsCreated': 0, 'entityEmbeddingsReused': len(vectors_by_id), 'entityEmbeddingsDeferred': len(unique) - len(vectors_by_id), 'entityEmbeddingPolicy': 'explicit-post-ingestion-finalization', 'method': 'sdk-style-normalized-name-type-1'}
+    return {'resolvedMentions': mentions, 'deferredMentions': deferred_count, 'candidatePairs': 0, 'duplicateLlmCalls': 0, 'entityEmbeddingsCreated': 0, 'entityEmbeddingsReused': len(vectors_by_id), 'entityEmbeddingsDeferred': len(unique) - len(vectors_by_id), 'entityEmbeddingPolicy': 'explicit-post-ingestion-finalization', 'method': 'sdk-style-normalized-name-type-2'}

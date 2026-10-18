@@ -39,6 +39,7 @@ def processing_config(project_id=None):
         "embeddingProvider": provider,
         "embeddingDimensions": 3072,
         "entityEmbeddingPolicy": "explicit-post-ingestion-finalization",
+        "entityIdentityPolicy": "exact-normalized-name-type-including-short-names-2",
         "embeddingTokensPerMinute": int(os.getenv('ARGUS_EMBEDDING_TOKENS_PER_MINUTE', '135000')),
         "llmResourceIdentity": resource_hash(llm_endpoint),
         "embeddingResourceIdentity": resource_hash(embedding_endpoint),
