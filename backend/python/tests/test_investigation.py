@@ -104,15 +104,18 @@ class InvestigationTest(TestCase):
             {"role": "user", "content": "tell me how many tools you have & also their names"},
             {"role": "assistant", "content": "Argus has nine tools, including read_chunks."},
         ])
-        model = mock.Mock(return_value=({"role": "assistant", "content": json.dumps(report(text="read_chunks"))}, {"total_tokens": 200}))
+        model = mock.Mock(side_effect=[
+            (call("inspect_available_tools", {}, "catalog-followup"), {"total_tokens": 120}),
+            ({"role": "assistant", "content": json.dumps(report(text="read_chunks"))}, {"total_tokens": 80}),
+        ])
         state = self.runtime(model).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "inventory-followup"}})
         self.assertEqual(state["report"]["paragraphs"][0]["text"], "read_chunks")
-        self.assertEqual(model.call_count, 1)
+        self.assertEqual(model.call_count, 2)
         messages, definitions = model.call_args.args
-        self.assertIn("list only the read_ ones", messages[-1]["content"])
+        self.assertIn("list only the read_ ones", json.dumps(messages))
         self.assertIn("Argus has nine tools", json.dumps(messages))
         self.assertIn("read_chunks", [item["function"]["name"] for item in definitions])
-        self.assertEqual(self.ledger.budget["modelCalls"], 1)
+        self.assertEqual(self.ledger.budget["modelCalls"], 2)
 
     def test_tool_catalog_is_inspected_inside_agent_loop(self):
         self.row["configuration"]["coverage"] = {"publishedDocuments": 0}
@@ -178,7 +181,7 @@ class InvestigationTest(TestCase):
 
     def test_partial_lookup_does_not_discard_a_supported_answer(self):
         state = initial()
-        state.update(tool_count=1, sources={"S1": source()}, messages=[{"role": "tool", "tool_call_id": "partial", "content": json.dumps({"outcome": "partial", "items": [source()], "inputError": True, "unknownChunkIds": ["unavailable"]})}])
+        state.update(tool_count=1, seen_calls=[json.dumps(["read_chunks", {"chunk_ids": ["chunk-1"]}], sort_keys=True)], sources={"S1": source()}, messages=[{"role": "tool", "tool_call_id": "partial", "content": json.dumps({"outcome": "partial", "items": [source()], "inputError": True, "unknownChunkIds": ["unavailable"]})}])
         result = self.runtime(mock.Mock()).check_report(report("source_answer", ["S1"]), state)
         self.assertEqual(result.purpose, "source_answer")
         with self.assertRaisesRegex(ValueError, "lookup"):
@@ -224,12 +227,13 @@ class InvestigationTest(TestCase):
         invalid = {**report(text="The tools are listed below"), "comparison": [{"subject": "search_sources", "finding": "Searches sources", "conditions": "", "citations": ["_system"]}]}
         model = mock.Mock(side_effect=[
             ({"role": "assistant", "content": json.dumps(invalid)}, {"total_tokens": 100}),
+            (call("inspect_available_tools", {}, "catalog-repair-tool"), {"total_tokens": 90}),
             ({"role": "assistant", "content": json.dumps(report(text="search_sources and find_entities are tools"))}, {"total_tokens": 80}),
         ])
         state = self.runtime(model).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "catalog-repair"}})
         self.assertEqual(state["report"]["purpose"], "conversation")
-        self.assertEqual(model.call_count, 2)
-        self.assertIn("_system", json.dumps(model.call_args.args[0]))
+        self.assertEqual(model.call_count, 3)
+        self.assertIn("_system", json.dumps(model.call_args_list[1].args[0]))
         self.assertIn("search_sources", [item["function"]["name"] for item in model.call_args.args[1]])
 
     def test_checkpoint_resume_keeps_sources_tools_and_budget(self):
