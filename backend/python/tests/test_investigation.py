@@ -45,8 +45,8 @@ def call(name, arguments, identifier="call-1"):
     return {"role": "assistant", "tool_calls": [{"id": identifier, "function": {"name": name, "arguments": json.dumps(arguments)}}]}
 
 
-def report(purpose="conversation", citations=None):
-    return {"purpose": purpose, "paragraphs": [{"text": "A bounded answer", "citations": citations or []}], "comparison": [], "gaps": []}
+def report(purpose="conversation", citations=None, text="A bounded answer"):
+    return {"purpose": purpose, "paragraphs": [{"text": text, "citations": citations or []}], "comparison": [], "gaps": []}
 
 
 def source():
@@ -74,104 +74,87 @@ class InvestigationTest(TestCase):
         self.assertEqual(state["report"]["purpose"], "conversation")
         tool.assert_not_called()
         self.assertEqual(model.call_count, 1)
-        self.assertIsNone(model.call_args.args[1])
+        self.assertNotIn("finish_report", [item["function"]["name"] for item in model.call_args.args[1]])
         self.assertEqual(self.ledger.budget["reportedTokens"], 42)
 
-    def test_empty_project_answers_in_one_small_structured_call(self):
+    def test_empty_project_still_enters_model_tool_loop(self):
         self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
         self.row["configuration"]["workspaceDescription"] = "Materials research"
+        self.row["request"]["graph_expansion"] = True
         model = mock.Mock(return_value=({"role": "assistant", "content": json.dumps(report())}, {"total_tokens": 120}))
         tool = mock.Mock()
         state = self.runtime(model, tool).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "empty-project"}})
         self.assertEqual(state["report"]["purpose"], "conversation")
         self.assertEqual(model.call_count, 1)
         messages, definitions = model.call_args.args
-        self.assertIsNone(definitions)
+        self.assertEqual(len(definitions), 10)
+        self.assertIn("rank_entities", [item["function"]["name"] for item in definitions])
+        self.assertIn("inspect_available_tools", [item["function"]["name"] for item in definitions])
         self.assertIn("Materials research", messages[0]["content"])
-        self.assertNotIn("rank_entities", json.dumps(messages))
+        self.assertEqual(messages[-1]["content"], "hello")
         tool.assert_not_called()
 
-    def test_empty_project_tool_question_receives_live_catalog(self):
+    def test_tool_inventory_and_followup_are_model_driven(self):
         self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
-        self.row["request"]["query"] = "How many tools do you have and what are their names?"
         self.row["request"]["graph_expansion"] = True
-        runtime = self.runtime(mock.Mock())
-        prompt = runtime.messages(initial(), 10000, direct=True)[0]["content"]
-        self.assertIn("9 retrieval tools", prompt)
-        self.assertIn("rank_entities", prompt)
-        self.assertIn("search_sources", prompt)
-        self.assertIn("no published semantic sources", prompt)
-        self.row["request"]["graph_expansion"] = False
-        prompt = runtime.messages(initial(), 10000, direct=True)[0]["content"]
-        self.assertIn("6 retrieval tools", prompt)
-        self.assertNotIn("rank_entities", prompt)
+        self.row["request"].update(query="list only the read_ ones", history=[
+            {"role": "user", "content": "tell me how many tools you have & also their names"},
+            {"role": "assistant", "content": "Argus has nine tools, including read_chunks."},
+        ])
+        model = mock.Mock(return_value=({"role": "assistant", "content": json.dumps(report(text="read_chunks"))}, {"total_tokens": 200}))
+        state = self.runtime(model).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "inventory-followup"}})
+        self.assertEqual(state["report"]["paragraphs"][0]["text"], "read_chunks")
+        self.assertEqual(model.call_count, 1)
+        messages, definitions = model.call_args.args
+        self.assertIn("list only the read_ ones", messages[-1]["content"])
+        self.assertIn("Argus has nine tools", json.dumps(messages))
+        self.assertIn("read_chunks", [item["function"]["name"] for item in definitions])
+        self.assertEqual(self.ledger.budget["modelCalls"], 1)
 
-    def test_tool_inventory_answer_comes_from_registry_without_model_call(self):
-        self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
-        self.row["request"]["query"] = "tell me how many tools you have & also their names"
+    def test_tool_catalog_is_inspected_inside_agent_loop(self):
+        self.row["configuration"]["coverage"] = {"publishedDocuments": 0}
         self.row["request"]["graph_expansion"] = True
-        model = mock.Mock(side_effect=AssertionError("tool inventory should not use the model"))
-        state = self.runtime(model).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "tool-inventory"}})
-        answer = state["report"]["paragraphs"][0]["text"]
-        self.assertIn("9 retrieval tools", answer)
-        self.assertIn("rank_entities", answer)
-        self.assertIn("no published semantic sources", answer)
-        model.assert_not_called()
-
-    def test_tool_inventory_formatting_followup_uses_previous_question(self):
-        self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
-        self.row["request"]["query"] = "list then with formating"
-        self.row["request"]["history"] = [
-            {"role": "user", "content": "tell me how many tools you have & also their names"},
-            {"role": "assistant", "content": "Argus has 9 retrieval tools configured for this chat."},
-        ]
-        self.row["request"]["graph_expansion"] = True
-        model = mock.Mock(side_effect=AssertionError("formatting the tool list should not use the model"))
-        state = self.runtime(model).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "tool-list-followup"}})
-        answer = state["report"]["paragraphs"][0]["text"]
-        self.assertIn("1. search_sources\n2. find_entities", answer)
-        self.assertIn("9. rank_entities", answer)
-        self.assertIn("no published semantic sources", answer)
-        model.assert_not_called()
-
-    def test_tool_inventory_followup_filters_prefix(self):
-        self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
-        self.row["request"].update(query="list only the read_ ones", graph_expansion=True, history=[
-            {"role": "user", "content": "tell me how many tools you have & also their names"},
-            {"role": "assistant", "content": "Argus has 9 retrieval tools configured for this chat."},
+        self.row["request"]["query"] = "list all tools"
+        model = mock.Mock(side_effect=[
+            (call("inspect_available_tools", {}, "catalog"), {"total_tokens": 120}),
+            ({"role": "assistant", "content": json.dumps(report(text="There are nine retrieval tools."))}, {"total_tokens": 90}),
         ])
-        model = mock.Mock(side_effect=AssertionError("prefix filtering should not use the model"))
-        state = self.runtime(model).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "tool-prefix"}})
-        answer = state["report"]["paragraphs"][0]["text"]
-        self.assertIn("read_chunks", answer)
-        self.assertNotIn("search_sources", answer)
-        self.assertNotIn("rank_entities", answer)
-        model.assert_not_called()
+        tool = mock.Mock()
+        state = self.runtime(model, tool).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "catalog-tool"}})
+        self.assertEqual(state["report"]["purpose"], "conversation")
+        self.assertEqual(state["tool_count"], 1)
+        self.assertEqual(model.call_count, 2)
+        self.assertIn('"retrievalToolCount": 9', model.call_args.args[0][-1]["content"])
+        self.assertIn("rank_entities", json.dumps(model.call_args.args[0]))
+        tool.assert_not_called()
 
-    def test_tool_inventory_followup_answers_ordinal(self):
+    def test_empty_project_can_run_retrieval_tool_before_finishing(self):
         self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
-        self.row["request"].update(query="which is the 9th?", graph_expansion=True, history=[
-            {"role": "user", "content": "tell me how many tools you have & also their names"},
-            {"role": "assistant", "content": "Argus has 9 retrieval tools configured for this chat."},
-            {"role": "user", "content": "list only the read_ ones"},
-            {"role": "assistant", "content": "read_chunks"},
+        self.row["request"]["query"] = "Find source passages about batteries"
+        model = mock.Mock(side_effect=[
+            (call("search_sources", {"query": "batteries"}), {"total_tokens": 120}),
+            ({"role": "assistant", "content": json.dumps(report("insufficient_support", text="No published sources are available."))}, {"total_tokens": 90}),
         ])
-        model = mock.Mock(side_effect=AssertionError("ordinal lookup should not use the model"))
-        state = self.runtime(model).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "tool-ordinal"}})
-        self.assertEqual(state["report"]["paragraphs"][0]["text"], "The 9th tool in the full list is rank_entities.")
-        model.assert_not_called()
+        tool = mock.Mock(return_value={"outcome": "no_published_sources", "items": []})
+        state = self.runtime(model, tool).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "empty-retrieval"}})
+        self.assertEqual(state["report"]["purpose"], "insufficient_support")
+        self.assertEqual(state["tool_count"], 1)
+        self.assertEqual(model.call_count, 2)
+        tool.assert_called_once_with("search_sources", {"query": "batteries"})
 
-    def test_unrecognized_tool_followup_keeps_catalog_for_model(self):
+    def test_invalid_tool_catalog_citation_gets_model_feedback(self):
         self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}
-        self.row["request"].update(query="which of those checks author metadata?", history=[
-            {"role": "user", "content": "tell me how many tools you have & also their names"},
-            {"role": "assistant", "content": "Argus has 9 retrieval tools configured for this chat."},
+        self.row["request"]["query"] = "list all tools"
+        invalid = {**report(text="The tools are listed below"), "comparison": [{"subject": "search_sources", "finding": "Searches sources", "conditions": "", "citations": ["_system"]}]}
+        model = mock.Mock(side_effect=[
+            ({"role": "assistant", "content": json.dumps(invalid)}, {"total_tokens": 100}),
+            ({"role": "assistant", "content": json.dumps(report(text="search_sources and find_entities are tools"))}, {"total_tokens": 80}),
         ])
-        runtime = self.runtime(mock.Mock())
-        self.assertFalse(runtime.tool_inventory_question())
-        prompt = runtime.messages(initial(), 10000, direct=True)[0]["content"]
-        self.assertIn("source_authors", prompt)
-        self.assertIn("credited authors", prompt)
+        state = self.runtime(model).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "catalog-repair"}})
+        self.assertEqual(state["report"]["purpose"], "conversation")
+        self.assertEqual(model.call_count, 2)
+        self.assertIn("_system", json.dumps(model.call_args.args[0]))
+        self.assertIsNone(model.call_args.args[1])
 
     def test_checkpoint_resume_keeps_sources_tools_and_budget(self):
         self.row["request"]["query"] = "Find the published hello source"
@@ -231,7 +214,8 @@ class InvestigationTest(TestCase):
         names = [item["function"]["name"] for item in self.runtime(mock.Mock()).definitions(initial())]
         self.assertNotIn("find_paths", names)
         self.assertNotIn("expand_connections", names)
-        self.assertIn("finish_report", names)
+        self.assertNotIn("finish_report", names)
+        self.assertIn("search_sources", names)
 
     def test_source_references_deduplicate(self):
         sources = collect_sources({"items": [source(), source()]}, {})
@@ -254,7 +238,7 @@ class InvestigationTest(TestCase):
         requests = []
         def transport(request):
             requests.append(request)
-            return httpx.Response(200, json={"id": "resp-1", "object": "response", "created_at": 1, "model": "gpt-5", "status": "completed", "output": [{"id": "fc-1", "type": "function_call", "call_id": "stable-call", "name": "finish_report", "arguments": json.dumps(report()), "status": "completed"}], "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}})
+            return httpx.Response(200, json={"id": "resp-1", "object": "response", "created_at": 1, "model": "gpt-5", "status": "completed", "output": [{"id": "fc-1", "type": "function_call", "call_id": "stable-call", "name": "search_sources", "arguments": json.dumps({"query": "hello"}), "status": "completed"}], "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}})
         def client(**kwargs):
             return OpenAI(**kwargs, http_client=httpx.Client(transport=httpx.MockTransport(transport)))
         runtime = self.runtime(mock.Mock())
@@ -263,6 +247,9 @@ class InvestigationTest(TestCase):
         body = json.loads(requests[0].content)
         self.assertFalse(body["store"])
         self.assertFalse(body["parallel_tool_calls"])
+        self.assertEqual(body["tool_choice"], "auto")
+        self.assertEqual(body["text"]["format"]["type"], "json_schema")
+        self.assertNotIn("finish_report", [item["name"] for item in body["tools"]])
         self.assertEqual(requests[0].url.path, "/openai/v1/responses")
         self.assertFalse(requests[0].url.query)
         self.assertEqual(message["tool_calls"][0]["id"], "stable-call")
@@ -274,7 +261,7 @@ class InvestigationTest(TestCase):
         requests = []
         def transport(request):
             requests.append(request)
-            return httpx.Response(200, json={"id": "resp-2", "object": "response", "created_at": 1, "model": "gpt-4.1-mini", "status": "completed", "output": [{"id": "fc-2", "type": "function_call", "call_id": "llm2-call", "name": "finish_report", "arguments": json.dumps(report()), "status": "completed"}], "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}})
+            return httpx.Response(200, json={"id": "resp-2", "object": "response", "created_at": 1, "model": "gpt-4.1-mini", "status": "completed", "output": [{"id": "fc-2", "type": "function_call", "call_id": "llm2-call", "name": "search_sources", "arguments": json.dumps({"query": "hello"}), "status": "completed"}], "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}})
         def client(**kwargs):
             return OpenAI(**kwargs, http_client=httpx.Client(transport=httpx.MockTransport(transport)))
         runtime = self.runtime(mock.Mock())

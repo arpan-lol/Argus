@@ -5,6 +5,7 @@ import { CitationButton } from '@/components/CitationButton';
 import type { ChatSource, ChatTurn } from '@/lib/chat';
 
 const toolLabels: Record<string, string> = {
+  inspect_available_tools: 'Inspect available tools',
   source_authors: 'Read source authors', recent_source_updates: 'Check source updates', rank_entities: 'Rank graph connections',
   search_sources: 'Search sources', find_entities: 'Find entities', read_chunks: 'Read passages',
   inspect_assertions: 'Inspect findings', expand_connections: 'Explore connections', find_paths: 'Trace a connection',

@@ -26,7 +26,7 @@ class ChatRequest(BaseModel):
 class Paragraph(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     text: str = Field(min_length=1, max_length=3000)
-    citations: list[str] = Field(default_factory=list, max_length=10)
+    citations: list[str] = Field(default_factory=list, max_length=10, description="Retrieved source references only; empty for ordinary conversation and tool catalog explanations")
 
 
 class ComparisonRow(BaseModel):
@@ -41,7 +41,7 @@ class Report(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     purpose: Literal["conversation", "source_answer", "insufficient_support"]
     paragraphs: list[Paragraph] = Field(min_length=1, max_length=10)
-    comparison: list[ComparisonRow] = Field(default_factory=list, max_length=12)
+    comparison: list[ComparisonRow] = Field(default_factory=list, max_length=12, description="Cited comparisons of retrieved source findings only; empty for tool lists and ordinary conversation")
     gaps: list[str] = Field(default_factory=list, max_length=8)
 
 
