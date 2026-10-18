@@ -98,7 +98,7 @@ def _publish(pipeline, job):
     title = metadata.get("title") or job["filename"]
     graph = graph_connection(job["configuration"])
     affected_entities = {row[0] for row in graph.query("MATCH (m:Mention {documentId:$source})-[:RESOLVED_TO]->(e:Entity) RETURN DISTINCT e.id", {"source": job["source_id"]}).result_set}
-    for label in ("Chunk", "Entity", "Assertion"):
+    for label in ("Chunk", "Entity"):
         index(graph, label, job["configuration"]["embeddingDimensions"])
     for label in ("Document", "SourceRevision", "Section", "Chunk", "Entity", "Mention", "Assertion", "ResolutionDecision"):
         try:
@@ -134,9 +134,6 @@ def _publish(pipeline, job):
             extraction_warnings.append({"chunkId": chunk["id"], "code": "gliner_only_fallback", "message": extraction_metadata.get("warning", "Only local mentions were retained; connections were not extracted."), "reason": extraction_metadata.get("reason")})
         graph.query("MATCH (c:Chunk {id:$id}) SET c.extractionMethod=$method,c.llmVerified=$verified,c.extractionFallback=$fallback,c.extractionMetadata=$metadata", {"id": chunk["id"], "method": extraction_metadata.get("method", "unknown"), "verified": extraction_metadata.get("llmVerified") is True, "fallback": bool(extraction_metadata.get("fallback")), "metadata": json.dumps(extraction_metadata)})
         facts = extraction["relationships"]
-        fact_vectors = pipeline.item(job["id"], "assertion_embed", chunk["id"])["vectors"]
-        if len(fact_vectors) != len(facts) or any(len(vector) != job["configuration"]["embeddingDimensions"] or any(not math.isfinite(value) for value in vector) for vector in fact_vectors):
-            raise ValueError("Assertion embeddings must be finite and match the configured vector space")
         graph.query("MATCH (c:Chunk {id:$id}) OPTIONAL MATCH (c)-[r:MENTIONS]->() DELETE r", {"id": chunk["id"]})
         local = {}
         for entity in extraction["entities"]:
@@ -167,7 +164,7 @@ def _publish(pipeline, job):
             assertion_id = "assertion:" + fingerprint([job["id"], chunk["id"], ordinal, relationship])
             spans, primary_span, span_status = supported_spans(chunk, relationship)
             start, end = primary_span["startOffset"], primary_span["endOffset"]
-            graph.query("MATCH (c:Chunk {id:$chunk}) MERGE (a:Assertion {id:$id}) SET a.jobId=$job,a.documentId=$document,a.predicate=$predicate,a.quote=$quote,a.conditions=$conditions,a.polarity=$polarity,a.startOffset=$start,a.endOffset=$end,a.sourceSpans=$spans,a.sourceSpanStatus=$spanStatus,a.sourceSpanAmbiguous=$ambiguous,a.extractionMethod=$method,a.llmVerified=$verified,a.embedding=vecf32($vector),a.embeddingModel=$model,a.active=false MERGE (a)-[:SUPPORTED_BY]->(c)", {"chunk": chunk["id"], "id": assertion_id, "job": job["id"], "document": job["source_id"], "predicate": relationship["predicate"], "quote": relationship["quote"], "conditions": json.dumps(relationship["conditions"]), "polarity": relationship["polarity"], "start": start, "end": end, "spans": json.dumps(spans), "spanStatus": span_status, "ambiguous": len(spans) > 1, "method": relationship.get("extractionMethod", extraction_metadata.get("method", "unknown")), "verified": relationship.get("llmVerified", extraction_metadata.get("llmVerified")) is True, "vector": fact_vectors[ordinal], "model": job["configuration"]["embeddingModel"]})
+            graph.query("MATCH (c:Chunk {id:$chunk}) MERGE (a:Assertion {id:$id}) SET a.jobId=$job,a.documentId=$document,a.predicate=$predicate,a.quote=$quote,a.conditions=$conditions,a.polarity=$polarity,a.startOffset=$start,a.endOffset=$end,a.sourceSpans=$spans,a.sourceSpanStatus=$spanStatus,a.sourceSpanAmbiguous=$ambiguous,a.extractionMethod=$method,a.llmVerified=$verified,a.active=false MERGE (a)-[:SUPPORTED_BY]->(c)", {"chunk": chunk["id"], "id": assertion_id, "job": job["id"], "document": job["source_id"], "predicate": relationship["predicate"], "quote": relationship["quote"], "conditions": json.dumps(relationship["conditions"]), "polarity": relationship["polarity"], "start": start, "end": end, "spans": json.dumps(spans), "spanStatus": span_status, "ambiguous": len(spans) > 1, "method": relationship.get("extractionMethod", extraction_metadata.get("method", "unknown")), "verified": relationship.get("llmVerified", extraction_metadata.get("llmVerified")) is True})
             graph.query("MATCH (a:Assertion {id:$id})-[:SUBJECT]->(s:Entity)-[r:RELATES]->() WHERE r.assertionId=$id DELETE r", {"id": assertion_id})
             graph.query("MATCH (a:Assertion {id:$id}) OPTIONAL MATCH (a)-[r:SUBJECT|OBJECT]->() DELETE r", {"id": assertion_id})
             graph.query("MATCH (a:Assertion {id:$id}),(s:Entity {id:$subject}),(o:Entity {id:$object}) MERGE (a)-[:SUBJECT]->(s) MERGE (a)-[:OBJECT]->(o) MERGE (s)-[r:RELATES {assertionId:$id}]->(o) SET r.predicate=$predicate,r.rel_type=$predicate,r.jobId=$job,r.sourceId=$source,r.active=false", {"id": assertion_id, "subject": local[relationship["subject"]], "object": local[relationship["object"]], "predicate": relationship["predicate"], "job": job["id"], "source": job["source_id"]})

@@ -1,16 +1,9 @@
 import math
-import uuid
-
-from app.database import connection
-
 from .providers import (
     ConfigurationRequired,
     EXTRACTION_PROMPT,
-    PROFILE_PROMPT,
-    Profile,
     Providers,
     extraction_schema,
-    relationship_repair_schema,
 )
 
 
@@ -83,7 +76,7 @@ def gliner_fallback(chunk, candidates, types, reason, attempts):
             "reason": reason,
             "llmAttempts": attempts,
             "glinerCoverage": candidates.get("coverage"),
-            "warning": "LLM extraction failed twice. Only local GLiNER mentions were retained; no semantic connections were extracted.",
+            "warning": "LLM extraction failed. Only local GLiNER mentions were retained; no semantic relationships were extracted.",
         },
     }
 
@@ -94,14 +87,8 @@ def extract_document(pipeline, job):
     chunks = pipeline.artifact(job["id"], "chunk")["chunks"]
     profile = pipeline.artifact(job["id"], "configure") or {}
     types = profile.get("entityTypes") or job["configuration"]["entityTypes"]
-    origin = "automatic_corpus_configuration" if profile else "configuration"
+    origin = profile.get("profileOrigin", "configuration")
     instructions = profile.get("extractionInstructions", "")
-    if not types:
-        if not chunks:
-            raise ValueError("Cannot infer extraction settings for an empty document")
-        inferred = pipeline.retry_call(job, "profile", "document", lambda: provider.structured(Profile, PROFILE_PROMPT, {"title": document["metadata"].get("title", job["filename"]), "source": chunks[0]["text"]}))
-        types = inferred["entity_types"]
-        origin = "llm_document_inferred"
     if not isinstance(types, list) or not types or any(not isinstance(value, str) or not value.strip() for value in types):
         raise ValueError("Extraction settings require nonempty entity type labels")
     if not isinstance(instructions, str):
@@ -113,33 +100,15 @@ def extract_document(pipeline, job):
         result = pipeline.item(job["id"], "extract", chunk["id"])
         if result is None:
             candidates = pipeline.retry_call(job, "gliner", chunk["id"], lambda c=chunk: provider.gliner(c["text"], types))
-            feedback = {}
-            with connection() as conn:
-                rejected = conn.execute("SELECT payload FROM ingestion_items WHERE job_id=%s AND stage='rejected_extraction' AND payload->>'chunkId'=%s ORDER BY created_at DESC LIMIT 1", (job["id"], chunk["id"])).fetchone()
-            if rejected:
-                prior = rejected["payload"]["output"]
-                try:
-                    pipeline.validate_extraction(chunk, prior)
-                except ValueError as error:
-                    feedback.update({"error": provider.safe_error(error), "previous_output": prior, "instruction": "Repair rejected output using exact case-sensitive source substrings. Omit unsupported records."})
             provider.credentials(job["configuration"].get("llmProvider"), job["configuration"].get("llmCredentialEnv"))
             attempts = 0
-            completed_output = False
 
             def extract(c=chunk, mentions=candidates):
-                nonlocal attempts, completed_output
-                prior_entities = feedback.get("previous_output", {}).get("entities", [])
-                keys = [entity["key"] for entity in prior_entities]
-                repair = bool(keys) and len(keys) == len(set(keys)) and all(entity["name"].strip() and entity["quote"] and entity["quote"] in c["text"] and entity["entity_type"] in types for entity in prior_entities)
-                payload = {"entity_types": types, "gliner_candidates": mentions["mentions"], "source": c["text"], "validation_feedback": feedback, "extraction_settings": {"instructions": instructions, "relationshipTypes": profile.get("relationshipTypes", [])}, "source_context": {"title": document["metadata"].get("title", job["filename"]), "blocks": c.get("sourceContext", []), "coverage": document["metadata"].get("sourceCoverage")}}
+                nonlocal attempts
+                payload = {"entity_types": types, "gliner_candidates": mentions["mentions"], "source": c["text"], "extraction_settings": {"instructions": instructions, "relationshipTypes": profile.get("relationshipTypes", [])}, "source_context": {"title": document["metadata"].get("title", job["filename"]), "coverageLabel": document["metadata"].get("sourceCoverage", {}).get("coverageLabel")}}
                 attempts += 1
                 try:
-                    if repair:
-                        payload["fixed_entities"] = prior_entities
-                        fixed = provider.structured(relationship_repair_schema(keys), prompt + " Repair relationships for fixed_entities only. Endpoints must be keys from that list. Return only repaired relationships.", payload)
-                        output = {"entities": prior_entities, "relationships": fixed["relationships"]}
-                    else:
-                        output = provider.structured(extraction_schema(types), prompt, payload)
+                    output = provider.structured(extraction_schema(types), prompt, payload)
                 except Exception as error:
                     if getattr(error, "status_code", None) in (401, 403, 404):
                         raise ConfigurationRequired("LLM2 access or deployment configuration must be corrected before extraction can continue") from error
@@ -151,21 +120,18 @@ def extract_document(pipeline, job):
                     allowed = profile.get("relationshipTypes", [])
                     if allowed and any(row["predicate"] not in allowed for row in output["relationships"]):
                         raise ValueError("Connection labels must match configured relationshipTypes: " + ", ".join(allowed))
-                except ValueError as error:
-                    feedback.update({"error": provider.safe_error(error), "previous_output": output, "instruction": "Repair using the original source. Keep exact quotes; omit unsupported conditions."})
-                    pipeline.save_item(job["id"], "rejected_extraction", str(uuid.uuid4()), {"chunkId": c["id"], "error": provider.safe_error(error), "output": output})
+                except ValueError:
                     raise
                 output = annotate_output(c, output)
                 output["metadata"] = {"method": "gliner_llm_verified", "llmVerified": True, "fallback": False, "llmAttempts": attempts, "glinerCoverage": mentions.get("coverage")}
-                completed_output = True
                 return output
 
             try:
-                result = pipeline.retry_call(job, "extract", chunk["id"], extract, max_attempts=2)
+                result = pipeline.retry_call(job, "extract", chunk["id"], extract, max_attempts=1)
             except ConfigurationRequired:
                 raise
             except Exception as error:
-                if attempts != 2 or completed_output:
+                if attempts != 1:
                     raise
                 result = gliner_fallback(chunk, candidates, types, provider.safe_error(error), attempts)
                 pipeline.validate_extraction(chunk, result)

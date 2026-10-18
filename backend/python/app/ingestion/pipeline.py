@@ -21,10 +21,10 @@ from app.config import settings
 from app.database import connection, migrate
 
 from .chunking import chunk_document
-from .config import fingerprint, processing_config
+from .config import SDK_DEFAULT_ENTITY_TYPES, fingerprint, processing_config
 from .parsers import normalize, parse
-from .providers import ConfigurationRequired, Extraction, Profile, Providers, ResolutionVote, EXTRACTION_PROMPT, PROFILE_PROMPT, RESOLUTION_PROMPT
-from .providers import relationship_repair_schema, extraction_schema
+from .providers import ConfigurationRequired, Extraction, Profile, Providers, EXTRACTION_PROMPT, PROFILE_PROMPT
+from .providers import extraction_schema
 from .schema import ensure_schema
 
 
@@ -193,7 +193,7 @@ class IngestionPipeline:
                         receipt[key] = result[key]
                 summaries = []
                 if result.get("fallbackChunks"):
-                    summaries.append(f"{result['fallbackChunks']} chunks kept local mentions after two failed LLM attempts; no connections extracted for those chunks.")
+                    summaries.append(f"{result['fallbackChunks']} chunks kept local GLiNER mentions after failed extraction; no relationships extracted for those chunks.")
                 if result.get("deferredMentions"):
                     summaries.append(f"{result['deferredMentions']} mentions kept separate; duplicate checks deferred.")
                 coverage = result.get("metadata", {}).get("sourceCoverage", {})
@@ -238,7 +238,7 @@ class IngestionPipeline:
             try:
                 from app.projects.events import job_event
                 job_event(job, 'item_start', {'stage': stage, 'itemId': key, 'attempt': attempt + 1})
-                if stage not in {"embed", "entity_embed", "entity_embed_batch", "assertion_embed"}:
+                if stage not in {"embed", "embed_batch", "entity_embed", "entity_embed_batch", "assertion_embed"}:
                     self.budget(job)
                 payload = operation()
                 self.save_item(job["id"], stage, key, payload)
@@ -336,34 +336,25 @@ class IngestionPipeline:
     def stage_embed(self, job):
         provider = Providers(job["configuration"], self.call_recorder(job["id"]))
         chunks = self.artifact(job["id"], "chunk")["chunks"]
-        for chunk in chunks:
-            self.retry_call(job, "embed", chunk["id"], lambda c=chunk: {"vector": provider.embed([c["text"]])[0], "model": job["configuration"]["embeddingModel"]})
+        missing = [chunk for chunk in chunks if self.item(job["id"], "embed", chunk["id"]) is None]
+        for start in range(0, len(missing), 64):
+            batch = missing[start:start + 64]
+            key = fingerprint([job["configuration"]["embeddingModel"], [chunk["id"] for chunk in batch]])
+            vectors = self.retry_call(job, "embed_batch", key, lambda rows=batch: {"vectors": provider.embed([chunk["text"] for chunk in rows])})["vectors"]
+            for chunk, vector in zip(batch, vectors, strict=True):
+                self.save_item(job["id"], "embed", chunk["id"], {"vector": vector, "model": job["configuration"]["embeddingModel"]})
         return {"chunks": len(chunks), "model": job["configuration"]["embeddingModel"], "dimensions": job["configuration"]["embeddingDimensions"], "storage": "Durable PostgreSQL staging; FalkorDB vector properties/index published only after validation"}
 
     def stage_configure(self, job):
-        from .profiles import create_profile, prepare_profile
         config = job["configuration"]
-        if config["entityTypes"] and not config.get("corpusProfileId"):
-            return {"entityTypes": config["entityTypes"], "relationshipTypes": [], "extractionInstructions": "Extract explicitly supported things and connections, retaining source attribution and uncertainty.", "profileOrigin": "fixed_configuration"}
-        profile_id = config.get("corpusProfileId")
-        if not profile_id:
-            prompt = "Extract the explicitly stated things and their connections from this document, retaining attribution, negation and conditions."
-            source = {"sourceId": job["source_id"], "revision": job["revision"], "filename": job["filename"], "originalPath": job["original_path"]}
-            profile_id = create_profile(prompt, [source], config)["id"]
-        return prepare_profile(self, job, profile_id)
+        return {"entityTypes": config["entityTypes"] or list(SDK_DEFAULT_ENTITY_TYPES), "relationshipTypes": [], "extractionInstructions": config.get("workspaceDescription") or "Extract explicitly supported entities and relationships with source attribution.", "profileOrigin": "sdk_default" if not config["entityTypes"] else "fixed_configuration"}
 
     def stage_extract(self, job):
         from .extraction import extract_document
         return extract_document(self, job)
 
     def stage_prepare(self, job):
-        provider = Providers(job["configuration"], self.call_recorder(job["id"]))
-        count = 0
-        for chunk in self.artifact(job["id"], "chunk")["chunks"]:
-            facts = self.item(job["id"], "extract", chunk["id"])["relationships"]
-            self.retry_call(job, "assertion_embed", chunk["id"], lambda rows=facts: {"vectors": provider.embed([row["predicate"] + "\n" + row["polarity"] + "\n" + row["quote"] for row in rows]) if rows else []})
-            count += len(facts)
-        return {"connectionVectors": count, "providerCallsAfterValidation": False}
+        return {"relationshipVectors": 0, "providerCalls": 0}
 
     def validate_extraction(self, chunk, extraction):
         entities = {entity["key"] for entity in extraction["entities"]}
@@ -387,8 +378,8 @@ class IngestionPipeline:
                     raise ValueError("Relationship condition unit must occur verbatim in its supporting quote")
 
     def stage_resolve(self, job):
-        from .resolution import resolve
-        return resolve(self, job)
+        from .sdk_resolution import resolve_basic
+        return resolve_basic(self, job)
 
     def stage_validate(self, job):
         from .publication import supported_spans
@@ -406,16 +397,13 @@ class IngestionPipeline:
             for record in extraction["entities"] + extraction["relationships"]:
                 supported_spans(chunk, record)
             facts = extraction["relationships"]
-            vectors = self.item(job["id"], "assertion_embed", chunk["id"])
-            if vectors is None or len(vectors["vectors"]) != len(facts) or any(len(vector) != job["configuration"]["embeddingDimensions"] or not any(vector) or any(not math.isfinite(value) for value in vector) for vector in vectors["vectors"]):
-                raise ValueError("Connection embeddings missing, invalid or wrong dimensionality")
             assertions += len(facts)
             for entity in extraction["entities"]:
                 mention_id = "mention:" + fingerprint([chunk["id"], entity["key"]])
                 if not self.item(job["id"], "resolve", mention_id):
                     raise ValueError("Entity resolution artifact missing")
         fallback_count = (self.artifact(job["id"], "extract") or {}).get("fallbackChunks", 0)
-        return {"chunks": len(chunks), "assertions": assertions, "offsets": "exact_match", "fallbackChunks": fallback_count, "semanticValidation": "Exact source locations and prepared vectors checked. Fallback chunks contain local mentions without connections; scientific correctness is not independently established." if fallback_count else "LLM source grounding plus structural validation; scientific correctness not independently established"}
+        return {"chunks": len(chunks), "assertions": assertions, "offsets": "exact_match", "fallbackChunks": fallback_count, "semanticValidation": "Exact source locations checked. Fallback chunks contain local mentions without relationships; scientific correctness is not independently established." if fallback_count else "LLM source grounding plus structural validation; scientific correctness not independently established"}
 
     def stage_publish(self, job):
         from .publication import publish

@@ -7,6 +7,8 @@ from dotenv import load_dotenv
 
 from .deployments import base_url, deployment
 
+SDK_DEFAULT_ENTITY_TYPES = ("Person", "Organization", "Technology", "Product", "Location", "Date", "Event", "Concept", "Law", "Dataset", "Method")
+
 load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
@@ -22,7 +24,7 @@ def processing_config(project_id=None):
     embedding_endpoint = base_url(os.getenv("EMBEDDING_MODEL_ENDPOINT")) if os.getenv("EMBEDDING_MODEL_ENDPOINT") else None
     resource_hash = lambda value: hashlib.sha256((value.rstrip("/") + "/").encode()).hexdigest() if value else None
     config = {
-        "contract": "argus-ingestion-3-parallel",
+        "contract": "argus-ingestion-4-sdk-basic",
         "semanticGraph": os.getenv("ARGUS_SEMANTIC_GRAPH", "argus_sources_v2"),
         "parser": "source-blocks-3",
         "structureVersion": "heading-intersection-1",
@@ -32,7 +34,6 @@ def processing_config(project_id=None):
         "tokenEncoding": "cl100k_base",
         "provider": provider,
         "extractionModel": extraction_model,
-        "resolutionModel": extraction_model,
         "embeddingModel": embedding_model,
         "embeddingProvider": provider,
         "embeddingDimensions": 3072,
@@ -46,20 +47,13 @@ def processing_config(project_id=None):
         "entityTypes": json.loads(os.getenv("ARGUS_ENTITY_TYPES", "[]")),
         "retries": int(os.getenv("ARGUS_INGESTION_RETRIES", "3")),
         "retryBaseSeconds": float(os.getenv("ARGUS_RETRY_BASE_SECONDS", "2")),
-        "resolutionCandidates": int(os.getenv("ARGUS_RESOLUTION_CANDIDATES", "5")),
-        "resolutionSearchCandidates": int(os.getenv("ARGUS_RESOLUTION_SEARCH_CANDIDATES", "25")),
-        "resolutionVersion": "batched-pairs-scoped-3",
-        "resolutionBatchPairs": int(os.getenv("ARGUS_RESOLUTION_BATCH_PAIRS", "32")),
-        "entityEmbeddingBatchSize": int(os.getenv("ARGUS_ENTITY_EMBED_BATCH_SIZE", "32")),
-        "resolutionCosineThreshold": float(os.getenv("ARGUS_RESOLUTION_COSINE_THRESHOLD", "0.82")),
         "maxLlmCallsPerJob": int(os.getenv("ARGUS_MAX_LLM_CALLS_PER_JOB", "0")),
         "promptVersion": "falkordb-35e67a0-adapted-grounding-2",
-        "extractionVersion": "two-attempt-gliner-fallback-1",
+        "extractionVersion": "single-attempt-gliner-fallback-1",
         "maxOutputTokens": int(os.getenv("ARGUS_MAX_OUTPUT_TOKENS", "8192")),
         "modelTimeoutSeconds": float(os.getenv("ARGUS_MODEL_TIMEOUT_SECONDS", "120")),
         "extractionThinkingBudget": int(os.getenv("ARGUS_EXTRACTION_THINKING_BUDGET", "0")),
-        "resolutionThinkingBudget": int(os.getenv("ARGUS_RESOLUTION_THINKING_BUDGET", "0")),
-        "ontologyPolicy": "automatic-corpus-extraction-settings-1",
+        "ontologyPolicy": "sdk-default-or-fixed-entity-types-1",
         "corpusProfileId": None,
         "profileSampleDocuments": int(os.getenv("ARGUS_PROFILE_SAMPLE_DOCUMENTS", "8")),
         "profileSampleCharacters": int(os.getenv("ARGUS_PROFILE_SAMPLE_CHARACTERS", "32000")),
@@ -72,21 +66,15 @@ def processing_config(project_id=None):
     config.update({
         "ingestionLlmRole": "LLM2",
         "llmProvider": "azure_openai",
-        "resolutionProvider": "azure_openai",
         "llmBaseUrl": llm_endpoint,
-        "resolutionBaseUrl": llm_endpoint,
         "llmApiVersion": None,
-        "resolutionApiVersion": None,
         "llmApi": secondary["api"] if secondary else "responses",
-        "resolutionApi": secondary["api"] if secondary else "responses",
         "llmCredentialEnv": "LLM2_DEPLOYMENT_KEY",
-        "resolutionCredentialEnv": "LLM2_DEPLOYMENT_KEY",
         "embeddingBaseUrl": embedding_endpoint,
         "embeddingApiVersion": "2024-05-01-preview" if embedding_endpoint and embedding_endpoint.endswith("/models") else None,
         "embeddingCredentialEnv": "EMBEDDING_MODEL_KEY",
     })
     from app.projects.scope import apply_project
-    config['customDuplicateChecking'] = os.getenv('ARGUS_CUSTOM_DUPLICATE_CHECKING', 'false').strip().lower() == 'true'
     return apply_project(config, project_id)
 
 

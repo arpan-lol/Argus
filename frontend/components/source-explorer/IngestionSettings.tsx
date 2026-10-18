@@ -56,10 +56,10 @@ export function IngestionSettings({ job, apiRoot = '' }: { job: IngestionJob; ap
       {loading ? <p role="status">Loading settings…</p> : error ? <><p role="alert">{error}</p><button onClick={() => setRefresh(value => value + 1)}>Try again</button></> : <>
         {profile?.prompt && <><strong>Your instructions</strong><p>{profile.prompt}</p></>}
         {settings ? <>
-          <dl><div><dt>Things to find</dt><dd>{settings.entityTypes.join(', ')}</dd></div><div><dt>Connections to find</dt><dd>{settings.relationshipTypes.length ? settings.relationshipTypes.join(', ') : 'Connections explicitly stated in the source'}</dd></div><div><dt>Processing instructions</dt><dd>{settings.extractionInstructions}</dd></div></dl>
+          <dl><div><dt>Entity types</dt><dd>{settings.entityTypes.join(', ')}</dd></div><div><dt>Relationship types</dt><dd>{settings.relationshipTypes.length ? settings.relationshipTypes.join(', ') : 'Any relationship explicitly stated in the source'}</dd></div><div><dt>Extraction scope</dt><dd>{settings.extractionInstructions}</dd></div></dl>
           {settings.rationale && <><strong>Why these settings</strong><p>{settings.rationale}</p></>}
           {sampling?.sampledDocuments != null && <p>Based on {sampling.sampledDocuments.toLocaleString()} sampled {sampling.sampledDocuments === 1 ? 'file' : 'files'}{sampling.availableDocuments != null ? ` from ${sampling.availableDocuments.toLocaleString()}` : ''}.{sampling.excluded?.length ? ` ${sampling.excluded.length.toLocaleString()} could not be sampled.` : ''} These settings apply automatically.</p>}
-        </> : <p>Argus chooses settings after reading and splitting the source. No approval step is needed.</p>}
+        </> : <p>Argus uses the SDK entity types and your workspace description as extraction context.</p>}
       </>}
     </div>}
   </details>;

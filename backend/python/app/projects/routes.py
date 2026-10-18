@@ -14,7 +14,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.database import connection
 from app.ingestion.config import processing_config
 from app.ingestion.pipeline import IngestionPipeline, STAGES, serialize
-from app.ingestion.profiles import create_profile
 from .events import emit
 from .scope import get_project, project_scope
 
@@ -90,7 +89,7 @@ def metrics(project_id: str):
         totals['embeddingTokens' if embedding else 'inputTokens'] += tokens
         if not embedding:
             totals['outputTokens'] += usage.get('output_tokens', usage.get('completion_tokens', 0)) or 0
-    return {'actualReportedUsage': totals, 'costUsd': None, 'duplicateMode': 'custom' if processing_config()['customDuplicateChecking'] else 'sdk_basic', 'execution': {'queue': 'one job per file', 'workers': int(os.getenv('ARGUS_INGESTION_WORKERS', '1')), 'parallelStages': ['embed', 'extract'], 'chunkEmbeddingBatchSize': 1}, 'estimate': {'basicDuplicateLlmCalls': 0, 'customDuplicateLlmCalls': '2 × ceil(candidate pairs / batch size), plus retries', 'extractionLlmCalls': 'One per uncached chunk normally; at most two extraction attempts per chunk'}}
+    return {'actualReportedUsage': totals, 'costUsd': None, 'duplicateMode': 'sdk_basic', 'execution': {'queue': 'one job per file', 'workers': int(os.getenv('ARGUS_INGESTION_WORKERS', '1')), 'parallelStages': ['embed', 'extract'], 'chunkEmbeddingBatchSize': 64}, 'estimate': {'duplicateLlmCalls': 0, 'extractionLlmCalls': 'At most one extraction request per uncached chunk; invalid output falls back to local GLiNER mentions'}}
 
 
 @scoped.put('/description')
@@ -149,19 +148,7 @@ async def upload_project_files(project_id, files, through, config=None):
             staged.append((path, filename, source_id, pipeline.describe_source(path, source_id=source_id, filename=filename)))
         if not staged:
             raise HTTPException(400, 'Choose at least one source file')
-        with connection() as lease:
-            lease.execute('SELECT pg_advisory_lock(hashtextextended(%s,0))', ('project-profile:' + project_id,))
-            lease.commit()
-            try:
-                project = get_project(project_id)
-                profile_id = project['profile_id']
-                if not profile_id:
-                    profile_id = create_profile(project['description'], [source for _, _, _, source in staged], config)['id']
-                    with connection() as conn:
-                        conn.execute('UPDATE projects SET profile_id=%s,updated_at=now() WHERE id=%s', (profile_id, project_id))
-                jobs = [pipeline.register_file(path, source_id=source_id, filename=filename, profile_id=profile_id) for path, filename, source_id, _ in staged]
-            finally:
-                lease.execute('SELECT pg_advisory_unlock(hashtextextended(%s,0))', ('project-profile:' + project_id,))
+        jobs = [pipeline.register_file(path, source_id=source_id, filename=filename) for path, filename, source_id, _ in staged]
         for job in jobs:
             if job['status'] not in ('complete', 'running', 'queued'):
                 pipeline.enqueue(job['id'], through)
