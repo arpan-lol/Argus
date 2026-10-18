@@ -221,6 +221,7 @@ button:disabled { cursor:not-allowed; }
 .ce-configuration-button { display:flex; align-items:center; gap:7px; border:0; background:transparent; color:var(--ce-muted); border-radius:7px; padding:8px; font-size:11px; }
 .ce-configuration-button:hover,.ce-configuration-button.is-active { color:var(--ce-text); background:var(--ce-hover); }
 .ce-explorer-content { flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden; }
+.ce-explorer-content>.ce-file-explorer,.ce-explorer-content>.ce-project-graph-panel { flex:1; min-height:0; }
 .ce-focused-document { display:flex; gap:8px; align-items:center; padding:12px 17px; color:var(--ce-muted); font-size:10px; flex-shrink:0; }
 .ce-focused-document svg { flex-shrink:0; }
 .ce-focused-document span { text-overflow:ellipsis; white-space:nowrap; overflow:hidden; }

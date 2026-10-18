@@ -19,10 +19,12 @@ interface Props {
   onProject: (project: Project) => void;
   onUploaded: () => void;
   onFocus: (documentId: string, chunkId?: string) => void;
+  onOpenReader: () => void;
+  onBackToGraph: () => void;
 }
 
-export function ProjectSources({ project, uploadRequest, refreshVersion, focus, documentId, chunkId, onProject, onUploaded, onFocus }: Props) {
-  const [open, setOpen] = useState(!project.description);
+export function ProjectSources({ project, uploadRequest, refreshVersion, focus, documentId, chunkId, onProject, onUploaded, onFocus, onOpenReader, onBackToGraph }: Props) {
+  const [open, setOpen] = useState(!project.description || uploadRequest > 0);
   const [files, setFiles] = useState<File[]>([]);
   const [queuedFromCreation, setQueuedFromCreation] = useState<File[] | null>(null);
   const [description, setDescription] = useState(project.description);
@@ -32,7 +34,7 @@ export function ProjectSources({ project, uploadRequest, refreshVersion, focus, 
   const dialog = useRef<HTMLDialogElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
-  const handledRequest = useRef(uploadRequest);
+  const handledRequest = useRef(0);
   const uploadActive = useRef(false);
 
   function selectFiles(event: React.ChangeEvent<HTMLInputElement>) {
@@ -116,7 +118,7 @@ export function ProjectSources({ project, uploadRequest, refreshVersion, focus, 
 
   const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
   return <>
-    <FileExplorer projectId={project.id} focusDocumentId={focus?.documentId || documentId} focusChunkId={focus?.chunkId || chunkId} focusJobId={focus?.jobId} focusCollection="pipeline" refreshToken={refreshVersion} onUpload={() => setOpen(true)} onDocumentFocus={onFocus} />
+    <FileExplorer projectId={project.id} focusDocumentId={focus?.documentId || documentId} focusChunkId={focus?.chunkId || chunkId} focusJobId={focus?.jobId} focusCollection="pipeline" refreshToken={refreshVersion} onUpload={() => setOpen(true)} onDocumentFocus={onFocus} onOpenReader={onOpenReader} onBackToGraph={onBackToGraph} />
     <dialog ref={dialog} className="argus-source-onboarding" onCancel={event => { if (busy) event.preventDefault(); else setOpen(false); }} aria-labelledby="source-onboarding-title">
       <div className="argus-source-onboarding-heading"><h2 id="source-onboarding-title">{project.description ? 'Add data sources' : files.length ? 'What is the data in this workspace about?' : 'Start by adding data sources.'}</h2><button disabled={busy} onClick={() => setOpen(false)} aria-label="Close source upload"><X size={18} /></button></div>
       <input ref={input} hidden type="file" multiple disabled={busy} onChange={selectFiles} />
