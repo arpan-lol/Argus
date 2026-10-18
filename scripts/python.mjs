@@ -7,6 +7,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const environment = path.join(root, 'backend', 'python', '.venv');
 const binary = process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python';
 const venv = path.join(environment, binary);
+const gpuVenv = path.join(root, 'backend', 'python', '.venv-gpu', binary);
 const legacyVenv = path.join(root, '.venv', binary);
 const mode = process.argv[2] || 'dev';
 if (mode === 'setup' && !existsSync(venv)) {
@@ -14,7 +15,7 @@ if (mode === 'setup' && !existsSync(venv)) {
   if (created.error) throw created.error;
   if (created.status !== 0) process.exit(created.status ?? 1);
 }
-const python = process.env.ARGUS_PYTHON || (existsSync(venv) ? venv : existsSync(legacyVenv) ? legacyVenv : (process.env.PYTHON || 'python'));
+const python = process.env.ARGUS_PYTHON || (mode !== 'setup' && existsSync(gpuVenv) ? gpuVenv : existsSync(venv) ? venv : existsSync(legacyVenv) ? legacyVenv : (process.env.PYTHON || 'python'));
 if (mode === 'setup' && spawnSync(python, ['-m', 'pip', '--version'], { cwd: root, stdio: 'ignore', windowsHide: true }).status !== 0) {
   const seeded = spawnSync(python, ['-m', 'ensurepip', '--upgrade'], { cwd: root, stdio: 'inherit', windowsHide: true });
   if (seeded.status !== 0) process.exit(seeded.status ?? 1);

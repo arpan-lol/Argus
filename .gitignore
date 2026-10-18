@@ -1,6 +1,7 @@
 .data/
 __pycache__/
 .venv/
+.venv-*/
 .env
 docs/
 node_modules/
