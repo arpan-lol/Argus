@@ -18,7 +18,7 @@ services:
     image: falkordb/falkordb@sha256:b0bdcac2cbaff989e77cb0610439b7a9289e86de033ccbbd4368b66fb680ae7a
     ports:
       - "127.0.0.1:6379:6379"
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3005:3000"
     volumes:
       - falkor-data:/var/lib/falkordb/data
 volumes:
