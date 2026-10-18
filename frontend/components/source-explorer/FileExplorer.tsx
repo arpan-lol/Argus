@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, ChevronLeft, ChevronRight, Download, ExternalLink, FileText, Layers3, Loader2, Plus, Upload, X } from 'lucide-react';
 import { api, chunkColor, type DocumentSummary, type EvidenceResult } from '@/lib/evidence-types';
-import FileViewer from '@/components/viewers/FileViewer';
+// import FileViewer from '@/components/viewers/FileViewer';
 import { IngestionJobs } from './IngestionJobs';
 import { IngestionUpload } from './IngestionUpload';
 import { normalizeSourceDocument, statusLabel, type IngestedDocument, type IngestionJob, type UploadedDocument } from '@/lib/ingestion-types';
@@ -86,6 +86,7 @@ export function FileExplorer({ projectId, refreshToken = 0, onUpload, focusDocum
     return () => { active = false; };
   }, [offset, projectId]);
 
+  /* File reading is temporarily disabled.
   useEffect(() => {
     if (selectedDocumentId) { setArticleId(selectedDocumentId); setUploadedSelection(focusCollection === 'pipeline'); setPinnedJobId(focusJobId); }
     if (selectedChunkId) setMode('chunks');
@@ -110,6 +111,8 @@ export function FileExplorer({ projectId, refreshToken = 0, onUpload, focusDocum
     if (selectedChunkId && article && mode === 'chunks') chunkRefs.current.get(selectedChunkId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }, [article, selectedChunkId, mode]);
 
+  */
+
   useEffect(() => {
     if (uploadRequest > consumedUploadRequest) { consumedUploadRequest = uploadRequest; setUploadOpen(true); }
   }, [uploadRequest]);
@@ -132,11 +135,6 @@ export function FileExplorer({ projectId, refreshToken = 0, onUpload, focusDocum
   }, [jobOffset, uploadedOffset, refreshVersion, refreshToken, projectId, fileApi]);
 
   function openArticle(id: string, isUploaded = false) {
-    setPinnedJobId(undefined);
-    setUploadedSelection(isUploaded);
-    setArticleId(id);
-    setMode('reader');
-    onOpenReader?.();
     if (projectId || !isUploaded) onDocumentFocus?.(id);
   }
 
@@ -179,6 +177,7 @@ export function FileExplorer({ projectId, refreshToken = 0, onUpload, focusDocum
     {uploadOpen && <IngestionUpload onClose={() => setUploadOpen(false)} onUploaded={uploadedFile} />}
     {error && <div className="ce-file-error" role="alert">{error}<button aria-label="Dismiss error" onClick={() => setError('')}><X size={14} /></button></div>}
     {!articleId && jobs.length > 0 && <IngestionJobs jobs={jobs} total={jobTotal} offset={jobOffset} onPage={setJobOffset} busyJob={busyJob} pauseRequested={pauseRequested} onPause={id => void pauseJob(id)} onRetry={id => void retryJob(id)} onOpen={(id, jobId) => { openArticle(id, true); setPinnedJobId(jobId); }} />}
+    {/* File reader retained for re-enabling.
     {articleId ? <>
       {loading ? <div className="ce-file-empty"><Loader2 className="animate-spin" size={22} /> Opening file…</div> : originalOnly && pinnedJobId ? <div className="ce-file-original ce-file-original-pending"><FileViewer fileUrl={`/api${apiRoot}/ingestion/jobs/${encodeURIComponent(pinnedJobId)}/original`} filename={jobs.find(job => job.id === pinnedJobId)?.filename || 'Source file'} fileType="" currentPage={page} onPageChange={setPage} /></div> : article ? <>
         <div className="ce-file-document-heading"><span>{uploadedSelection ? statusLabel(article.status || 'processing') : article.journal || 'Research article'}{article.year ? ` · ${article.year}` : ''}</span><h2>{article.title}</h2><div className="ce-file-document-actions"><div className="ce-file-mode" role="group" aria-label="Document view"><button aria-pressed={mode === 'reader'} onClick={() => setMode('reader')}><FileText size={14} /> Read</button><button aria-pressed={mode === 'chunks'} onClick={() => setMode('chunks')}><Layers3 size={14} /> Chunks</button>{uploadedSelection && <button aria-pressed={mode === 'original'} onClick={() => { setMode('original'); setPage(1); }}>Original</button>}</div>{uploadedSelection ? <a href={pinnedJobId ? `/api${apiRoot}/ingestion/jobs/${encodeURIComponent(pinnedJobId)}/original` : `/api${apiRoot}/ingestion/documents/${encodeURIComponent(article.id)}/download`} download={article.filename} aria-label="Download original file"><Download size={15} /></a> : article.sourceUrl && <a href={article.sourceUrl} target="_blank" rel="noreferrer" aria-label="Open original source"><ExternalLink size={15} /></a>}</div></div>
@@ -188,9 +187,11 @@ export function FileExplorer({ projectId, refreshToken = 0, onUpload, focusDocum
         </div>
       </> : !error && <div className="ce-file-empty">No document found.</div>}
     </> : <>
+    */}
+    <>
       {(!projectId || !jobs.length) && <div className="ce-file-list">{!projectId && uploadedTotal > 0 && <h3 className="ce-file-collection-name">Processing pipeline</h3>}{uploaded.filter(document => !projectId || !jobs.some(job => job.documentId === document.id)).map(document => <button key={document.id} className="ce-file-row" onClick={() => openArticle(document.id, true)}><span className="ce-file-row-icon"><FileText size={19} /></span><span><strong>{document.title || document.filename}</strong><small>{statusLabel(document.status)} · {document.chunkCount} chunks</small></span><ChevronRight size={15} /></button>)}{!projectId && total > 0 && <div className="ce-file-collection-heading"><h3 className="ce-file-collection-name">Legacy corpus</h3><p>Earlier parsed files.</p></div>}{!projectId && documents.map(document => <button key={document.id} className="ce-file-row" onClick={() => openArticle(document.id)}><span className="ce-file-row-icon"><FileText size={19} /></span><span><strong>{document.title}</strong><small>{document.year || 'Research article'} · {document.chunkCount} chunks</small></span><ChevronRight size={15} /></button>)}{!projectId && !documents.length && !uploaded.length && !error && <div className="ce-file-empty">{catalogLoading || pipelineLoading ? <><Loader2 className="animate-spin" size={20} /> Loading files…</> : <p>No files have been uploaded.</p>}</div>}{projectId && !jobs.length && !uploaded.length && !error && <div className="ce-file-empty">{pipelineLoading ? <><Loader2 className="animate-spin" size={20} /> Loading files…</> : <p>No files yet. Add files to get started.</p>}</div>}</div>}
       {!projectId && <div className="ce-file-pagination"><button aria-label="Previous files" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}><ChevronLeft size={16} /></button><span>{Math.min(offset + 1, total)}–{Math.min(offset + limit, total)} of {total.toLocaleString()}</span><button aria-label="Next files" disabled={offset + limit >= total} onClick={() => setOffset(offset + limit)}><ChevronRight size={16} /></button></div>}
-    </>}
+    </>
   </div>;
 }
 

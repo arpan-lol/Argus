@@ -21,7 +21,7 @@ interface Props {
   onProject: (project: Project) => void;
   onUploaded: () => void;
   onFocus: (documentId: string, chunkId?: string) => void;
-  onOpenReader: () => void;
+  onOpenReader?: () => void;
   onBackToGraph: () => void;
   onJobsChange?: (jobs: IngestionJob[]) => void;
 }
