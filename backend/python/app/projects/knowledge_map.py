@@ -29,6 +29,12 @@ def _query(graph, statement, jobs, **parameters):
     return graph.ro_query(statement, {'jobs': jobs, **parameters}, timeout=3000).result_set
 
 
+def _verify_snapshot(project_id, jobs, namespace):
+    _, current_jobs, current_namespace = _snapshot(project_id)
+    if current_jobs != jobs or current_namespace != namespace:
+        raise HTTPException(409, 'Published sources changed while loading the graph. Retry this request.')
+
+
 def _json(value, default):
     if not value:
         return default
@@ -112,12 +118,15 @@ def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(
     identifiers = {identifier for row in rows for identifier in row[:2]}
     if focus:
         identifiers.add(focus)
-    elif not rows or q.strip() or offset > 0:
-        extra = _query(graph, _entity_pattern + search + " WITH e,count(DISTINCT m) AS mentions RETURN e.id ORDER BY mentions DESC,e.id SKIP $offset LIMIT $limit", jobs, q=q, offset=offset, limit=limit)
-        identifiers.update(row[0] for row in extra)
+    catalog_rows = _query(graph, _entity_pattern + search + " WITH e,count(DISTINCT m) AS mentions RETURN e.id ORDER BY mentions DESC,e.id SKIP $offset LIMIT $limit", jobs, q=q, offset=offset, limit=limit)
+    catalog_ids = [row[0] for row in catalog_rows]
     layout = _coordinates(graph, jobs, namespace)
-    nodes = _entities(graph, jobs, sorted(identifiers), layout)
+    entity_records = _entities(graph, jobs, sorted(identifiers | set(catalog_ids)), layout)
+    catalog_map = {node['id']: node for node in entity_records}
+    entity_page = [catalog_map[identifier] for identifier in catalog_ids if identifier in catalog_map]
+    nodes = [node for node in entity_records if node['id'] in identifiers]
     if focus and not any(node['id'] == focus for node in nodes):
+        _verify_snapshot(project_id, jobs, namespace)
         raise HTTPException(404, 'Entity is not published in this workspace')
     available = {node['id'] for node in nodes}
     edges = [edge for edge in edges if edge['source'] in available and edge['target'] in available]
@@ -132,7 +141,8 @@ def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(
         edge['confidenceStatus'] = 'uncalibrated_model_score' if edge['confidence'] is not None else 'not_provided'
     xs = [node['x'] for node in nodes] or [0]
     ys = [node['y'] for node in nodes] or [0]
-    return {'nodes': nodes, 'edges': edges, 'bounds': {'minX': min(xs) - 120, 'maxX': max(xs) + 120, 'minY': min(ys) - 100, 'maxY': max(ys) + 100}, 'pagination': {'entityTotal': entity_total, 'entityOffset': offset, 'entityLimit': limit, 'hasMoreEntities': not focus and offset + limit < entity_total, 'relationshipTotal': relationship_total, 'relationshipOffset': relationOffset, 'relationshipLimit': relationLimit, 'hasMoreRelationships': relationOffset + relationLimit < relationship_total}, 'focusId': focus, 'source': 'falkordb', 'status': 'ready', 'layout': 'Static connected-component breadth-first layout; isolated entities use deterministic positions', 'layoutTruncated': layout['truncated'], 'note': 'Edges are stored semantic relationships. Local model scores are uncalibrated; source-structured records and review statuses remain distinct. Source containment is available in the source graph view.'}
+    _verify_snapshot(project_id, jobs, namespace)
+    return {'nodes': nodes, 'entityPage': entity_page, 'edges': edges, 'bounds': {'minX': min(xs) - 120, 'maxX': max(xs) + 120, 'minY': min(ys) - 100, 'maxY': max(ys) + 100}, 'pagination': {'entityTotal': entity_total, 'entityOffset': offset, 'entityLimit': limit, 'hasMoreEntities': offset + limit < entity_total, 'relationshipTotal': relationship_total, 'relationshipOffset': relationOffset, 'relationshipLimit': relationLimit, 'hasMoreRelationships': relationOffset + relationLimit < relationship_total}, 'focusId': focus, 'source': 'falkordb', 'status': 'ready', 'layout': 'Static connected-component breadth-first layout; isolated entities use deterministic positions', 'layoutTruncated': layout['truncated'], 'note': 'Edges are stored semantic relationships. Local model scores are uncalibrated; source-structured records and review statuses remain distinct. Source containment is available in the source graph view.'}
 
 
 @router.get('/entity/{identifier}/mentions')
@@ -141,6 +151,7 @@ def mentions(project_id: str, identifier: str, offset: int = Query(0, ge=0), lim
     pattern = _entity_pattern + " AND e.id=$id"
     summary = _query(graph, pattern + " RETURN e.id,e.label,e.type,e.description,count(DISTINCT m),count(DISTINCT c),count(DISTINCT c.documentId)", jobs, id=identifier)
     if not summary:
+        _verify_snapshot(project_id, jobs, namespace)
         raise HTTPException(404, 'Entity is not published in this workspace')
     item = summary[0]
     rows = _query(graph, pattern + " WITH m,collect(DISTINCT c)[0] AS c RETURN m.id,m.text,m.sourceSpans,m.startOffset,m.endOffset,c.id,c.text,c.documentId,m.extractionMethod,m.confidence,m.sourceSpanStatus,m.sourceSpanAmbiguous,c.startOffset,c.jobId ORDER BY c.documentId,c.id,m.startOffset,m.id SKIP $offset LIMIT $limit", jobs, id=identifier, offset=offset, limit=limit)
@@ -152,6 +163,8 @@ def mentions(project_id: str, identifier: str, offset: int = Query(0, ge=0), lim
         document = documents.get(row[7], {})
         metadata = document.get('metadata') or {}
         records.append({'id': row[0], 'text': row[1], 'sourceSpans': _json(row[2], []), 'startOffset': row[3], 'endOffset': row[4], 'chunkId': row[5], 'chunkText': (row[6] or '')[:12000], 'chunkTextTruncated': len(row[6] or '') > 12000, 'documentId': row[7], 'documentTitle': document.get('title') or 'Source document', 'sourceUrl': metadata.get('sourceUrl'), 'extractionMethod': row[8], 'confidence': row[9], 'sourceSpanStatus': row[10], 'sourceSpanAmbiguous': row[11], 'chunkStartOffset': row[12], 'jobId': row[13]})
-    span_rows = _query(graph, pattern + " WITH DISTINCT m RETURN m.sourceSpans", jobs, id=identifier)
-    occurrence_count = sum(max(1, len(_json(row[0], []))) for row in span_rows)
-    return {'entity': {'id': item[0], 'label': item[1], 'entityType': item[2], 'description': item[3] or ''}, 'mentions': records, 'pagination': {'total': item[4], 'offset': offset, 'limit': limit, 'hasMore': offset + limit < item[4]}, 'counts': {'documents': item[6], 'chunks': item[5], 'occurrences': occurrence_count, 'mentionRecords': item[4]}, 'note': 'Every stored mention is reachable through pagination. A mention record can retain several exact source spans in sourceSpans; confidence is uncalibrated.'}
+    span_rows = _query(graph, pattern + " WITH DISTINCT m RETURN m.sourceSpans ORDER BY m.id LIMIT 10001", jobs, id=identifier)
+    truncated = len(span_rows) > 10000
+    occurrence_count = sum(max(1, len(_json(row[0], []))) for row in span_rows[:10000])
+    _verify_snapshot(project_id, jobs, namespace)
+    return {'entity': {'id': item[0], 'label': item[1], 'entityType': item[2], 'description': item[3] or ''}, 'mentions': records, 'pagination': {'total': item[4], 'offset': offset, 'limit': limit, 'hasMore': offset + limit < item[4]}, 'counts': {'documents': item[6], 'chunks': item[5], 'occurrences': occurrence_count, 'occurrenceCountTruncated': truncated, 'occurrenceCountStatus': 'lower_bound' if truncated else 'exact', 'mentionRecords': item[4]}, 'note': 'Every stored mention is reachable through pagination. A mention record can retain several exact source spans in sourceSpans; confidence is uncalibrated.'}
