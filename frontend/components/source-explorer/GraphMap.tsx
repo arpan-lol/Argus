@@ -28,7 +28,7 @@ type Props = {
 };
 
 const names = { document: 'Document', section: 'Section', chunk: 'Chunk', entity: 'Entity' };
-const colors = { document: '#31edae', section: '#869ab2', chunk: '#5b9b88', entity: '#a187b5' };
+const colors = { document: '#c6a34f', section: '#869ab2', chunk: '#5b9b88', entity: '#a187b5' };
 const empty: MapView = { nodes: [], edges: [], level: 'overview' };
 const mergeViews = (previous: MapView, next: MapView): MapView => {
   const nodes = [...new Map([...previous.nodes, ...next.nodes].map(node => [node.id, node])).values()].slice(-3000);
@@ -199,7 +199,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       const pathEdge = edge.type === 'MENTIONS' && (path ? pathIds.has(edge.source) && pathIds.has(edge.target) : linkIds.has(edge.source) && linkIds.has(edge.target));
       const active = pathEdge || edge.id === hoveredEdge.current || [path ? null : selected.current, hovered.current].some(id => id && (edge.source === id || edge.target === id));
       const branch = edge.type === 'HAS_SECTION' || edge.type === 'HAS_CHUNK';
-      context.strokeStyle = active ? (dark ? '#31edae' : '#087a55') : branch ? (dark ? '#9aa79e' : '#c4bdae') : (dark ? '#a5afa8' : '#cbc4b8');
+      context.strokeStyle = active ? (dark ? '#dfc374' : '#88702c') : branch ? (dark ? '#9aa79e' : '#c4bdae') : (dark ? '#a5afa8' : '#cbc4b8');
       context.lineWidth = pathEdge ? 2.3 : active ? 1.9 : desired === 'overview' ? .6 : branch ? 1.25 : 1;
       const derived = edge.derived || edge.type === 'SHARES_ENTITY' || edge.type === 'SHARED_MENTION';
       context.globalAlpha = (active ? 1 : derived ? (dark ? .34 : .34) : branch ? (dark ? .4 : .4) : (dark ? .38 : .38)) * opacity(edge.id);
@@ -251,7 +251,7 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
       }
       context.beginPath(); context.arc(x, y, radius + (active ? 4 : 0), 0, Math.PI * 2);
       context.fillStyle = active ? (dark ? '#655a39' : '#fffaf0') : colors[node.type]; context.fill();
-      context.strokeStyle = active ? (dark ? '#31edae' : '#087a55') : (dark ? '#171918' : '#fffaf0'); context.lineWidth = active ? 2 : 1.5; context.stroke();
+      context.strokeStyle = active ? (dark ? '#f1db9b' : '#594a32') : (dark ? '#171918' : '#fffaf0'); context.lineWidth = active ? 2 : 1.5; context.stroke();
       const showLabel = path ? pathIds.has(node.id) || node.id === hovered.current : active || (linkIds.has(node.id) && node.type !== 'section') || (node.type === 'document' && (c.zoom > .12 || projected.size < 30)) || (node.type === 'entity' && projected.size < 100);
       if (showLabel) {
         const label = clip(node.label || node.preview || names[node.type], node.type === 'document' && c.zoom < .28 ? 14 : 31);

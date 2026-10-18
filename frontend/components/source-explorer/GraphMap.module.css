@@ -1,6 +1,6 @@
 .map { position: relative; width: 100%; height: 100%; min-height: 0; overflow: hidden; isolation: isolate; background: var(--background, #fafbf8); }
 .canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; outline-offset: -3px; }
-.canvas:focus-visible { outline: 2px solid #087a55; }
+.canvas:focus-visible { outline: 2px solid #bd9b42; }
 .legend { position: absolute; top: 16px; left: 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 10px; color: var(--muted-foreground, #5e685e); pointer-events: none; }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
 .legend i { width: 5px; height: 5px; border-radius: 50%; }
@@ -9,7 +9,7 @@
 .controls button { width: 35px; height: 35px; display: grid; place-items: center; cursor: pointer; color: var(--foreground, #3b493d); border: 0; background: transparent; }
 .controls button + button { border-top: 1px solid var(--border, #e1e5dc); }
 .controls button:hover { background: var(--muted, #efeee6); }
-.controls button:focus-visible { outline: 2px solid #087a55; outline-offset: -2px; }
+.controls button:focus-visible { outline: 2px solid #bd9b42; outline-offset: -2px; }
 .tooltip { position: absolute; width: 205px; padding: 11px 13px; background: var(--background, #fff); border: 1px solid var(--border, #d8ded5); border-radius: 9px; box-shadow: 0 5px 18px #17251a15; pointer-events: none; }
 .tooltip small { display: block; margin-bottom: 4px; font-size: 10px; color: var(--muted-foreground, #5f6b60); }
 .tooltip strong { display: block; font-size: 12px; line-height: 1.5; font-weight: 500; color: var(--foreground, #26342a); }
