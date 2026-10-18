@@ -56,12 +56,15 @@ class GraphBuilder:
         self.pipeline.check_paused(self.job['id'])
         if state['step'] >= self.config.get('codeAgentMaxSteps', 96):
             return {'done': True, 'stop_reason': 'step_safety_limit'}
+        recent = state['history'][-3:]
+        if len(recent) == 3 and (all(item['tool'] == 'list_files' for item in recent) or all('error' in item['result'] and item['result']['error'] == recent[0]['result'].get('error') for item in recent)):
+            return {'done': True, 'stop_reason': 'tool_stall'}
         history = [dict(item) for item in state['history'][-8:]]
         source_reads = [index for index, item in enumerate(history) if item['tool'] in {'read_sources', 'search_sources'} and 'chunks' in item['result']]
         for index in source_reads[:-2]:
             item = history[index]
             history[index] = {**item, 'result': {**item['result'], 'chunks': [{key: chunk[key] for key in ('source_id', 'filename', 'chunk_id', 'ordinal')} for chunk in item['result']['chunks']], 'textOmitted': True}}
-        payload = {'workspaceDescription': self.config.get('workspaceDescription', ''), 'workspaceId': self.job['project_id'], 'fileCount': len(self.manifest), 'filesInSnapshot': [{'source_id': row['source_id'], 'filename': row['filename']} for row in self.manifest] if len(self.manifest) <= 20 else None, 'recentTools': history, 'graphProgress': {'entities': len(state['entities']), 'claims': len(state['claims']), 'chunksRead': len(state['seen']), 'knownEntities': [{'key': key, 'name': value['name']} for key, value in list(state['entities'].items())[-32:]]}, 'instruction': 'List files only when filesInSnapshot is absent. Continue from recentTools and graphProgress. Read implementation and write source-cited entities and cross-file relationships. Reuse known entity keys. Never write a self relationship. Do not relist the same files or repeat a failed write unchanged.'}
+        payload = {'workspaceDescription': self.config.get('workspaceDescription', ''), 'workspaceId': self.job['project_id'], 'fileCount': len(self.manifest), 'filesInSnapshot': [{'source_id': row['source_id'], 'filename': row['filename']} for row in self.manifest] if len(self.manifest) <= 20 else None, 'recentTools': history, 'graphProgress': {'entities': len(state['entities']), 'claims': len(state['claims']), 'chunksRead': len(state['seen']), 'knownEntities': [{'key': key, 'name': value['name']} for key, value in list(state['entities'].items())[-32:]]}, 'instruction': 'When filesInSnapshot is present, do not list files. Read several source IDs in one action, then write source-cited entities and cross-file relationships. Copy a short exact line from citation_spans for each citation. Reuse known entity keys. Never write a self relationship or repeat a failed write unchanged.'}
         def encoded_request():
             return self.encoding.encode(json.dumps({'system': SYSTEM, 'payload': payload, 'schema': Action.model_json_schema()}, ensure_ascii=False), disallowed_special=())
         while len(encoded_request()) > self.config.get('codeAgentContextTokens', 18000) and history:
@@ -156,7 +159,7 @@ def build_workspace(pipeline, job):
                         storage.save_run(run, {'error': agent.provider.safe_error(error), 'checkpointThreadId': run}, 'interrupted')
                         raise
             coverage = agent.tools.coverage(state['seen'])
-            result = {'runId': run, 'entities': state['entities'], 'claims': state['claims'], 'seen': state['seen'], 'coverage': coverage, 'steps': state['step'], 'stopReason': state['stop_reason'], 'quality': 'partial' if any(row['status'] != 'read' for row in coverage) or state['stop_reason'] in {'workspace_token_budget', 'step_safety_limit'} else 'source_read_not_semantically_verified', 'method': 'codebase_graph_builder', 'incremental': {'changedOrIncompleteFiles': len(changed), 'reusedClaims': len(initial_claims)}, 'limitations': ['Agent-generated software behavior, not independently verified semantics', 'Read coverage is not proof of comprehensive behavior extraction']}
+            result = {'runId': run, 'entities': state['entities'], 'claims': state['claims'], 'seen': state['seen'], 'coverage': coverage, 'steps': state['step'], 'stopReason': state['stop_reason'], 'quality': 'partial' if any(row['status'] != 'read' for row in coverage) or state['stop_reason'] in {'workspace_token_budget', 'step_safety_limit', 'tool_stall'} else 'source_read_not_semantically_verified', 'method': 'codebase_graph_builder', 'incremental': {'changedOrIncompleteFiles': len(changed), 'reusedClaims': len(initial_claims)}, 'limitations': ['Agent-generated software behavior, not independently verified semantics', 'Read coverage is not proof of comprehensive behavior extraction']}
             new_claims = [claim for claim in result['claims'] if claim not in initial_claims]
             result['deliverySourceIds'] = sorted({claim['citation']['source_id'] for claim in new_claims} & {row['source_id'] for row in manifest if row['status'] == 'complete'})
             storage.save_run(run, result, 'complete')
