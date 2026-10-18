@@ -56,6 +56,10 @@ const viewQuery = (target: Camera, width: number, height: number) => new URLSear
   minY: String(Math.floor(target.y - height * .7 / target.zoom)), maxY: String(Math.ceil(target.y + height * .7 / target.zoom)),
   zoom: String(target.zoom), limit: '1000',
 }).toString();
+const viewportQuery = (target: Camera, width: number, height: number) => {
+  const bounds = { minX: Math.floor(target.x - width * .65 / target.zoom), maxX: Math.ceil(target.x + width * .65 / target.zoom), minY: Math.floor(target.y - height * .65 / target.zoom), maxY: Math.ceil(target.y + height * .65 / target.zoom) };
+  return { bounds, query: new URLSearchParams({ ...Object.fromEntries(Object.entries(bounds).map(([key, value]) => [key, String(value)])), zoom: String(target.zoom), limit: '800' }).toString() };
+};
 const clip = (text: string, size = 34) => text.length > size ? `${text.slice(0, size - 1)}…` : text;
 const scale = (zoom: number) => Math.max(.003, Math.min(7, zoom));
 const edgeMeaning = (edge: MapEdge) => {
@@ -78,7 +82,7 @@ async function request<T>(path: string, signal?: AbortSignal, mode = 'network', 
 }
 
 export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFocus, mode = 'network', expanded = false, onExpand }: Props) {
-  const mapRequest = useCallback(<T,>(path: string, signal?: AbortSignal) => request<T>(path, signal, mode, apiRoot), [mode, apiRoot, refreshToken]);
+  const mapRequest = useCallback(<T,>(path: string, signal?: AbortSignal) => request<T>(path, signal, mode, apiRoot), [mode, apiRoot]);
   const host = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const camera = useRef<Camera>({ x: 0, y: 0, zoom: .015 });
@@ -89,6 +93,14 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
   const activePath = useRef<ConnectionPath | null>(null);
   const neighborhoodRequest = useRef<AbortController | null>(null);
   const navigationSequence = useRef(0);
+  const mapGeneration = useRef(0);
+  const refreshSequence = useRef(0);
+  const refreshRequest = useRef<AbortController | null>(null);
+  const overviewRequest = useRef<AbortController | null>(null);
+  const viewportRequest = useRef<AbortController | null>(null);
+  const viewportRequestKey = useRef('');
+  const observedRefreshToken = useRef(refreshToken);
+  const viewportEffectRefreshToken = useRef(refreshToken);
   const readyMode = useRef<string | null>(null);
   const modeCameras = useRef<Partial<Record<'network' | 'grouped', Camera>>>({});
   const fitted = useRef(false);
@@ -381,6 +393,11 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
   };
 
   useEffect(() => {
+    const generation = ++mapGeneration.current;
+    refreshRequest.current?.abort(); refreshRequest.current = null;
+    viewportRequest.current?.abort(); viewportRequest.current = null;
+    viewportRequestKey.current = '';
+    ++refreshSequence.current;
     disposed.current = false;
     readyMode.current = null; ++navigationSequence.current;
     setLoading(true); setError(null); clearConnections();
@@ -409,42 +426,95 @@ export function GraphMap({ apiRoot = '', refreshToken = 0, focus, onSelect, onFo
     resize.observe(element);
     const theme = new MutationObserver(draw); theme.observe(window.document.documentElement, { attributes: true, attributeFilter: ['class'] });
     const controller = new AbortController();
+    overviewRequest.current = controller;
     mapRequest<{ bounds: Bounds; nodes?: MapNode[]; groups?: MapNode[]; edges?: MapEdge[]; truncated?: boolean; summaryTruncated?: boolean }>('/overview', controller.signal).then(result => {
-      if (!active) return;
+      if (!active || generation !== mapGeneration.current) return;
       world.current = result.bounds; overview.current = { nodes: result.nodes || result.groups || [], edges: result.edges || [], level: 'overview', truncated: result.truncated, summaryTruncated: result.summaryTruncated };
       setTruncated(!!result.truncated);
       setSummaryTruncated(!!result.summaryTruncated);
       const saved = modeCameras.current[mode];
       if (saved) move(saved); else fit();
       readyMode.current = mode; setLoading(false);
-    }).catch(failure => { if (active) { setError(failure.message); setLoading(false); } });
-    return () => { modeCameras.current[mode] = { ...camera.current }; active = false; disposed.current = true; controller.abort(); neighborhoodRequest.current?.abort(); resize.disconnect(); theme.disconnect(); cancelAnimationFrame(animation.current); cancelAnimationFrame(revealAnimation.current); };
+    }).catch(failure => { if (active && generation === mapGeneration.current && failure.name !== 'AbortError') { setError(failure.message); setLoading(false); } });
+    return () => { modeCameras.current[mode] = { ...camera.current }; active = false; disposed.current = true; controller.abort(); overviewRequest.current = null; refreshRequest.current?.abort(); viewportRequest.current?.abort(); neighborhoodRequest.current?.abort(); resize.disconnect(); theme.disconnect(); cancelAnimationFrame(animation.current); cancelAnimationFrame(revealAnimation.current); };
   }, [draw, fit, move, connectionCamera, clearConnections, mapRequest, mode, reload]);
 
   useEffect(() => {
-    let active = true, controller: AbortController | null = null, previous = '', sequence = 0, pending = false;
+    let active = true, sequence = 0, pending = false;
+    const generation = mapGeneration.current;
+    if (viewportEffectRefreshToken.current !== refreshToken) {
+      viewportEffectRefreshToken.current = refreshToken;
+      viewportRequestKey.current = '';
+    }
     const load = () => {
       if (!world.current || pending || navigating.current || performance.now() < travelingUntil.current) return;
       const c = camera.current, { width, height } = dimensions.current;
-      const bounds = { minX: Math.floor(c.x - width * .65 / c.zoom), maxX: Math.ceil(c.x + width * .65 / c.zoom), minY: Math.floor(c.y - height * .65 / c.zoom), maxY: Math.ceil(c.y + height * .65 / c.zoom) };
-      const query = new URLSearchParams({ ...Object.fromEntries(Object.entries(bounds).map(([key, value]) => [key, String(value)])), zoom: String(c.zoom), limit: '800' }).toString();
-      if (query === previous) return;
+      const { bounds, query } = viewportQuery(c, width, height);
+      const key = `${mode}|${query}`;
+      if (key === viewportRequestKey.current) return;
       if (c.zoom < .025 && overview.current.nodes.length > 100) {
-        previous = query; setTruncated(false);
+        viewportRequestKey.current = key; setTruncated(!!overview.current.truncated);
         const nearest = overview.current.nodes.filter(node => node.x >= bounds.minX && node.x <= bounds.maxX && node.y >= bounds.minY && node.y <= bounds.maxY).sort((a, b) => Math.hypot(a.x - c.x, a.y - c.y) - Math.hypot(b.x - c.x, b.y - c.y));
         setAccessible(nearest.slice(0, 100)); draw(); return;
       }
-      previous = query; controller = new AbortController(); pending = true;
+      viewportRequestKey.current = key;
+      viewportRequest.current?.abort();
+      const controller = new AbortController(); viewportRequest.current = controller; pending = true;
       const requestNumber = ++sequence;
       mapRequest<MapView>(`/view?${query}`, controller.signal).then(view => {
-        if (!active || sequence !== requestNumber) return;
+        if (!active || generation !== mapGeneration.current || sequence !== requestNumber) return;
         current.current = boundedView(mergeViews(current.current, view), c, dimensions.current, new Set([selected.current, hovered.current, ...((neighborhood.current?.nodes || []).map(node => node.id))].filter((id): id is string => !!id)));
         setTruncated(!!view.truncated || !!overview.current.truncated || !!current.current.truncated); setSummaryTruncated(!!view.summaryTruncated); setAccessible(view.nodes.slice(0, 200)); setError(null); setLoading(false); draw();
-      }).catch(failure => { if (active && failure.name !== 'AbortError') { setError(failure.message); previous = ''; } }).finally(() => { pending = false; });
+      }).catch(failure => { if (active && generation === mapGeneration.current && failure.name !== 'AbortError') { setError(failure.message); viewportRequestKey.current = ''; } }).finally(() => { if (sequence === requestNumber) { pending = false; if (viewportRequest.current === controller) viewportRequest.current = null; } });
     };
     const interval = window.setInterval(load, 180); load();
-    return () => { active = false; window.clearInterval(interval); controller?.abort(); };
-  }, [draw, mapRequest, reload]);
+    return () => { active = false; window.clearInterval(interval); viewportRequest.current?.abort(); };
+  }, [draw, mapRequest, reload, refreshToken, mode]);
+
+  useEffect(() => {
+    if (observedRefreshToken.current === refreshToken) return;
+    observedRefreshToken.current = refreshToken;
+    const generation = mapGeneration.current;
+    const sequence = ++refreshSequence.current;
+    const controller = new AbortController();
+    refreshRequest.current?.abort();
+    refreshRequest.current = controller;
+    overviewRequest.current?.abort();
+    overviewRequest.current = null;
+    viewportRequest.current?.abort();
+    const target = { ...camera.current };
+    const { width, height } = dimensions.current;
+    const { query } = viewportQuery(target, width, height);
+    const preserve = new Set([selected.current, hovered.current, ...((neighborhood.current?.nodes || []).map(node => node.id))].filter((id): id is string => !!id));
+    const hadDocuments = overview.current.nodes.length > 0;
+    void Promise.all([
+      mapRequest<{ bounds: Bounds; nodes?: MapNode[]; groups?: MapNode[]; edges?: MapEdge[]; truncated?: boolean; summaryTruncated?: boolean }>('/overview', controller.signal),
+      mapRequest<MapView>(`/view?${query}`, controller.signal),
+    ]).then(([freshOverview, freshView]) => {
+      if (controller.signal.aborted || generation !== mapGeneration.current || sequence !== refreshSequence.current) return;
+      const overviewNodes = freshOverview.nodes || freshOverview.groups || [];
+      world.current = freshOverview.bounds;
+      overview.current = { nodes: overviewNodes, edges: freshOverview.edges || [], level: 'overview', truncated: freshOverview.truncated, summaryTruncated: freshOverview.summaryTruncated };
+      current.current = boundedView(mergeViews({ ...current.current, nodes: current.current.nodes.filter(node => preserve.has(node.id)), edges: current.current.edges.filter(edge => preserve.has(edge.source) && preserve.has(edge.target)) }, freshView), target, dimensions.current, preserve);
+      viewportRequestKey.current = `${mode}|${query}`;
+      setTruncated(!!freshOverview.truncated || !!freshView.truncated || !!current.current.truncated);
+      setSummaryTruncated(!!freshView.summaryTruncated || !!freshOverview.summaryTruncated);
+      setAccessible(freshView.nodes.slice(0, 200));
+      setError(null);
+      setLoading(false);
+      if (!hadDocuments && overviewNodes.length > 0) fit();
+      draw();
+    }).catch(failure => {
+      if (!controller.signal.aborted && generation === mapGeneration.current && sequence === refreshSequence.current) {
+        viewportRequestKey.current = '';
+        setError(failure instanceof Error ? failure.message : 'The source map could not refresh.');
+        setLoading(false);
+      }
+    }).finally(() => {
+      if (refreshRequest.current === controller) refreshRequest.current = null;
+    });
+    return () => { controller.abort(); };
+  }, [refreshToken, mapRequest, mode, draw, fit]);
 
   useEffect(() => { if (!loading && readyMode.current === mode && focus?.nodeId) void fly(focus.nodeId); }, [focus?.nodeId, focus?.nonce, fly, loading, mode]);
 
