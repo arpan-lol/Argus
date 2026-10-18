@@ -95,8 +95,10 @@ def create_profile(prompt, sources, config=None):
 
 def source_quality(document):
     coverage = document["metadata"].get("sourceCoverage", {})
-    if coverage.get("bodyPresent") and coverage.get("bodyAvailableNonWhitespaceCharacters") and coverage.get("requiresAttention"):
-        raise ValueError("Parser did not retain complete article body text: " + "; ".join(coverage.get("attentionReasons", [])))
+    if coverage.get("requiresAttention"):
+        raise ValueError("Parser coverage is incomplete; processing stopped before model work: " + "; ".join(coverage.get("attentionReasons", [coverage.get("coverageLabel", "unreadable source content")])))
+    if coverage and "bodyPresent" not in coverage:
+        return document
     if coverage and (not coverage.get("bodyPresent") or not coverage.get("bodyAvailableNonWhitespaceCharacters")):
         roles = {block.get("role") for block in document["blocks"]}
         coverage["coverageLabel"] = "abstract_only" if "abstract" in roles else "available_text_only"

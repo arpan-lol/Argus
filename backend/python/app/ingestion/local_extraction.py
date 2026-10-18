@@ -6,6 +6,7 @@ from .providers import Providers
 from .relation_schema import endpoint_types_allowed, relation_constraints
 from .semantic_context import sentence_context, source_context, valid_entity_mention
 from .native_records import extract_native_chunk
+from .extraction_context import contextual_input, remove_context
 
 
 def prose_segments(document, chunk):
@@ -70,14 +71,14 @@ def extract_local(pipeline, job):
         batch = chunks[first:first + 16]
         pending = [chunk for chunk in batch if pipeline.item(job['id'], 'extract', chunk['id']) is None]
         segments_by_chunk = {chunk['id']: prose_segments(document, chunk) for chunk in pending}
-        owners = [(chunk['id'], text) for chunk in pending for _, text in segments_by_chunk[chunk['id']]]
+        owners = [(chunk['id'], *contextual_input(chunk, text)) for chunk in pending for _, text in segments_by_chunk[chunk['id']]]
         pipeline.check_paused(job['id'])
         inference_started = time.monotonic()
-        predictions = relex_many([text for _, text in owners], profile, job['configuration']) if owners else []
+        predictions = relex_many([text for _, text, _ in owners], profile, job['configuration']) if owners else []
         inference_ms = (time.monotonic() - inference_started) * 1000
         predictions_by_chunk = {chunk['id']: [] for chunk in pending}
-        for (identifier, _), prediction in zip(owners, predictions, strict=True):
-            predictions_by_chunk[identifier].append(prediction)
+        for (identifier, _, prefix), prediction in zip(owners, predictions, strict=True):
+            predictions_by_chunk[identifier].append(remove_context(prediction, prefix))
         pipeline.check_paused(job['id'])
         for chunk in batch:
             def operation(c=chunk):

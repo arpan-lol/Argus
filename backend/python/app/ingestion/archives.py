@@ -33,7 +33,7 @@ def skip_reason(filename):
 
 def content_skip_reason(path, filename):
     suffix = PurePosixPath(filename).suffix.lower()
-    if suffix in {'.pdf', '.docx', '.xlsx', '.gz'}:
+    if suffix in {'.pdf', '.docx', '.xlsx', '.pptx', '.eml', '.gz'}:
         return None
     try:
         with Path(path).open('rb') as source:

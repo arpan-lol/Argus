@@ -43,11 +43,14 @@ def chunk_document(document, scope, config):
                     bounds.append((start, low, len(encoding.encode(text[start:low], disallowed_special=()))))
                     start = low
     chunks = []
+    heading_offsets = {block['startOffset'] for block in document.get('blocks', []) if block['kind'] == 'heading'}
     start = 0
     while start < len(bounds):
         end = start
         tokens = 0
         while end < len(bounds):
+            if end > start and bounds[end][0] in heading_offsets:
+                break
             needed = len(encoding.encode(text[bounds[start][0]:bounds[end][1]], disallowed_special=()))
             if needed > config["chunkTokens"]:
                 break
@@ -65,10 +68,11 @@ def chunk_document(document, scope, config):
             "offsetUnit": "unicode_code_point", "blockOrdinals": [block["ordinal"] for block in related],
             "sourceLocations": [block["location"] for block in related],
             "sourceContext": [{"kind": block["kind"], "role": block.get("role", "content"), "location": block["location"], "structured": block.get("structured")} for block in related],
+            "headingContext": next((block['location']['sectionPath'] for block in related if block.get('location', {}).get('sectionPath')), []),
             "actualTokenCount": len(encoding.encode(text[left:right], disallowed_special=())),
             "oversizedSentence": tokens > config["chunkTokens"],
         })
         if end >= len(bounds):
             break
-        start = max(end - config["overlapSentences"], start + 1)
+        start = end if bounds[end][0] in heading_offsets else max(end - config["overlapSentences"], start + 1)
     return {"chunks": chunks, "strategy": "code_line_token_cap" if code else "structure_sentence_clause_token_cap", "upstream": UPSTREAM, "upstreamVersion": "v1.4.0", "adaptation": "Code uses source lines; prose is segmented within parser blocks at sentence and semicolon-clause boundaries. Headings, tables, records, citations, preformatted blocks and list items remain intact unless they exceed the token cap. Oversized units split at source character boundaries. Normalized whitespace retained for exact citation offsets."}
