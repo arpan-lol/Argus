@@ -61,7 +61,9 @@ def relation_inference(model, texts, rows, labels, relations, config, batch_size
         try:
             with _compute_lock, torch.inference_mode():
                 entities, links = model.inference(texts=[texts[owner][left:right] for owner, left, right in group], labels=labels, relations=relations, threshold=config['relexEntityThreshold'], adjacency_threshold=config['relexAdjacencyThreshold'], relation_threshold=config['relexRelationThreshold'], flat_ner=True, multi_label=False, return_relations=True, batch_size=len(group))
-            results.extend(zip(group, entities, links, strict=True))
+                metrics = list(getattr(model.model, '_argus_span_metrics', []))
+            metrics = metrics if len(metrics) == len(group) else [{} for _ in group]
+            results.extend(zip(group, entities, links, metrics, strict=True))
         except (RuntimeError, MemoryError) as error:
             if not memory_failure(error):
                 raise
@@ -134,7 +136,7 @@ def load_model(name, config):
     model.to(compute_device(config))
     model.eval()
     logger.info('Loaded local model %s on %s in %.2fs', name, compute_device(config), time.monotonic() - started)
-    return install(model)
+    return install(model, maximum_spans=config.get('relexMaxSpans', 64))
 
 
 def relex(text, profile, config):
@@ -144,7 +146,7 @@ def relex(text, profile, config):
 def relex_many(texts, profile, config):
     from .batching import service
     from .config import fingerprint
-    key = fingerprint([profile['entityTypes'], profile['relationshipTypes'], profile.get('entityDescriptions'), {name: config.get(name) for name in ('relexModel', 'glinerOverlapWords', 'relexEntityThreshold', 'relexAdjacencyThreshold', 'relexRelationThreshold', 'relexBatchSize', 'localModelThreads', 'localModelDevice')}])
+    key = fingerprint([profile['entityTypes'], profile['relationshipTypes'], profile.get('entityDescriptions'), {name: config.get(name) for name in ('relexModel', 'glinerOverlapWords', 'relexEntityThreshold', 'relexAdjacencyThreshold', 'relexRelationThreshold', 'relexBatchSize', 'relexMaxSpans', 'localModelThreads', 'localModelDevice')}])
     return service('relex').submit(key, texts, lambda values: relex_direct(values, profile, config))
 
 
@@ -164,7 +166,7 @@ def relex_direct(texts, profile, config):
         entity_labels = {value.replace("_", " "): profile.get("entityDescriptions", {}).get(value, value.replace("_", " ")) for value in profile["entityTypes"]}
         entity_names = {value.replace("_", " "): value for value in profile["entityTypes"]}
         relation_names = {value.replace("_", " "): value for value in profile["relationshipTypes"]}
-        outputs = [{'entities': {}, 'relationships': {}, 'windows': [], 'model': name} for text in texts]
+        outputs = [{'entities': {}, 'relationships': {}, 'windows': [], 'spanCandidates': [], 'model': name} for text in texts]
         windows = []
         for owner, text in enumerate(texts):
             words = list(model.data_processor.words_splitter(text))
@@ -183,8 +185,9 @@ def relex_direct(texts, profile, config):
         predictions = relation_inference(model, texts, windows, entity_labels, list(relation_names), config, batch_size)
         for output in outputs:
             output['windows'] = []
-        for (owner, left, right), items, links in predictions:
+        for (owner, left, right), items, links, metrics in predictions:
             outputs[owner]['windows'].append({'start': left, 'end': right})
+            outputs[owner]['spanCandidates'].append({'start': left, 'end': right, **metrics})
             entities, relations = outputs[owner]['entities'], outputs[owner]['relationships']
             for item in items:
                 value = {**item, "start": left + item["start"], "end": left + item["end"], "label": entity_names[item["label"]]}
@@ -199,7 +202,7 @@ def relex_direct(texts, profile, config):
         expected = set(windows)
         for owner, output in enumerate(outputs):
             output['memoryWindowSplit'] = any((owner, window['start'], window['end']) not in expected for window in output['windows'])
-        return [{**output, 'entities': list(output['entities'].values()), 'relationships': list(output['relationships'].values()), 'localAdapter': 'deduplicated-spans-bounded-projection-1' if getattr(model.model, '_argus_bounded_spans', False) else None} for output in outputs]
+        return [{**output, 'entities': list(output['entities'].values()), 'relationships': list(output['relationships'].values()), 'localAdapter': 'ranked-span-beam-pair-cap-2' if getattr(model.model, '_argus_bounded_spans', False) else None} for output in outputs]
 
 
 def ner_many(texts, types, config, stop_check=lambda: None):

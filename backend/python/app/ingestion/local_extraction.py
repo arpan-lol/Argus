@@ -116,6 +116,9 @@ def extract_local(pipeline, job):
                 output["metadata"] = {"method": "gliner_relex" if windows else "python_ast_structure", "model": job["configuration"]["relexModel"], "llmVerified": False, "fallback": False, "llmAttempts": 0, "windows": windows, "durationMs": (time.monotonic() - started) * 1000, "sharedInferenceDurationMs": inference_ms, "inferenceBatchChunks": len(pending), "scoreMeaning": "Uncalibrated local model score; source offsets and structure are checked, semantic correctness is not independently verified"}
                 output['metadata']['memoryWindowSplit'] = any(raw.get('memoryWindowSplit') for raw in predictions)
                 output['metadata']['localAdapter'] = next((raw.get('localAdapter') for raw in predictions if raw.get('localAdapter')), None)
+                output['metadata']['spanCandidates'] = [value for raw in predictions for value in raw.get('spanCandidates', [])]
+                output['metadata']['spanCandidateLimit'] = job['configuration'].get('relexMaxSpans', 64)
+                output['metadata']['candidateLimitMeaning'] = 'Ranked internal span beam before quadratic relation pairing; may reduce relation recall. Scores are uncalibrated.'
                 pipeline.validate_extraction(c, output)
                 return output
             output = pipeline.retry_call(job, "extract", chunk["id"], operation, max_attempts=1)

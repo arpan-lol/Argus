@@ -48,6 +48,7 @@ def processing_config(project_id=None):
         "glinerOverlapWords": int(os.getenv("ARGUS_GLINER_OVERLAP_WORDS", "32")),
         "relexModel": os.getenv("ARGUS_RELEX_MODEL", "knowledgator/gliner-relex-base-v1.0"),
         "relexBatchSize": int(os.getenv('ARGUS_RELEX_BATCH_SIZE', '4')),
+        "relexMaxSpans": int(os.getenv('ARGUS_RELEX_MAX_SPANS', '64')),
         "localModelThreads": int(os.getenv('ARGUS_LOCAL_MODEL_THREADS', str(min(8, os.cpu_count() or 1)))),
         "localModelDevice": os.getenv('ARGUS_LOCAL_MODEL_DEVICE', 'auto'),
         "localModelCacheSize": int(os.getenv('ARGUS_LOCAL_MODEL_CACHE_SIZE', '0')),
