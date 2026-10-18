@@ -40,7 +40,7 @@ def processing_config(project_id=None):
         "embeddingDimensions": 3072,
         "entityEmbeddingPolicy": "explicit-post-ingestion-finalization",
         "entityIdentityPolicy": "exact-normalized-name-type-including-short-names-2",
-        "codeAgentVersion": "flow-behavior-builder-2",
+        "codeAgentVersion": "flow-behavior-builder-3",
         "codeAgentTokenBudget": int(os.getenv("ARGUS_CODE_AGENT_TOKEN_BUDGET", "300000")),
         "codeAgentMaxSteps": int(os.getenv("ARGUS_CODE_AGENT_MAX_STEPS", "96")),
         "codeAgentContextTokens": int(os.getenv("ARGUS_CODE_AGENT_CONTEXT_TOKENS", "18000")),

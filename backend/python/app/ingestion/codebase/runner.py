@@ -1,6 +1,7 @@
 import json
 import math
 import time
+from pathlib import Path
 from typing import TypedDict
 
 import tiktoken
@@ -64,7 +65,7 @@ class GraphBuilder:
         for index in source_reads[:-2]:
             item = history[index]
             history[index] = {**item, 'result': {**item['result'], 'chunks': [{key: chunk[key] for key in ('source_id', 'filename', 'chunk_id', 'ordinal')} for chunk in item['result']['chunks']], 'textOmitted': True}}
-        payload = {'workspaceDescription': self.config.get('workspaceDescription', ''), 'workspaceId': self.job['project_id'], 'fileCount': len(self.manifest), 'filesInSnapshot': [{'source_id': row['source_id'], 'filename': row['filename']} for row in self.manifest] if len(self.manifest) <= 20 else None, 'recentTools': history, 'graphProgress': {'entities': len(state['entities']), 'claims': len(state['claims']), 'chunksRead': len(state['seen']), 'knownEntities': [{'key': key, 'name': value['name']} for key, value in list(state['entities'].items())[-32:]]}, 'instruction': 'When filesInSnapshot is present, do not list files. Read several source IDs in one action, then write source-cited entities and cross-file relationships. Copy a short exact line from citation_spans for each citation. Reuse known entity keys. Never write a self relationship or repeat a failed write unchanged.'}
+        payload = {'workspaceDescription': self.config.get('workspaceDescription', ''), 'workspaceId': self.job['project_id'], 'fileCount': len(self.manifest), 'filesInSnapshot': [{'source_id': row['source_id'], 'filename': row['filename']} for row in self.manifest] if len(self.manifest) <= 20 else None, 'recentTools': history, 'graphProgress': {'entities': len(state['entities']), 'claims': len(state['claims']), 'chunksRead': len(state['seen']), 'knownEntities': [{'key': key, 'name': value['name']} for key, value in list(state['entities'].items())[-32:]]}, 'instruction': 'When filesInSnapshot is present, do not list files. If recentTools already includes read_sources, write source-cited entities and cross-file relationships now. Otherwise read several source IDs in one action. Cite numbered lines from the read chunk. Reuse known entity keys. Never write a self relationship or repeat a failed write unchanged.'}
         def encoded_request():
             return self.encoding.encode(json.dumps({'system': SYSTEM, 'payload': payload, 'schema': Action.model_json_schema()}, ensure_ascii=False), disallowed_special=())
         while len(encoded_request()) > self.config.get('codeAgentContextTokens', 18000) and history:
@@ -150,6 +151,12 @@ def build_workspace(pipeline, job):
                 options = {'recursion_limit': 2 * job['configuration'].get('codeAgentMaxSteps', 96) + 4, 'configurable': {'thread_id': run, 'checkpoint_ns': ''}}
                 checkpoint = graph.get_state(options)
                 initial = {'step': 0, 'history': [{'tool': 'incremental_context', 'result': {'changed_or_incomplete_files': len(changed), 'reused_claims': len(initial_claims), 'instruction': 'Prioritize changed_or_incomplete files in list_files. Read dependencies to verify behavior. Unchanged source claims are retained.'}}], 'action': {}, 'seen': seed.get('seen', []), 'claims': initial_claims, 'entities': seed.get('entities', {}), 'done': False, 'stop_reason': ''}
+                if not checkpoint.values and len(manifest) <= 8 and sum(Path(row['original_path']).stat().st_size for row in manifest) <= 100000:
+                    action = {'tool': 'read_sources', 'source_ids': [row['source_id'] for row in manifest], 'chunk_offset': 0}
+                    result, seen, _, _ = agent.tools.execute(action, initial)
+                    initial['seen'] = seen
+                    initial['history'][0]['result']['instruction'] = 'Initial source chunks are already supplied. Write the graph from those chunks before requesting more source context.'
+                    initial['history'].append({'tool': 'read_sources', 'reason': 'Bounded initial source context for this small snapshot', 'result': result})
                 if checkpoint.values and not checkpoint.next:
                     state = dict(checkpoint.values)
                 else:
@@ -159,7 +166,7 @@ def build_workspace(pipeline, job):
                         storage.save_run(run, {'error': agent.provider.safe_error(error), 'checkpointThreadId': run}, 'interrupted')
                         raise
             coverage = agent.tools.coverage(state['seen'])
-            result = {'runId': run, 'entities': state['entities'], 'claims': state['claims'], 'seen': state['seen'], 'coverage': coverage, 'steps': state['step'], 'stopReason': state['stop_reason'], 'quality': 'partial' if any(row['status'] != 'read' for row in coverage) or state['stop_reason'] in {'workspace_token_budget', 'step_safety_limit', 'tool_stall'} else 'source_read_not_semantically_verified', 'method': 'codebase_graph_builder', 'incremental': {'changedOrIncompleteFiles': len(changed), 'reusedClaims': len(initial_claims)}, 'limitations': ['Agent-generated software behavior, not independently verified semantics', 'Read coverage is not proof of comprehensive behavior extraction']}
+            result = {'runId': run, 'entities': state['entities'], 'claims': state['claims'], 'seen': state['seen'], 'coverage': coverage, 'steps': state['step'], 'stopReason': state['stop_reason'], 'quality': 'partial' if any(row['status'] != 'read' for row in coverage) or state['stop_reason'] in {'workspace_token_budget', 'step_safety_limit', 'tool_stall'} or not any(claim['kind'] == 'relationship' for claim in state['claims']) else 'source_read_not_semantically_verified', 'method': 'codebase_graph_builder', 'incremental': {'changedOrIncompleteFiles': len(changed), 'reusedClaims': len(initial_claims)}, 'limitations': ['Agent-generated software behavior, not independently verified semantics', 'Read coverage is not proof of comprehensive behavior extraction']}
             new_claims = [claim for claim in result['claims'] if claim not in initial_claims]
             result['deliverySourceIds'] = sorted({claim['citation']['source_id'] for claim in new_claims} & {row['source_id'] for row in manifest if row['status'] == 'complete'})
             storage.save_run(run, result, 'complete')

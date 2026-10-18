@@ -23,14 +23,8 @@ class RepositoryTools:
         self.changed = set(self.manifest if changed is None else changed)
 
     def present(self, identifier, chunk):
-        anchors = []
-        position = 0
-        for line in chunk['text'].splitlines(keepends=True):
-            quote = line.rstrip('\r\n')
-            if quote.strip() and len(anchors) < 12:
-                anchors.append({'start': position, 'end': position + len(quote), 'quote': quote})
-            position += len(line)
-        return {'source_id': identifier, 'filename': self.manifest[identifier]['filename'], 'chunk_id': chunk['id'], 'text': chunk['text'], 'start': 0, 'end': len(chunk['text']), 'citation_spans': anchors, 'ordinal': chunk['ordinal']}
+        lines = [{'line': number, 'text': line.rstrip('\r\n')} for number, line in enumerate(chunk['text'].splitlines(keepends=True), 1)]
+        return {'source_id': identifier, 'filename': self.manifest[identifier]['filename'], 'chunk_id': chunk['id'], 'lines': lines, 'ordinal': chunk['ordinal']}
 
     def source(self, identifier):
         if identifier not in self.manifest:
@@ -57,13 +51,16 @@ class RepositoryTools:
         chunk = next((chunk for chunk in self.source(citation['source_id'])['chunks'] if chunk['id'] == citation['chunk_id']), None)
         if chunk is None or chunk['id'] not in seen:
             raise ValueError('Citation must reference a chunk returned by read_sources or search_sources')
-        if chunk['text'][citation['start']:citation['end']] != citation['quote'] or citation['end'] > len(chunk['text']) or citation['end'] <= citation['start']:
-            start = chunk['text'].find(citation['quote'])
-            if start < 0 or chunk['text'].find(citation['quote'], start + 1) >= 0:
-                raise ValueError('Citation quote is missing or ambiguous in the read chunk; use one exact citation_spans entry')
-            citation['start'] = start
-            citation['end'] = start + len(citation['quote'])
-        return {**citation, 'revision': self.manifest[citation['source_id']]['revision'], 'startOffset': chunk['startOffset'] + citation['start'], 'endOffset': chunk['startOffset'] + citation['end']}
+        lines = chunk['text'].splitlines(keepends=True)
+        first, last = citation['start_line'], citation['end_line']
+        if first > last or last > len(lines) or last - first > 2:
+            raise ValueError('Citation must select one to three numbered lines from the read chunk')
+        start = sum(len(line) for line in lines[:first - 1])
+        quote = ''.join(lines[first - 1:last]).rstrip('\r\n')
+        if not quote.strip():
+            raise ValueError('Citation cannot select an empty source line')
+        end = start + len(quote)
+        return {**citation, 'quote': quote, 'start': start, 'end': end, 'revision': self.manifest[citation['source_id']]['revision'], 'startOffset': chunk['startOffset'] + start, 'endOffset': chunk['startOffset'] + end}
 
     def execute(self, action, state):
         tool = action['tool']
