@@ -105,8 +105,10 @@ def _entities(graph, jobs, identifiers, layout):
 
 
 @router.get('/knowledge')
-def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(80, ge=1, le=160), focus: str | None = None, relationOffset: int = Query(0, ge=0), relationLimit: int = Query(160, ge=1, le=240), q: str = Query('', max_length=200)):
+def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(80, ge=1, le=160), focus: str | None = None, relationOffset: int = Query(0, ge=0), relationLimit: int = Query(160, ge=1, le=240), q: str = Query('', max_length=200), path: list[str] = Query(default=[])):
     graph, jobs, namespace = _snapshot(project_id)
+    if len(path) > 8 or any(len(identifier) > 256 for identifier in path):
+        raise HTTPException(400, 'Graph path exceeds the display limit')
     search = " AND (toLower(e.label) CONTAINS toLower($q) OR toLower(e.type) CONTAINS toLower($q))" if q.strip() else ''
     entity_total = _query(graph, _entity_pattern + search + " RETURN count(DISTINCT e)", jobs, q=q)[0][0]
     relation_filter = " AND (s.id=$focus OR o.id=$focus)" if focus else ''
@@ -114,6 +116,9 @@ def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(
         relation_filter += " AND (toLower(s.label) CONTAINS toLower($q) OR toLower(o.label) CONTAINS toLower($q) OR toLower(s.type) CONTAINS toLower($q) OR toLower(o.type) CONTAINS toLower($q))"
     relationship_total = _query(graph, _relationship_pattern + relation_filter + " RETURN count(r)", jobs, focus=focus, q=q)[0][0]
     rows = _query(graph, _relationship_pattern + relation_filter + " RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset ORDER BY CASE WHEN a.extractionMethod='stix_native' THEN 0 ELSE 1 END,a.id SKIP $offset LIMIT $limit", jobs, focus=focus, q=q, offset=relationOffset, limit=relationLimit)
+    if path:
+        path_rows = _query(graph, _relationship_pattern + " AND a.id IN $path RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset LIMIT 8", jobs, path=list(dict.fromkeys(path)))
+        rows = list({row[2]: row for row in [*rows, *path_rows]}.values())
     edges = [{'id': row[2], 'source': row[0], 'target': row[1], 'type': 'RELATES', 'label': row[3], 'predicate': row[3], 'confidence': row[4], 'traversalStatus': row[5] or 'unclassified', 'extractionMethod': row[6] or 'unknown', 'quote': row[7], 'documentId': row[8], 'polarity': row[9], 'context': _json(row[10], {}), 'startOffset': row[11], 'endOffset': row[12]} for row in rows]
     identifiers = {identifier for row in rows for identifier in row[:2]}
     if focus:

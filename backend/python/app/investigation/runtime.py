@@ -249,6 +249,38 @@ def collect_sources(payload, sources):
     return sources
 
 
+def visible_tool_result(result):
+    items = []
+    for item in result.get("items", [])[:8]:
+        if not isinstance(item, dict):
+            continue
+        citation = item.get("citation", item)
+        subject, object_ = item.get("subject"), item.get("object")
+        items.append({
+            "id": item.get("id"),
+            "name": item.get("name") or item.get("documentTitle"),
+            "predicate": item.get("predicate"),
+            "subject": subject if isinstance(subject, dict) else None,
+            "object": object_ if isinstance(object_, dict) else None,
+            "quote": str(item.get("quote") or item.get("text") or item.get("mention") or "")[:260],
+            "documentTitle": citation.get("documentTitle") if isinstance(citation, dict) else None,
+            "chunkId": citation.get("chunkId") if isinstance(citation, dict) else None,
+            "documentId": citation.get("documentId") if isinstance(citation, dict) else None,
+            "polarity": item.get("polarity"),
+            "sourceReference": item.get("sourceReference"),
+            "extractionMethod": (item.get("extraction") or {}).get("method"),
+            "traversalStatus": (item.get("extraction") or {}).get("traversalStatus"),
+        })
+    assertions = {item.get("id"): item for item in result.get("items", []) if isinstance(item, dict) and item.get("id") and item.get("predicate")}
+    tree = []
+    for hop in (result.get("paths", [{}])[0].get("hops", []) if result.get("paths") else result.get("discoveryTree", []))[:8]:
+        assertion = assertions.get(hop.get("assertionId"))
+        if assertion:
+            citation = assertion.get("citation") or {}
+            tree.append({"assertionId": assertion["id"], "from": hop.get("from"), "to": hop.get("to"), "predicate": assertion["predicate"], "subject": assertion.get("subject"), "object": assertion.get("object"), "quote": str(assertion.get("quote") or "")[:260], "documentTitle": citation.get("documentTitle"), "chunkId": citation.get("chunkId"), "documentId": citation.get("documentId"), "polarity": assertion.get("polarity"), "sourceReference": assertion.get("sourceReference"), "extractionMethod": (assertion.get("extraction") or {}).get("method"), "traversalStatus": (assertion.get("extraction") or {}).get("traversalStatus")})
+    return {"items": items, "tree": tree, "pathCount": len(result.get("paths", [])), "shownItems": len(items), "totalItems": len(result.get("items", [])), "truncated": bool(result.get("truncations"))}
+
+
 def validate_sources(sources, references, config):
     if any(ref not in sources for ref in references):
         raise ValueError("The response references a source that was not retrieved")
@@ -526,7 +558,7 @@ class Investigation:
         else:
             packed, content = pack_result(result, self.request["query"], self.encoding, 2000 if name == "search_sources" else 5000 if name == "read_chunks" else 3000)
         if event:
-            self.emit("tool_end", {**event, "truncations": packed.get("truncations", []), "modelContext": {**packed.get("contextCoverage", {}), "tokens": len(self.encoding.encode(content))}})
+            self.emit("tool_end", {**event, "result": visible_tool_result(result), "truncations": packed.get("truncations", []), "modelContext": {**packed.get("contextCoverage", {}), "tokens": len(self.encoding.encode(content))}})
         return {**state, "pending": [], "sources": sources, "tool_count": state["tool_count"] + 1, "seen_calls": [*state["seen_calls"], identity], "messages": [*state["messages"], {"role": "tool", "tool_call_id": call["id"], "content": content}]}
 
     def graph(self, saver):

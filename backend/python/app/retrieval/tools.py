@@ -173,7 +173,12 @@ def traverse(session, roots, depth, direction, predicates, edge_limit, target=No
                     stack.append((hop["to"], [*entities, hop["to"]], [*hops, hop]))
         if stack:
             session.truncate("Returned path count capped")
-    return {"items": list(edges.values()), "paths": paths, "discoveryTree": tree, "depthByEntity": distance, "searchDepth": depth, "direction": direction, "pathMeaning": "Paths compose reported assertions for inspection, not a newly established causal/scientific conclusion. Negated or uncertain assertions remain labeled.", "coverage": "Bounded search only; no-path does not prove absence of a connection"}
+    explored = len(edges)
+    if target:
+        selected = {hop["assertionId"] for path in paths for hop in path["hops"]}
+        edges = {identifier: assertion for identifier, assertion in edges.items() if identifier in selected}
+        tree = paths[0]["hops"] if paths else []
+    return {"items": list(edges.values()), "paths": paths, "discoveryTree": tree, "depthByEntity": distance, "exploredAssertionCount": explored, "searchDepth": depth, "direction": direction, "pathMeaning": "Paths compose reported assertions for inspection, not a newly established causal/scientific conclusion. Negated or uncertain assertions remain labeled.", "coverage": "Bounded search only; no-path does not prove absence of a connection"}
 
 
 def expand_connections(session, args):
