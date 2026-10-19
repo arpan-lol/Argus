@@ -237,7 +237,6 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, on
   return <section className={`${styles.root} ${expanded ? styles.fullscreen : ''}`} aria-label="Knowledge graph">
     <div className={styles.toolbar}>
       {viewSwitcher}
-      <div className={styles.heading}><Network size={16} aria-hidden="true" /><strong>{focusId ? 'Entity neighborhood' : 'Entities & relationships'}</strong></div>
       <div className={styles.tools}>
         <button type="button" className={`${styles.iconButton} ${catalogOpen ? styles.activeTool : ''}`} title="Browse all entities" aria-label="Browse all entities" aria-expanded={catalogOpen} onClick={() => setCatalogOpen(value => !value)}><List size={16} /></button>
         <label className={styles.find}><Search size={14} aria-hidden="true" /><input aria-label="Search workspace entities" placeholder="Search entities" value={search} onChange={event => setSearch(event.target.value)} /></label>
