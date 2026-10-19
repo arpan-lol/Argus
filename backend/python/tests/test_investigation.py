@@ -70,14 +70,15 @@ class InvestigationTest(TestCase):
         return Investigation(self.row, lambda *event: self.events.append(event), model_call=model, tool_call=tool)
 
     def test_greeting_finishes_without_retrieval(self):
+        self.row["request"]["query"] = "yo"
         model = mock.Mock(return_value=({"role": "assistant", "content": json.dumps(report())}, {"total_tokens": 42}))
         tool = mock.Mock()
         state = self.runtime(model, tool).graph(InMemorySaver()).invoke(initial(), {"configurable": {"thread_id": "greeting"}})
         self.assertEqual(state["report"]["purpose"], "conversation")
         tool.assert_not_called()
-        self.assertEqual(model.call_count, 1)
-        self.assertNotIn("finish_report", [item["function"]["name"] for item in model.call_args.args[1]])
-        self.assertEqual(self.ledger.budget["reportedTokens"], 42)
+        model.assert_not_called()
+        self.assertEqual(state["report"]["paragraphs"][0]["text"], "Hey! How can I help today?")
+        self.assertEqual(self.ledger.budget, {})
 
     def test_empty_project_still_enters_model_tool_loop(self):
         self.row["configuration"]["coverage"] = {"publishedDocuments": 0, "legacyDocuments": 6013}

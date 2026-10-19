@@ -31,7 +31,7 @@ class RunBudgetReached(RuntimeError):
 
 def non_source_conversation(query, seen_calls):
     normalized = re.sub(r"[^\w\s]", "", query.casefold()).strip()
-    if normalized in {"hi", "hello", "hey", "good morning", "good afternoon", "good evening", "thanks", "thank you", "bye", "goodbye"}:
+    if normalized in {"hi", "hello", "hey", "yo", "sup", "good morning", "good afternoon", "good evening", "thanks", "thank you", "bye", "goodbye"}:
         return True
     catalog_question = re.search(r"\b(?:your|argus|available|retrieval)\s+(?:tools?|capabilities)\b|\b(?:tools?|capabilities)\s+(?:you|argus)\b|^list (?:all )?tools\b|^list (?:only )?(?:the )?[a-z0-9_]+ (?:ones|tools)$", normalized)
     if not catalog_question:
@@ -471,6 +471,11 @@ class Investigation:
         return message.model_dump(exclude_none=True, include={"role", "content", "tool_calls"}), usage
 
     def plan(self, state):
+        if not state["messages"] and state["tool_count"] == 0 and non_source_conversation(self.request["query"], []):
+            normalized = re.sub(r"[^\w\s]", "", self.request["query"].casefold()).strip()
+            text = "You're welcome. Let me know what you'd like to explore." if normalized in {"thanks", "thank you"} else "Goodbye!" if normalized in {"bye", "goodbye"} else "Hey! How can I help today?"
+            report = Report(purpose="conversation", paragraphs=[{"text": text, "citations": []}]).model_dump()
+            return {**state, "report": report, "draft": json.dumps(report, ensure_ascii=False)}
         definitions = self.definitions(state)
         definition_tokens = len(self.encoding.encode(json.dumps([definitions, report_tool()], ensure_ascii=False))) + 64
         messages = self.messages(state, self.limits["contextTokens"] - definition_tokens)
