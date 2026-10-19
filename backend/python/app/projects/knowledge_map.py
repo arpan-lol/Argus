@@ -128,51 +128,6 @@ def _fallback(identifier, base_y):
     return (value % 48 * 150, base_y + (value // 48 % 48) * 140)
 
 
-def _page_coordinates(rows):
-    adjacent = defaultdict(set)
-    for row in rows:
-        source, target = row[0], row[1]
-        adjacent[source]
-        adjacent[target]
-        if source != target:
-            adjacent[source].add(target)
-            adjacent[target].add(source)
-    pending = set(adjacent)
-    components = []
-    while pending:
-        root = min(pending, key=lambda identifier: (-len(adjacent[identifier]), identifier))
-        visited = {root}
-        layers = defaultdict(list)
-        frontier = deque([(root, 0)])
-        while frontier:
-            identifier, depth = frontier.popleft()
-            pending.discard(identifier)
-            layers[depth].append(identifier)
-            neighbors = sorted(adjacent[identifier], key=lambda item: (-len(adjacent[item]), item))
-            for neighbor in neighbors:
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    frontier.append((neighbor, depth + 1))
-        components.append((root, layers, visited))
-    positions = {}
-    cursor_x = 0.0
-    for root, layers, identifiers in sorted(components, key=lambda item: (-len(item[2]), item[0])):
-        max_radius = max((max(150.0, depth * 175.0, len(nodes) * 56.0 / math.tau) for depth, nodes in layers.items() if depth), default=0.0)
-        center_x = cursor_x + max_radius + 100.0
-        center_y = 0.0
-        for depth in sorted(layers):
-            nodes = sorted(layers[depth], key=lambda identifier: (-len(adjacent[identifier]), identifier))
-            if depth == 0:
-                positions[root] = (center_x, center_y)
-                continue
-            radius = max(150.0, depth * 175.0, len(nodes) * 56.0 / math.tau)
-            for index, identifier in enumerate(nodes):
-                angle = -math.pi / 2 + math.tau * index / len(nodes)
-                positions[identifier] = (center_x + math.cos(angle) * radius, center_y + math.sin(angle) * radius)
-        cursor_x += max_radius * 2 + 260.0
-    return positions
-
-
 def _entities(graph, jobs, identifiers, layout):
     if not identifiers:
         return []
@@ -181,7 +136,7 @@ def _entities(graph, jobs, identifiers, layout):
 
 
 @router.get('/knowledge')
-def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(80, ge=1, le=160), focus: str | None = None, relationOffset: int = Query(0, ge=0), relationLimit: int = Query(160, ge=1, le=240), q: str = Query('', max_length=200), path: list[str] = Query(default=[])):
+def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(80, ge=1, le=160), focus: str | None = None, relationOffset: int = Query(0, ge=0), relationLimit: int = Query(20000, ge=1, le=20000), q: str = Query('', max_length=200), path: list[str] = Query(default=[])):
     graph, jobs, namespace = _snapshot(project_id)
     if len(path) > 8 or any(len(identifier) > 256 for identifier in path):
         raise HTTPException(400, 'Graph path exceeds the display limit')
@@ -193,12 +148,12 @@ def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(
     relationship_total = _query(graph, _relationship_pattern + relation_filter + " RETURN count(r)", jobs, focus=focus, q=q)[0][0]
     layout = _coordinates(graph, jobs, namespace)
     if not focus and not q.strip() and not layout['truncated']:
-        page_ids = layout['orderedAssertions'][relationOffset:relationOffset + relationLimit]
+        page_ids = layout['orderedAssertions'][:relationLimit]
         rows = _query(graph, _relationship_pattern + " AND a.id IN $page RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset", jobs, page=page_ids) if page_ids else []
         rank = {identifier: index for index, identifier in enumerate(page_ids)}
         rows.sort(key=lambda row: rank[row[2]])
     else:
-        rows = _query(graph, _relationship_pattern + relation_filter + " RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset ORDER BY s.id,a.id SKIP $offset LIMIT $limit", jobs, focus=focus, q=q, offset=relationOffset, limit=relationLimit)
+        rows = _query(graph, _relationship_pattern + relation_filter + " RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset ORDER BY s.id,a.id LIMIT $limit", jobs, focus=focus, q=q, limit=relationLimit)
     if path:
         path_rows = _query(graph, _relationship_pattern + " AND a.id IN $path RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset LIMIT 8", jobs, path=list(dict.fromkeys(path)))
         rows = list({row[2]: row for row in [*rows, *path_rows]}.values())
@@ -208,11 +163,7 @@ def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(
         identifiers.add(focus)
     catalog_rows = _query(graph, _entity_pattern + search + " WITH e,count(DISTINCT m) AS mentions RETURN e.id ORDER BY mentions DESC,e.id SKIP $offset LIMIT $limit", jobs, q=q, offset=offset, limit=limit)
     catalog_ids = [row[0] for row in catalog_rows]
-    page_positions = _page_coordinates(rows)
     entity_records = _entities(graph, jobs, sorted(identifiers | set(catalog_ids)), layout)
-    for node in entity_records:
-        if node['id'] in page_positions:
-            node['x'], node['y'] = page_positions[node['id']]
     catalog_map = {node['id']: node for node in entity_records}
     entity_page = [catalog_map[identifier] for identifier in catalog_ids if identifier in catalog_map]
     nodes = [node for node in entity_records if node['id'] in identifiers]
@@ -233,7 +184,7 @@ def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(
     xs = [node['x'] for node in nodes] or [0]
     ys = [node['y'] for node in nodes] or [0]
     _verify_snapshot(project_id, jobs, namespace)
-    return {'nodes': nodes, 'entityPage': entity_page, 'edges': edges, 'bounds': {'minX': min(xs) - 120, 'maxX': max(xs) + 120, 'minY': min(ys) - 100, 'maxY': max(ys) + 100}, 'pagination': {'entityTotal': entity_total, 'connectedEntityTotal': None if layout['truncated'] else len(layout['positions']), 'entityOffset': offset, 'entityLimit': limit, 'hasMoreEntities': offset + limit < entity_total, 'relationshipTotal': relationship_total, 'relationshipOffset': relationOffset, 'relationshipLimit': relationLimit, 'hasMoreRelationships': relationOffset + relationLimit < relationship_total}, 'focusId': focus, 'source': 'falkordb', 'status': 'ready', 'layout': 'Deterministic local radial layout for the displayed relationship page; entity positions remain fixed until the page changes', 'layoutTruncated': layout['truncated'], 'note': 'Edges are stored semantic relationships. Local model scores are uncalibrated; source-structured records and review statuses remain distinct. Source containment is available in the source graph view.'}
+    return {'nodes': nodes, 'entityPage': entity_page, 'edges': edges, 'bounds': {'minX': min(xs) - 120, 'maxX': max(xs) + 120, 'minY': min(ys) - 100, 'maxY': max(ys) + 100}, 'pagination': {'entityTotal': entity_total, 'connectedEntityTotal': None if layout['truncated'] else len(layout['positions']), 'entityOffset': offset, 'entityLimit': limit, 'hasMoreEntities': offset + limit < entity_total, 'relationshipTotal': relationship_total, 'relationshipOffset': 0, 'relationshipLimit': relationLimit, 'hasMoreRelationships': len(edges) < relationship_total}, 'focusId': focus, 'source': 'falkordb', 'status': 'ready', 'layout': 'Stable workspace-wide entity positions; the full relationship overview loads together up to the bounded graph limit', 'layoutTruncated': layout['truncated'], 'note': 'Edges are stored semantic relationships. Local model scores are uncalibrated; source-structured records and review statuses remain distinct. Source containment is available in the source graph view.'}
 
 
 @router.get('/entity/{identifier}/mentions')

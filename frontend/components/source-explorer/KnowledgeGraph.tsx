@@ -1,19 +1,19 @@
 'use client';
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, ArrowUpRight, CircleHelp, Focus, List, Loader2, Minus, Network, Plus, Search, X } from 'lucide-react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { ArrowLeft, ArrowRight, ArrowUpRight, CircleHelp, Expand, Focus, List, Loader2, Minimize2, Minus, Network, Plus, Search, X } from 'lucide-react';
 import { api } from '@/lib/evidence-types';
 import styles from './KnowledgeGraph.module.css';
 
 type Entity = { id: string; type: 'entity'; label: string; entityType: string; x: number; y: number; mentionCount?: number; documentCount?: number; aliases?: string[]; resolutionStatus?: string };
 type Relationship = { id: string; source: string; target: string; label: string; confidence?: number | null; traversalStatus?: string; extractionMethod?: string; quote?: string; chunkId?: string; documentId?: string };
-type KnowledgeView = { nodes: Entity[]; entityPage?: Entity[]; edges: Relationship[]; status?: string; pagination: { entityTotal: number; connectedEntityTotal?: number | null; entityOffset: number; entityLimit: number; hasMoreEntities: boolean; relationshipTotal: number; relationshipOffset: number; relationshipLimit: number; hasMoreRelationships: boolean } };
+type KnowledgeView = { nodes: Entity[]; entityPage?: Entity[]; edges: Relationship[]; status?: string; layoutTruncated?: boolean; pagination: { entityTotal: number; connectedEntityTotal?: number | null; entityOffset: number; entityLimit: number; hasMoreEntities: boolean; relationshipTotal: number; relationshipOffset: number; relationshipLimit: number; hasMoreRelationships: boolean } };
 type Mention = { id: string; text: string; chunkId: string; chunkText?: string; documentId: string; documentTitle: string; sourceSpans?: unknown[]; extractionMethod?: string; confidence?: number | null };
 type Mentions = { entity: Entity; mentions: Mention[]; counts: { documents: number; chunks: number; occurrences: number; occurrenceCountTruncated?: boolean; status?: string }; pagination: { total: number; offset: number; limit: number; hasMore: boolean } };
-type Props = { apiRoot: string; refreshToken?: number; expanded?: boolean; focus?: { nodeId: string; nonce: number } | null; trace?: { assertionIds: string[]; nonce: number } | null; onSelect?: (node: Entity) => void; onSource?: (source: { nodeId: string; label?: string }) => void };
+type Props = { apiRoot: string; refreshToken?: number; expanded?: boolean; onExpand?: () => void; viewSwitcher?: ReactNode; focus?: { nodeId: string; nonce: number } | null; trace?: { assertionIds: string[]; nonce: number } | null; onSelect?: (node: Entity) => void; onSource?: (source: { nodeId: string; label?: string }) => void };
 type Camera = { x: number; y: number; zoom: number };
 const ENTITY_PAGE = 40;
-const RELATION_PAGE = 20;
+const RELATION_LIMIT = 20000;
 const EMPTY: KnowledgeView = { nodes: [], edges: [], pagination: { entityTotal: 0, entityOffset: 0, entityLimit: 60, hasMoreEntities: false, relationshipTotal: 0, relationshipOffset: 0, relationshipLimit: 100, hasMoreRelationships: false } };
 const clip = (value: string, length = 30) => value.length > length ? `${value.slice(0, length - 1)}…` : value;
 const human = (value: string) => value.replace(/_/g, ' ');
@@ -28,7 +28,7 @@ const structuredMention = (mention: Mention) => {
 const hue = (value: string) => { let hash = 0; for (const char of value) hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0; return Math.abs(hash) % 5; };
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 
-export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, focus, trace, onSelect, onSource }: Props) {
+export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, onExpand, viewSwitcher, focus, trace, onSelect, onSource }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const animation = useRef(0);
   const drag = useRef<{ x: number; y: number; camera: Camera } | null>(null);
@@ -40,7 +40,6 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, fo
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
-  const [relationOffset, setRelationOffset] = useState(0);
   const [focusId, setFocusId] = useState<string | null>(null);
   const [selected, setSelected] = useState<Entity | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<Relationship | null>(null);
@@ -105,7 +104,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, fo
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      setQuery(search.trim()); setOffset(0); setRelationOffset(0);
+      setQuery(search.trim()); setOffset(0);
       if (search.trim()) setFocusId(null);
       fitPending.current = true;
     }, 350);
@@ -115,7 +114,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, fo
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true); setError(null);
-    const params = new URLSearchParams({ offset: String(offset), limit: String(ENTITY_PAGE), relationOffset: String(relationOffset), relationLimit: String(RELATION_PAGE) });
+    const params = new URLSearchParams({ offset: String(offset), limit: String(ENTITY_PAGE), relationOffset: '0', relationLimit: String(RELATION_LIMIT) });
     if (focusId) params.set('focus', focusId);
     if (query) params.set('q', query);
     trace?.assertionIds.forEach(identifier => params.append('path', identifier));
@@ -130,7 +129,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, fo
       if (!controller.signal.aborted) { setError(reason instanceof Error ? reason.message : 'The knowledge graph could not load'); setLoading(false); }
     });
     return () => controller.abort();
-  }, [apiRoot, offset, relationOffset, focusId, refreshToken, reload, query, trace]);
+  }, [apiRoot, offset, focusId, refreshToken, reload, query, trace]);
 
   useEffect(() => {
     if (previousExpanded.current !== expanded) {
@@ -145,7 +144,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, fo
 
   useEffect(() => {
     if (!focus?.nodeId) return;
-    externalSelection.current = focus.nodeId; fitPending.current = true; setFocusId(focus.nodeId); setRelationOffset(0);
+    externalSelection.current = focus.nodeId; fitPending.current = true; setFocusId(focus.nodeId);
   }, [focus?.nodeId, focus?.nonce]);
 
   useEffect(() => {
@@ -188,15 +187,10 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, fo
   }, [moveCamera]);
 
   const select = useCallback((node: Entity) => {
-    setSelected(node); setSelectedEdge(null); setMentionOffset(0); setMentions(null); setDetailTab('mentions'); onSelect?.(node);
+    setSelected(node); setSelectedEdge(null); setMentionOffset(0); setMentions(null); setDetailTab('mentions'); setDetailsOpen(true); onSelect?.(node);
   }, [onSelect]);
-  const explore = (entityId: string) => { fitPending.current = true; setFocusId(entityId); setRelationOffset(0); setSearch(''); };
-  const browse = () => { fitPending.current = true; setFocusId(null); setOffset(0); setRelationOffset(0); setSelected(null); setSelectedEdge(null); };
-  const page = (direction: number) => {
-    fitPending.current = true;
-    setRelationOffset(current => Math.max(0, current + direction * RELATION_PAGE));
-    setSelected(null); setSelectedEdge(null);
-  };
+  const explore = (entityId: string) => { fitPending.current = true; setFocusId(entityId); setSearch(''); };
+  const browse = () => { fitPending.current = true; setFocusId(null); setOffset(0); setSelected(null); setSelectedEdge(null); };
   const openSource = (chunkId?: string, label?: string) => { if (chunkId) onSource?.({ nodeId: chunkId, label }); };
   const sourceEntity = selectedEdge ? nodes.get(selectedEdge.source) : undefined;
   const targetEntity = selectedEdge ? nodes.get(selectedEdge.target) : undefined;
@@ -219,8 +213,6 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, fo
     }
     return shown;
   }, [view.nodes, edges, camera, size, selected?.id, focusId, hoverId]);
-  const hasPrevious = relationOffset > 0;
-  const hasNext = view.pagination.hasMoreRelationships;
 
   useEffect(() => {
     const dialog = detailsDialog.current;
@@ -237,19 +229,21 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, fo
           {mentionLoading && <p className={styles.status} role="status"><Loader2 size={14} className={styles.spin} />Loading source occurrences…</p>}
           {mentionError && <p className={styles.status} role="alert">{mentionError}<button type="button" onClick={() => setReload(value => value + 1)}>Retry</button></p>}
           {!mentionLoading && !mentionError && mentions && <><p className={styles.mentionSummary}>{mentions.counts.occurrenceCountTruncated ? 'At least ' : ''}{mentions.counts.occurrences.toLocaleString()} occurrences across {mentions.counts.documents.toLocaleString()} documents and {mentions.counts.chunks.toLocaleString()} passages</p>{selected.aliases?.length ? <p className={styles.mentionSummary}>Aliases: {selected.aliases.join(', ')}</p> : null}{mentions.mentions.map(mention => { const structured = structuredMention(mention); return <article className={styles.mention} key={mention.id}><button type="button" className={styles.sourceLink} disabled={!onSource} onClick={() => openSource(mention.chunkId, mention.documentTitle)}><span>{mention.documentTitle || 'Source document'}</span><ArrowUpRight size={13} /></button><p>{structured ? 'Structured source record · open the document to inspect its original fields.' : clip(mention.chunkText || mention.text, 320)}</p><small>{structured ? 'Structured source record' : mention.text}{mention.sourceSpans && mention.sourceSpans.length > 1 ? ` · ${mention.sourceSpans.length} source spans` : ''}</small></article>; })}{!mentions.mentions.length && <p className={styles.status}>No published source mentions are available for this entity.</p>}<div className={styles.mentionPages}><button type="button" disabled={!mentionOffset} onClick={() => setMentionOffset(value => Math.max(0, value - 8))}><ArrowLeft size={13} />Previous</button><span>{mentions.pagination.total ? `${mentions.pagination.offset + 1}–${Math.min(mentions.pagination.offset + mentions.mentions.length, mentions.pagination.total)} of ${mentions.pagination.total}` : '0 mentions'}</span><button type="button" disabled={!mentions.pagination.hasMore} onClick={() => setMentionOffset(value => value + 8)}>Next<ArrowRight size={13} /></button></div></>}
-        </> : <><p className={styles.mentionSummary}>Relationships in the loaded graph. Explore this entity to load its full neighborhood in pages.</p>{related.map(edge => <button type="button" className={styles.relationshipRow} key={edge.id} onClick={() => { setSelectedEdge(edge); setSelected(null); }}><span>{nodes.get(edge.source)?.label || 'Entity'}<b>{human(edge.label)}</b>{nodes.get(edge.target)?.label || 'Entity'}</span><small>{relationshipStatus(edge)}</small></button>)}{!related.length && <p className={styles.status}>No relationships in this page. Select Explore to check this entity’s neighborhood.</p>}</>}
+        </> : <><p className={styles.mentionSummary}>Relationships in the loaded graph. Explore this entity to focus its connections.</p>{related.map(edge => <button type="button" className={styles.relationshipRow} key={edge.id} onClick={() => { setSelectedEdge(edge); setSelected(null); setDetailsOpen(true); }}><span>{nodes.get(edge.source)?.label || 'Entity'}<b>{human(edge.label)}</b>{nodes.get(edge.target)?.label || 'Entity'}</span><small>{relationshipStatus(edge)}</small></button>)}{!related.length && <p className={styles.status}>No relationships are loaded for this entity.</p>}</>}
       </div></>}
     {selectedEdge && <div className={styles.detailBody}><div className={styles.triple}><span>{sourceEntity?.label || 'Source entity'}</span><ArrowRight size={15} /><b>{human(selectedEdge.label)}</b><ArrowRight size={15} /><span>{targetEntity?.label || 'Target entity'}</span></div>{selectedEdge.quote && <blockquote>{selectedEdge.quote}</blockquote>}<p className={styles.mentionSummary}>{native(selectedEdge) ? 'Recorded explicitly in structured source data. This is source attribution, not independent verification.' : codebaseAgent(selectedEdge) ? 'Proposed by the GPT-4.1 mini codebase agent from the cited source line. The source match was checked; the relationship meaning was not independently verified.' : 'Extracted by a local model. Check the source passage and its context before relying on this relationship.'}{typeof selectedEdge.confidence === 'number' ? ` Model score: ${selectedEdge.confidence.toFixed(3)} · uncalibrated` : ''}</p>{selectedEdge.chunkId && onSource && <button type="button" className={styles.sourceLink} onClick={() => openSource(selectedEdge.chunkId, sourceEntity?.label)}>Open source passage<ArrowUpRight size={13} /></button>}</div>}
   </section>;
 
-  return <section className={styles.root} aria-label="Knowledge graph">
+  return <section className={`${styles.root} ${expanded ? styles.fullscreen : ''}`} aria-label="Knowledge graph">
     <div className={styles.toolbar}>
-      <div className={styles.heading}><Network size={16} aria-hidden="true" /><strong>{focusId ? 'Entity neighborhood' : 'Entities & relationships'}</strong><button type="button" className={styles.iconButton} aria-label="About this graph" aria-expanded={help} onClick={() => setHelp(value => !value)}><CircleHelp size={15} /></button></div>
+      {viewSwitcher}
+      <div className={styles.heading}><Network size={16} aria-hidden="true" /><strong>{focusId ? 'Entity neighborhood' : 'Entities & relationships'}</strong></div>
       <div className={styles.tools}>
         <button type="button" className={`${styles.iconButton} ${catalogOpen ? styles.activeTool : ''}`} title="Browse all entities" aria-label="Browse all entities" aria-expanded={catalogOpen} onClick={() => setCatalogOpen(value => !value)}><List size={16} /></button>
         <label className={styles.find}><Search size={14} aria-hidden="true" /><input aria-label="Search workspace entities" placeholder="Search entities" value={search} onChange={event => setSearch(event.target.value)} /></label>
       </div>
-      {help && <div className={styles.help}><strong>A knowledge graph, with sources one click away</strong><p>Nodes are extracted entities. Arrows show directed, labelled semantic relationships. Documents and chunks are available through each entity’s source mentions.</p><p>Solid arrows come from structured source records. Dashed arrows are unverified model extractions. Dotted arrows need review. A model score is not a probability of truth.</p><p>Loaded counts describe this page. Indexed entities include entities with no relationships, while connected entities participate in at least one. Browse more entities or explore one entity’s relationships without loading the whole corpus.</p></div>}
+      <button type="button" className={styles.iconButton} aria-label="About this graph" aria-expanded={help} onClick={() => setHelp(value => !value)}><CircleHelp size={15} /></button>
+      {help && <div className={styles.help}><strong>A knowledge graph, with sources one click away</strong><p>Nodes are extracted entities. Arrows show directed, labelled semantic relationships. Documents and chunks are available through each entity’s source mentions.</p><p>Solid arrows come from structured source records. Dashed arrows are unverified model extractions. Dotted arrows need review. A model score is not a probability of truth.</p><p>The overview loads up to 20,000 relationships together. Search or explore an entity to focus the map when a workspace is larger.</p></div>}
     </div>
     {search && <div className={styles.searchResults} aria-label="Matching entities">{matching.slice(0, 12).map(node => <button type="button" key={node.id} onClick={() => { select(node); explore(node.id); setCatalogOpen(false); }}>{node.label}<small>{human(node.entityType)}</small></button>)}{!matching.length && <span>No matching entities. Try another name or type.</span>}{matching.length > 12 && <span>Keep typing to narrow {matching.length} matches.</span>}</div>}
     {catalogOpen && <section className={styles.catalog} aria-label="Workspace entity catalog"><header><strong>Workspace entities</strong><button type="button" className={styles.iconButton} aria-label="Close entity catalog" onClick={() => setCatalogOpen(false)}><X size={14} /></button></header><div className={styles.catalogList}>{(view.entityPage || view.nodes).map(node => <button type="button" key={node.id} onClick={() => { select(node); explore(node.id); setCatalogOpen(false); }}><strong>{node.label}</strong><span>{human(node.entityType)}</span><small>{node.documentCount ?? 0} documents · {node.mentionCount ?? 0} mentions</small></button>)}{!loading && !(view.entityPage || view.nodes).length && <p>No entities match this search.</p>}</div><div className={styles.mentionPages}><button type="button" disabled={!offset || loading} onClick={() => setOffset(value => Math.max(0, value - ENTITY_PAGE))}><ArrowLeft size={13} />Previous</button><span>{view.pagination.entityTotal ? `${offset + 1}–${Math.min(offset + (view.entityPage || view.nodes).length, view.pagination.entityTotal)} of ${view.pagination.entityTotal.toLocaleString()}` : '0 entities'}</span><button type="button" disabled={!view.pagination.hasMoreEntities || loading} onClick={() => setOffset(value => value + ENTITY_PAGE)}>Next<ArrowRight size={13} /></button></div></section>}
@@ -277,10 +271,10 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, fo
             const midX = (sourceX + targetX) / 2 - uy * bend, midY = (sourceY + targetY) / 2 + ux * bend;
             const path = edge.source === edge.target ? `M ${source.x - 5} ${source.y - 8} C ${source.x - 65} ${source.y - 90} ${source.x + 65} ${source.y - 90} ${source.x + 5} ${source.y - 8}` : `M ${sourceX} ${sourceY} Q ${midX} ${midY} ${targetX} ${targetY}`;
             const faded = selected && edge.source !== selected.id && edge.target !== selected.id;
-            return <g key={edge.id} data-graph-control="edge" className={`${styles.edge} ${native(edge) && !review(edge) ? styles.native : review(edge) ? styles.review : styles.unverified} ${tracedEdges.has(edge.id) ? styles.tracedEdge : ''} ${selectedEdge?.id === edge.id ? styles.activeEdge : ''} ${faded && !tracedEdges.has(edge.id) ? styles.faded : ''}`} role="button" tabIndex={0} aria-label={`${source.label} ${human(edge.label)} ${target.label}. ${relationshipStatus(edge)}`} onMouseEnter={() => setHoverId(edge.id)} onMouseLeave={() => setHoverId(null)} onClick={() => { setSelectedEdge(edge); setSelected(null); }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedEdge(edge); setSelected(null); } }}>
+            return <g key={edge.id} data-graph-control="edge" className={`${styles.edge} ${native(edge) && !review(edge) ? styles.native : review(edge) ? styles.review : styles.unverified} ${tracedEdges.has(edge.id) ? styles.tracedEdge : ''} ${selectedEdge?.id === edge.id ? styles.activeEdge : ''} ${faded && !tracedEdges.has(edge.id) ? styles.faded : ''}`} role="button" tabIndex={0} aria-label={`${source.label} ${human(edge.label)} ${target.label}. ${relationshipStatus(edge)}`} onMouseEnter={() => setHoverId(edge.id)} onMouseLeave={() => setHoverId(null)} onClick={() => { setSelectedEdge(edge); setSelected(null); setDetailsOpen(true); }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedEdge(edge); setSelected(null); setDetailsOpen(true); } }}>
               <title>{`${source.label} → ${human(edge.label)} → ${target.label}\n${relationshipStatus(edge)}`}</title>
               <path className={styles.edgeHit} d={path} /><path className={styles.edgeLine} d={path} markerEnd={`url(#${id}-arrow)`} />
-              {(edges.length <= RELATION_PAGE || selectedEdge?.id === edge.id || hoverId === edge.id) && <text className={styles.edgeLabel} style={{ fontSize: 10 / camera.zoom, strokeWidth: 4 / camera.zoom }} x={midX} y={midY - 5 / camera.zoom} textAnchor="middle">{clip(human(edge.label), 25)}</text>}
+              {(edges.length <= 80 || selectedEdge?.id === edge.id || hoverId === edge.id) && <text className={styles.edgeLabel} style={{ fontSize: 10 / camera.zoom, strokeWidth: 4 / camera.zoom }} x={midX} y={midY - 5 / camera.zoom} textAnchor="middle">{clip(human(edge.label), 25)}</text>}
             </g>;
           })}
           {view.nodes.map(node => <g key={node.id} data-graph-control="node" role="button" tabIndex={0} aria-label={`${node.label}, ${human(node.entityType)}, ${node.mentionCount ?? 0} mentions`} className={`${styles.node} ${styles[`hue${hue(node.entityType)}`]} ${tracedNodes.has(node.id) ? styles.tracedNode : ''} ${selected?.id === node.id ? styles.selectedNode : ''} ${search && !matching.some(match => match.id === node.id) && !tracedNodes.has(node.id) ? styles.faded : ''}`} transform={`translate(${node.x} ${node.y})`} onMouseEnter={() => setHoverId(node.id)} onMouseLeave={() => setHoverId(null)} onClick={() => select(node)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); select(node); } }}>
@@ -291,13 +285,12 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, fo
       {loading && <div className={styles.loading} role="status"><Loader2 size={15} className={styles.spin} />Loading entities & relationships…</div>}
       {error && <div className={styles.empty} role="alert"><strong>Knowledge graph unavailable</strong><p>{error}</p><button type="button" onClick={() => setReload(value => value + 1)}>Retry graph</button></div>}
       {!loading && !error && !view.nodes.length && <div className={styles.empty}><Network size={26} /><strong>{view.pagination.entityTotal ? 'No semantic relationships in this view' : 'No entities to display yet'}</strong><p>{view.pagination.entityTotal ? 'Search or browse the entity catalog, then select an entity to explore its relationships and source mentions.' : 'Published entities will appear here after ingestion. Source files remain available in the Sources view.'}</p>{!!view.pagination.entityTotal && <button type="button" onClick={() => setCatalogOpen(true)}>Browse entities</button>}</div>}
-      {!loading && !error && !!view.nodes.length && !edges.length && <div className={styles.noEdges}>No semantic relationships on this page · select an entity to explore its neighborhood</div>}
-      <div className={styles.controls} aria-label="Graph camera controls"><button type="button" aria-label="Zoom in" onClick={() => zoom(1.35)}><Plus size={16} /></button><button type="button" aria-label="Zoom out" onClick={() => zoom(1 / 1.35)}><Minus size={16} /></button><button type="button" aria-label="Fit graph" onClick={() => fit()}><Focus size={16} /></button></div>
+      {!loading && !error && !!view.nodes.length && !edges.length && <div className={styles.noEdges}>No semantic relationships are loaded here · select an entity to explore its neighborhood</div>}
+      <div className={styles.controls} aria-label="Graph camera controls"><button type="button" aria-label="Zoom in" onClick={() => zoom(1.35)}><Plus size={16} /></button><button type="button" aria-label="Zoom out" onClick={() => zoom(1 / 1.35)}><Minus size={16} /></button>{onExpand && <button type="button" aria-label={expanded ? 'Close graph fullscreen' : 'Open graph fullscreen'} title={expanded ? 'Close fullscreen' : 'Expand graph'} onClick={onExpand}>{expanded ? <Minimize2 size={15} /> : <Expand size={15} />}</button>}<button type="button" aria-label="Fit graph" onClick={() => fit()}><Focus size={16} /></button></div>
     </div>
-    {(selected || selectedEdge) && developmentMode && renderDetails()}
     <dialog ref={detailsDialog} className={styles.detailsDialog} onClose={() => setDetailsOpen(false)} onClick={event => { if (event.target === event.currentTarget) detailsDialog.current?.close(); }} aria-label={selected ? `${selected.label} details` : 'Relationship details'}>
       {(selected || selectedEdge) && renderDetails(true)}
     </dialog>
-    <footer className={styles.footer}><div className={styles.pageStatus} role="status">{selected ? <span className={styles.selectedStatus}><strong className={styles.selectedName} title={selected.label}>{selected.label}</strong><span className={styles.selectedSeparator}>·</span><button type="button" className={styles.readMore} onClick={() => setDetailsOpen(true)}>Read more</button></span> : selectedEdge ? <span className={styles.selectedStatus}><strong className={styles.selectedName} title={`${sourceEntity?.label || 'Entity'} ${human(selectedEdge.label)} ${targetEntity?.label || 'Entity'}`}>{sourceEntity?.label || 'Entity'} {human(selectedEdge.label)} {targetEntity?.label || 'Entity'}</strong><span className={styles.selectedSeparator}>·</span><button type="button" className={styles.readMore} onClick={() => setDetailsOpen(true)}>Read more</button></span> : <><span>{view.pagination.relationshipTotal ? `Relationships ${relationOffset + 1}–${Math.min(relationOffset + edges.length, view.pagination.relationshipTotal)} of ${view.pagination.relationshipTotal.toLocaleString()}` : 'No relationships loaded'}</span><small>{view.nodes.length.toLocaleString()} entities in this page · {view.pagination.connectedEntityTotal == null ? 'Connected total unavailable' : `${view.pagination.connectedEntityTotal.toLocaleString()} connected entities`} · {view.pagination.entityTotal.toLocaleString()} indexed entities</small></>}</div><div className={styles.paging}>{focusId && <button type="button" title="Return to the graph overview" onClick={browse}>Overview</button>}<button type="button" aria-label="Previous relationship page" disabled={!hasPrevious || loading} onClick={() => page(-1)}><ArrowLeft size={14} /></button><button type="button" aria-label="Next relationship page" disabled={!hasNext || loading} onClick={() => page(1)}><ArrowRight size={14} /></button></div></footer>
+    {developmentMode && <footer className={styles.footer}><span>{view.nodes.length.toLocaleString()} entities · {edges.length.toLocaleString()} relationships{view.layoutTruncated ? ' · overview capped at 20,000 relationships' : ''}</span>{focusId && <button type="button" className={styles.readMore} onClick={browse}>Return to full graph</button>}</footer>}
   </section>;
 }

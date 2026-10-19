@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowLeft, ArrowUp, ArrowUpRight, ChevronDown, FileText, Loader2, Maximize2, Minimize2, MessageSquare, Moon, Network, Pause, PanelLeftClose, PanelLeftOpen, Paperclip, Play, Plus, Settings2, Sun, Upload, X } from 'lucide-react';
+import { ArrowLeft, ArrowUp, ArrowUpRight, ChevronDown, FileText, Loader2, MessageSquare, Moon, Network, Pause, PanelLeftClose, PanelLeftOpen, Paperclip, Play, Plus, Settings2, Sun, Upload, X } from 'lucide-react';
 import type { ImperativePanelHandle } from 'react-resizable-panels';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { Switch } from '@/components/ui/switch';
@@ -46,7 +46,7 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const [dark, setDark] = useState(false);
   const [graphView, setGraphView] = useState<'knowledge' | 'sources'>('sources');
   const [graphTrace, setGraphTrace] = useState<{assertionIds: string[]; nonce: number} | null>(null);
-  const [explorerExpanded, setExplorerExpanded] = useState(false);
+  const [graphFullscreen, setGraphFullscreen] = useState(false);
   const [graphCompact, setGraphCompact] = useState(false);
   const [configurationOpen, setConfigurationOpen] = useState(false);
   const [uploadRequest, setUploadRequest] = useState(0);
@@ -70,7 +70,6 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const messages = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const nodeDialog = useRef<HTMLDialogElement>(null);
-  const explorerDialog = useRef<HTMLDialogElement>(null);
   const pendingChunk = useRef<string | undefined>(undefined);
   const filePanel = useRef<ImperativePanelHandle>(null);
   const graphPanel = useRef<ImperativePanelHandle>(null);
@@ -126,19 +125,13 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   }, [selectedNode, workspaceApi]);
 
   useEffect(() => {
-    const dialog = explorerDialog.current;
-    if (!dialog) return;
-    if (explorerExpanded) {
-      if (dialog.open) dialog.close();
-      dialog.showModal();
-    } else if (dialog.matches(':modal')) {
-      dialog.close();
-      dialog.show();
-    } else if (!dialog.open) dialog.show();
+    if (!graphFullscreen) return;
     const previousOverflow = window.document.body.style.overflow;
-    if (explorerExpanded) window.document.body.style.overflow = 'hidden';
-    return () => { window.document.body.style.overflow = previousOverflow; };
-  }, [explorerExpanded]);
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') setGraphFullscreen(false); };
+    window.document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', close);
+    return () => { window.document.body.style.overflow = previousOverflow; window.removeEventListener('keydown', close); };
+  }, [graphFullscreen]);
 
   useEffect(() => { messages.current?.scrollTo({ top: messages.current.scrollHeight, behavior: 'smooth' }); }, [turns, busy]);
   useEffect(() => {
@@ -220,7 +213,8 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const selectCitation = (source: ChatSource) => { setGraphView('sources'); graphPanel.current?.resize(65); setPipelineFocus(source); setDocumentId(source.documentId); setMapFocus({nodeId: source.chunkId || source.documentId, nonce: Date.now()}); setReaderRequest({documentId:source.documentId,chunkId:source.chunkId,jobId:source.jobId,nonce:Date.now()}); };
   const selectNode = (node: MapNode) => { if (node.type === 'entity') { setSelectedNode(null); setGraphView('knowledge'); setMapFocus({nodeId: node.id, nonce: Date.now()}); return; } if (node.documentId) focusSource(node.documentId, node.chunkId); setSelectedId(node.id); setSelectedNode(node); };
   const showFiles = () => filePanel.current?.resize(85);
-  const showGraph = () => graphPanel.current?.resize(explorerExpanded ? 85 : 70);
+  const showGraph = () => graphPanel.current?.resize(70);
+  const graphSwitcher = <div className="ce-map-modes" role="group" aria-label="Graph view"><button aria-pressed={graphView === 'knowledge'} onClick={() => { setGraphView('knowledge'); showGraph(); }}>Knowledge graph</button><button aria-pressed={graphView === 'sources'} onClick={() => setGraphView('sources')}>Source graph</button></div>;
   const upload = () => { setUploadRequest(previous => previous + 1); };
   const controlIngestion = async (action: 'pause' | 'resume') => {
     setQueueControlBusy(action); setQueueControlError(''); setQueueControlStatus('');
@@ -338,7 +332,7 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
         </ResizablePanel>
         <ResizableHandle withHandle className="ce-resize" />
         <ResizablePanel defaultSize={48} minSize={28} className="ce-explorer-panel">
-          <dialog open ref={explorerDialog} className={`ce-explorer-shell ${explorerExpanded ? 'is-expanded' : ''}`} aria-labelledby="source-explorer-title" onCancel={event => { event.preventDefault(); if (explorerExpanded) { setExplorerExpanded(false); graphPanel.current?.resize(70); } }}>
+          <div className="ce-explorer-shell" aria-labelledby="source-explorer-title">
           <div className="ce-explorer-heading"><div className="ce-workspace-title"><h2 id="source-explorer-title" className="ce-project-name">{project?.name || 'Workspace'}</h2><span className={`ce-live-processing ${runningJob ? 'is-working' : ''}`} role="status" aria-live="polite" title={liveProcessingStatus}>{liveProcessingStatus}</span></div><div className="ce-explorer-actions"><button className="ce-queue-control" onClick={() => void controlIngestion('pause')} disabled={!project || queueControlBusy !== null || queuePaused === true} aria-label="Pause ingestion">{queueControlBusy === 'pause' ? <Loader2 size={14} className="spinning" /> : <Pause size={14} />}<span>Pause ingestion</span></button><button className="ce-queue-control" onClick={() => void controlIngestion('resume')} disabled={!project || queueControlBusy !== null || queuePaused === false} aria-label="Resume ingestion">{queueControlBusy === 'resume' ? <Loader2 size={14} className="spinning" /> : <Play size={14} />}<span>Resume ingestion</span></button><button className="ce-add-files" onClick={upload} disabled={!project}><Plus size={16} />Add files</button></div></div>
           {(queueControlError || queueControlStatus) && <div className={`ce-queue-control-message ${queueControlError ? 'is-error' : ''}`} role={queueControlError ? 'alert' : 'status'} aria-live="polite">{queueControlError || queueControlStatus}</div>}
           {projectError && <p className="ce-inline-error" role="alert">{projectError} <a href="/">Return to projects</a></p>}
@@ -349,12 +343,15 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
               </ResizablePanel>
               <ResizableHandle withHandle className="ce-source-resize" aria-label="Resize files and graph" />
               <ResizablePanel ref={graphPanel} defaultSize={70} minSize={10} onResize={size => setGraphCompact(size < 20)} className={`ce-project-graph-panel ${graphCompact ? 'is-compact' : ''}`}>
-              <div className="ce-map-toolbar"><div className="ce-map-modes" role="group" aria-label="Graph view"><button aria-pressed={graphView === 'knowledge'} onClick={() => { setGraphView('knowledge'); showGraph(); }}>Knowledge graph</button><button aria-pressed={graphView === 'sources'} onClick={() => setGraphView('sources')}>Source graph</button></div><button className="ce-icon" onClick={() => { setExplorerExpanded(value => !value); graphPanel.current?.resize(explorerExpanded ? 70 : 85); }} aria-label={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'} title={explorerExpanded ? 'Restore source explorer' : 'Expand source explorer'}>{explorerExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button></div>
-              <div className="ce-project-graph-content">{graphView === 'knowledge' ? <KnowledgeGraph apiRoot={root} refreshToken={graphVersion} expanded={explorerExpanded} focus={mapFocus} trace={graphTrace} onSource={target => { setGraphView('sources'); setMapFocus({nodeId: target.nodeId, nonce: Date.now()}); graphPanel.current?.resize(75); }} /> : <GraphMap apiRoot={root} refreshToken={graphVersion} focus={mapFocus} onSelect={selectNode} onFocus={target => { if (target.documentId) focusSource(target.documentId, target.chunkId); }} />}{chatConfig?.coverage.publishedDocuments === 0 && <div className="ce-project-graph-empty"><p>Your graph starts here.<br />Connections appear as source files finish ingestion.</p></div>}</div>
+              {graphView === 'sources' && <div className="ce-map-toolbar">{graphSwitcher}</div>}
+              <div className={`ce-project-graph-content${graphFullscreen && graphView === 'sources' ? ' is-fullscreen' : ''}`}>
+                {graphView === 'knowledge' ? <KnowledgeGraph apiRoot={root} refreshToken={graphVersion} expanded={graphFullscreen} onExpand={() => setGraphFullscreen(value => !value)} viewSwitcher={graphSwitcher} focus={mapFocus} trace={graphTrace} onSource={target => { setGraphView('sources'); setMapFocus({nodeId: target.nodeId, nonce: Date.now()}); graphPanel.current?.resize(75); }} /> : <GraphMap apiRoot={root} refreshToken={graphVersion} focus={mapFocus} expanded={graphFullscreen} onExpand={() => setGraphFullscreen(value => !value)} onSelect={selectNode} onFocus={target => { if (target.documentId) focusSource(target.documentId, target.chunkId); }} />}
+                {chatConfig?.coverage.publishedDocuments === 0 && <div className="ce-project-graph-empty"><p>Your graph starts here.<br />Connections appear as source files finish ingestion.</p></div>}
+              </div>
               </ResizablePanel>
             </ResizablePanelGroup>
           </div>
-          </dialog>
+          </div>
         </ResizablePanel>
       </ResizablePanelGroup>
     </main>
