@@ -13,7 +13,7 @@ type Mentions = { entity: Entity; mentions: Mention[]; counts: { documents: numb
 type Props = { apiRoot: string; refreshToken?: number; expanded?: boolean; focus?: { nodeId: string; nonce: number } | null; trace?: { assertionIds: string[]; nonce: number } | null; onSelect?: (node: Entity) => void; onSource?: (source: { nodeId: string; label?: string }) => void };
 type Camera = { x: number; y: number; zoom: number };
 const ENTITY_PAGE = 40;
-const RELATION_PAGE = 60;
+const RELATION_PAGE = 20;
 const EMPTY: KnowledgeView = { nodes: [], edges: [], pagination: { entityTotal: 0, entityOffset: 0, entityLimit: 60, hasMoreEntities: false, relationshipTotal: 0, relationshipOffset: 0, relationshipLimit: 100, hasMoreRelationships: false } };
 const clip = (value: string, length = 30) => value.length > length ? `${value.slice(0, length - 1)}…` : value;
 const human = (value: string) => value.replace(/_/g, ' ');
@@ -194,9 +194,8 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, fo
   const browse = () => { fitPending.current = true; setFocusId(null); setOffset(0); setRelationOffset(0); setSelected(null); setSelectedEdge(null); };
   const page = (direction: number) => {
     fitPending.current = true;
-    if (focusId) setRelationOffset(current => Math.max(0, current + direction * RELATION_PAGE));
-    else { setOffset(current => Math.max(0, current + direction * ENTITY_PAGE)); setRelationOffset(0); }
-    setSelected(null); setSelectedEdge(null); if (!focusId) setCatalogOpen(true);
+    setRelationOffset(current => Math.max(0, current + direction * RELATION_PAGE));
+    setSelected(null); setSelectedEdge(null);
   };
   const openSource = (chunkId?: string, label?: string) => { if (chunkId) onSource?.({ nodeId: chunkId, label }); };
   const sourceEntity = selectedEdge ? nodes.get(selectedEdge.source) : undefined;
@@ -209,7 +208,7 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, fo
     edges.forEach(edge => { degrees.set(edge.source, (degrees.get(edge.source) || 0) + 1); degrees.set(edge.target, (degrees.get(edge.target) || 0) + 1); });
     const priority = (node: Entity) => (node.id === selected?.id || node.id === hoverId || node.id === focusId ? 10000 : 0) + (degrees.get(node.id) || 0) * 100 + Math.log1p(node.mentionCount || 0);
     const prioritized = [...view.nodes].sort((a, b) => priority(b) - priority(a) || a.label.localeCompare(b.label));
-    const labelBudget = Math.max(6, Math.min(16, Math.floor(size.width * size.height / 18000)));
+    const labelBudget = Math.max(12, Math.min(22, Math.floor(size.width * size.height / 14000)));
     for (const node of prioritized) {
       if (shown.size >= labelBudget && node.id !== selected?.id && node.id !== hoverId) continue;
       const x = (node.x - camera.x) * camera.zoom + size.width / 2;
@@ -220,8 +219,8 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, fo
     }
     return shown;
   }, [view.nodes, edges, camera, size, selected?.id, focusId, hoverId]);
-  const hasPrevious = focusId ? relationOffset > 0 : offset > 0;
-  const hasNext = focusId ? view.pagination.hasMoreRelationships : view.pagination.hasMoreEntities;
+  const hasPrevious = relationOffset > 0;
+  const hasNext = view.pagination.hasMoreRelationships;
 
   useEffect(() => {
     const dialog = detailsDialog.current;
@@ -274,14 +273,14 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, fo
             const dx = target.x - source.x, dy = target.y - source.y, length = Math.hypot(dx, dy) || 1;
             const ux = dx / length, uy = dy / length;
             const sourceX = source.x + ux * 10, sourceY = source.y + uy * 10, targetX = target.x - ux * 13, targetY = target.y - uy * 13;
-            const bend = edge.source === edge.target ? 65 : (index % 3 - 1) * 18;
+            const bend = edge.source === edge.target ? 65 : (index % 5 - 2) * 30;
             const midX = (sourceX + targetX) / 2 - uy * bend, midY = (sourceY + targetY) / 2 + ux * bend;
             const path = edge.source === edge.target ? `M ${source.x - 5} ${source.y - 8} C ${source.x - 65} ${source.y - 90} ${source.x + 65} ${source.y - 90} ${source.x + 5} ${source.y - 8}` : `M ${sourceX} ${sourceY} Q ${midX} ${midY} ${targetX} ${targetY}`;
             const faded = selected && edge.source !== selected.id && edge.target !== selected.id;
             return <g key={edge.id} data-graph-control="edge" className={`${styles.edge} ${native(edge) && !review(edge) ? styles.native : review(edge) ? styles.review : styles.unverified} ${tracedEdges.has(edge.id) ? styles.tracedEdge : ''} ${selectedEdge?.id === edge.id ? styles.activeEdge : ''} ${faded && !tracedEdges.has(edge.id) ? styles.faded : ''}`} role="button" tabIndex={0} aria-label={`${source.label} ${human(edge.label)} ${target.label}. ${relationshipStatus(edge)}`} onMouseEnter={() => setHoverId(edge.id)} onMouseLeave={() => setHoverId(null)} onClick={() => { setSelectedEdge(edge); setSelected(null); }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedEdge(edge); setSelected(null); } }}>
               <title>{`${source.label} → ${human(edge.label)} → ${target.label}\n${relationshipStatus(edge)}`}</title>
               <path className={styles.edgeHit} d={path} /><path className={styles.edgeLine} d={path} markerEnd={`url(#${id}-arrow)`} />
-              {(selectedEdge?.id === edge.id || hoverId === edge.id) && <text className={styles.edgeLabel} style={{ fontSize: 10 / camera.zoom, strokeWidth: 4 / camera.zoom }} x={midX} y={midY - 5 / camera.zoom} textAnchor="middle">{clip(human(edge.label), 25)}</text>}
+              {(edges.length <= RELATION_PAGE || selectedEdge?.id === edge.id || hoverId === edge.id) && <text className={styles.edgeLabel} style={{ fontSize: 10 / camera.zoom, strokeWidth: 4 / camera.zoom }} x={midX} y={midY - 5 / camera.zoom} textAnchor="middle">{clip(human(edge.label), 25)}</text>}
             </g>;
           })}
           {view.nodes.map(node => <g key={node.id} data-graph-control="node" role="button" tabIndex={0} aria-label={`${node.label}, ${human(node.entityType)}, ${node.mentionCount ?? 0} mentions`} className={`${styles.node} ${styles[`hue${hue(node.entityType)}`]} ${tracedNodes.has(node.id) ? styles.tracedNode : ''} ${selected?.id === node.id ? styles.selectedNode : ''} ${search && !matching.some(match => match.id === node.id) && !tracedNodes.has(node.id) ? styles.faded : ''}`} transform={`translate(${node.x} ${node.y})`} onMouseEnter={() => setHoverId(node.id)} onMouseLeave={() => setHoverId(null)} onClick={() => select(node)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); select(node); } }}>
@@ -299,6 +298,6 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, fo
     <dialog ref={detailsDialog} className={styles.detailsDialog} onClose={() => setDetailsOpen(false)} onClick={event => { if (event.target === event.currentTarget) detailsDialog.current?.close(); }} aria-label={selected ? `${selected.label} details` : 'Relationship details'}>
       {(selected || selectedEdge) && renderDetails(true)}
     </dialog>
-    <footer className={styles.footer}><div className={styles.pageStatus} role="status">{selected ? <span className={styles.selectedStatus}><strong className={styles.selectedName} title={selected.label}>{selected.label}</strong><span className={styles.selectedSeparator}>·</span><button type="button" className={styles.readMore} onClick={() => setDetailsOpen(true)}>Read more</button></span> : selectedEdge ? <span className={styles.selectedStatus}><strong className={styles.selectedName} title={`${sourceEntity?.label || 'Entity'} ${human(selectedEdge.label)} ${targetEntity?.label || 'Entity'}`}>{sourceEntity?.label || 'Entity'} {human(selectedEdge.label)} {targetEntity?.label || 'Entity'}</strong><span className={styles.selectedSeparator}>·</span><button type="button" className={styles.readMore} onClick={() => setDetailsOpen(true)}>Read more</button></span> : <><span>{view.nodes.length.toLocaleString()} entities · {edges.length.toLocaleString()} relationships loaded</span><small>{view.pagination.connectedEntityTotal == null ? 'Connected total unavailable' : `${view.pagination.connectedEntityTotal.toLocaleString()} entities with relationships`} · {view.pagination.entityTotal.toLocaleString()} indexed entities · {view.pagination.relationshipTotal.toLocaleString()} {focusId ? 'relationships in neighborhood' : 'relationships total'}</small></>}</div><div className={styles.paging}>{focusId && <button type="button" title="Return to the graph overview" onClick={browse}>Overview</button>}<button type="button" aria-label={focusId ? 'Previous relationships' : 'Previous entities'} disabled={!hasPrevious || loading} onClick={() => page(-1)}><ArrowLeft size={14} /></button><button type="button" aria-label={focusId ? 'Next relationships' : 'Next entities'} disabled={!hasNext || loading} onClick={() => page(1)}><ArrowRight size={14} /></button></div></footer>
+    <footer className={styles.footer}><div className={styles.pageStatus} role="status">{selected ? <span className={styles.selectedStatus}><strong className={styles.selectedName} title={selected.label}>{selected.label}</strong><span className={styles.selectedSeparator}>·</span><button type="button" className={styles.readMore} onClick={() => setDetailsOpen(true)}>Read more</button></span> : selectedEdge ? <span className={styles.selectedStatus}><strong className={styles.selectedName} title={`${sourceEntity?.label || 'Entity'} ${human(selectedEdge.label)} ${targetEntity?.label || 'Entity'}`}>{sourceEntity?.label || 'Entity'} {human(selectedEdge.label)} {targetEntity?.label || 'Entity'}</strong><span className={styles.selectedSeparator}>·</span><button type="button" className={styles.readMore} onClick={() => setDetailsOpen(true)}>Read more</button></span> : <><span>{view.pagination.relationshipTotal ? `Relationships ${relationOffset + 1}–${Math.min(relationOffset + edges.length, view.pagination.relationshipTotal)} of ${view.pagination.relationshipTotal.toLocaleString()}` : 'No relationships loaded'}</span><small>{view.nodes.length.toLocaleString()} entities in this page · {view.pagination.connectedEntityTotal == null ? 'Connected total unavailable' : `${view.pagination.connectedEntityTotal.toLocaleString()} connected entities`} · {view.pagination.entityTotal.toLocaleString()} indexed entities</small></>}</div><div className={styles.paging}>{focusId && <button type="button" title="Return to the graph overview" onClick={browse}>Overview</button>}<button type="button" aria-label="Previous relationship page" disabled={!hasPrevious || loading} onClick={() => page(-1)}><ArrowLeft size={14} /></button><button type="button" aria-label="Next relationship page" disabled={!hasNext || loading} onClick={() => page(1)}><ArrowRight size={14} /></button></div></footer>
   </section>;
 }
