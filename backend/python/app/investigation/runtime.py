@@ -1,6 +1,7 @@
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -16,7 +17,7 @@ from app.retrieval.routes import execute
 from .contracts import Report, report_references
 
 
-POLICY = """You are Argus. Call one tool at a time or return the report schema without hidden reasoning.
+POLICY = """You are Argus. Call independent tools together when their inputs are already known, or return the report schema without hidden reasoning. Wait for entity resolution or path discovery before calling tools that need their IDs. Do not issue duplicate or speculative calls merely because parallel calls are available.
 For tool questions, first inspect_available_tools; answer only from its registry. An unqualified request for all tools means all agent-callable tools, superseding earlier filtered lists. Do not invent tools or run source searches for catalog questions.
 Every source question uses GraphRAG: search_sources follows graph relationships from entities mentioned in its retrieved passages and attempts a path between seed nodes from different passages. The configured hop limit applies to graph exploration and path tools; choose useful queries and additional calls from the question and previous results within this limit and the run budgets. Explain this automatic graph step when useful; never present passage-only search as GraphRAG. Resolve names before using opaque entity IDs. Multiple identities may match one name. For named endpoints, multi-hop, or path questions, call path_between after resolving both names; questions phrased as “trace how X reaches Y” are path questions too. Review returned hops with review_path and read_chunks when the source context matters. If a hop is unsupported, ambiguous, or irrelevant, backtrack with path_between and exclude_assertion_ids or choose another identity. A route through a shared generic utility may be structurally real without explaining the requested relationship; label it as a candidate and answer from source passages when needed. The saved LangGraph thread retains prior tool results; revisit them before deciding what to try next. For structural ranking use load_bearing. Recent_changes reports indexing events, not Git commits. Tool names do not prove causal impact, runtime use or ownership. Leave path predicates empty unless copied exactly from a graph result. Cite every reported hop and state bounded-search truncation. Do not claim a multi-hop path without a successful path_between result.
 Check every requested subject, field and constraint before finishing. Use graph tools for documented directed relationships, then verify source support. Preserve predicates, direction, conditions, negation and ambiguity. Extraction fallback can leave facts outside the graph: consult source passages. Read clipped context when needed. Bounded hits never prove exhaustive absence; report remaining gaps.
@@ -454,7 +455,7 @@ class Investigation:
                 definition = report_tool()["function"]
                 response_options = {"text": {"format": {"type": "json_schema", "name": "ArgusReport", "schema": definition["parameters"], "strict": True}}}
                 if definitions:
-                    response_options.update(tools=[{"type": "function", **definition["function"]} for definition in definitions], tool_choice="auto", parallel_tool_calls=False)
+                    response_options.update(tools=[{"type": "function", **definition["function"]} for definition in definitions], tool_choice="auto", parallel_tool_calls=True)
                 reasoning_options = {"reasoning": {"effort": "minimal"}, "include": ["reasoning.encrypted_content"]} if self.config["chatModel"].lower().startswith("gpt-5") else {"temperature": 0}
                 response = client.responses.create(model=self.config["chatModel"], input=inputs, max_output_tokens=self.limits["outputTokens"], store=False, **reasoning_options, **response_options)
                 if response.status != "completed":
@@ -472,7 +473,7 @@ class Investigation:
                 definition = report_tool()["function"]
                 response_options = {"response_format": {"type": "json_schema", "json_schema": {"name": "ArgusReport", "schema": definition["parameters"], "strict": True}}}
                 if definitions:
-                    response_options.update(tools=definitions, tool_choice="auto", parallel_tool_calls=False)
+                    response_options.update(tools=definitions, tool_choice="auto", parallel_tool_calls=True)
                 response = client.chat.completions.create(model=self.config["chatModel"], messages=messages, **response_options, **options)
         if not response.choices or response.choices[0].finish_reason == "length":
             raise ValueError("The model reached its response limit. Resume or narrow the question.")
@@ -495,8 +496,6 @@ class Investigation:
         message, usage = self.model_call(messages, definitions)
         self.record_usage(usage)
         calls = message.get("tool_calls", [])
-        if len(calls) > 1:
-            raise ValueError("The model must select one approved tool at a time")
         if not calls and not message.get("content"):
             raise ValueError("The model returned an empty response")
         report = None
@@ -531,20 +530,13 @@ class Investigation:
             raise ValueError("Use only the application-assigned source references")
         return report
 
-    def tools(self, state):
-        self.check_time()
-        call = state["pending"][0]
+    def prepare_pending_call(self, call):
         name = call["function"]["name"]
         arguments = json.loads(call["function"]["arguments"])
-        if name == "finish_report":
-            report = self.check_report(arguments, state)
-            return {**state, "pending": [], "report": report.model_dump()}
         if name not in AGENT_TOOLS and name != "inspect_available_tools":
             raise ValueError("The model selected an unavailable tool")
         if name == "inspect_available_tools" and not asks_tool_catalog(self.request["query"]):
             raise ValueError("The tool catalog is only available for explicit tool questions")
-        if state["tool_count"] >= self.limits["toolCalls"]:
-            raise RunBudgetReached("The investigation reached its tool limit")
         validation_error = None
         if name == "inspect_available_tools":
             if arguments:
@@ -561,19 +553,24 @@ class Investigation:
             arguments = {**arguments, "max_depth": min(arguments.get("max_depth", hop_limit), hop_limit)}
         elif name in ("expand_connections", "blast_radius"):
             arguments = {**arguments, "depth": min(arguments.get("depth", hop_limit), hop_limit)}
-        identity = json.dumps([name, arguments], sort_keys=True)
+        return {"name": name, "arguments": arguments, "identity": json.dumps([name, arguments], sort_keys=True), "call_id": call["id"], "validation_error": validation_error}
+
+    def execute_pending_call(self, prepared, duplicate):
+        name = prepared["name"]
+        arguments = prepared["arguments"]
+        call_id = prepared["call_id"]
         event = None
-        if identity in state["seen_calls"]:
+        if duplicate:
             result = {"outcome": "duplicate_call", "items": [], "warning": "This identical tool request already ran. Use the earlier result or finish."}
+            event = {"tool": name, "callId": call_id, "outcome": "duplicate_call", "count": 0, "durationMs": 0, "cached": False, "retrievalRunId": None, "warnings": [result["warning"]]}
         else:
             with connection() as conn:
-                cached = conn.execute("SELECT payload FROM chat_tool_results WHERE run_id=%s AND call_id=%s", (self.id, call["id"])).fetchone()
-            self.emit("tool_start", {"tool": name, "callId": call["id"], "arguments": arguments})
+                cached = conn.execute("SELECT payload FROM chat_tool_results WHERE run_id=%s AND call_id=%s", (self.id, call_id)).fetchone()
             started = time.monotonic()
             if cached:
                 result = cached["payload"]
-            elif validation_error:
-                result = {"outcome": "invalid_arguments", "items": [], "inputError": True, "error": validation_error, "recovery": "Correct the arguments using the tool schema and retry."}
+            elif prepared["validation_error"]:
+                result = {"outcome": "invalid_arguments", "items": [], "inputError": True, "error": prepared["validation_error"], "recovery": "Correct the arguments using the tool schema and retry."}
             elif name == "inspect_available_tools":
                 names = list(AGENT_TOOLS)
                 result = {"outcome": "answered", "items": [{"name": item} for item in names], "retrievalToolCount": len(names), "retrievalToolNames": ", ".join(names), "scope": "Agent-callable tools over published semantic sources only"}
@@ -581,17 +578,46 @@ class Investigation:
                 result = self.tool_call(name, arguments)
             if not cached:
                 with connection() as conn:
-                    conn.execute("INSERT INTO chat_tool_results(run_id,call_id,payload) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING", (self.id, call["id"], Jsonb(result)))
-            event = {"tool": name, "callId": call["id"], "outcome": result.get("outcome"), "count": len(result.get("items", [])), "durationMs": (time.monotonic() - started) * 1000, "cached": bool(cached), "retrievalRunId": result.get("runId"), "warnings": result.get("warnings", [])}
-        sources = collect_sources(result, state["sources"])
-        if name == "inspect_available_tools" and result.get("outcome") == "answered":
-            packed = {"catalogScope": "all currently agent-callable retrieval tools", "retrievalToolCount": result["retrievalToolCount"], "retrievalToolNames": result["retrievalToolNames"]}
-            content = json.dumps(packed, ensure_ascii=False, separators=(",", ":"))
-        else:
-            packed, content = pack_result(result, self.request["query"], self.encoding, self.limits["contextTokens"])
-        if event:
-            self.emit("tool_end", {**event, "result": visible_tool_result(result), "truncations": packed.get("truncations", []), "modelContext": {**packed.get("contextCoverage", {}), "tokens": len(self.encoding.encode(content))}})
-        return {**state, "pending": [], "sources": sources, "tool_count": state["tool_count"] + 1, "seen_calls": [*state["seen_calls"], identity], "messages": [*state["messages"], {"role": "tool", "tool_call_id": call["id"], "content": content}]}
+                    conn.execute("INSERT INTO chat_tool_results(run_id,call_id,payload) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING", (self.id, call_id, Jsonb(result)))
+            event = {"tool": name, "callId": call_id, "outcome": result.get("outcome"), "count": len(result.get("items", [])), "durationMs": (time.monotonic() - started) * 1000, "cached": bool(cached), "retrievalRunId": result.get("runId"), "warnings": result.get("warnings", [])}
+        return result, event
+
+    def tools(self, state):
+        self.check_time()
+        calls = state["pending"]
+        if state["tool_count"] + len(calls) > self.limits["toolCalls"]:
+            raise RunBudgetReached("The investigation reached its tool limit")
+        if any(call["function"]["name"] == "finish_report" for call in calls):
+            if len(calls) != 1:
+                raise ValueError("A final report cannot be combined with retrieval calls")
+            report = self.check_report(json.loads(calls[0]["function"]["arguments"]), state)
+            return {**state, "pending": [], "report": report.model_dump()}
+        prepared = [self.prepare_pending_call(call) for call in calls]
+        seen = set(state["seen_calls"])
+        duplicates = []
+        for item in prepared:
+            duplicates.append(item["identity"] in seen)
+            seen.add(item["identity"])
+            self.emit("tool_start", {"tool": item["name"], "callId": item["call_id"], "arguments": item["arguments"]})
+        with ThreadPoolExecutor(max_workers=len(calls)) as executor:
+            futures = [executor.submit(self.execute_pending_call, item, duplicate) for item, duplicate in zip(prepared, duplicates, strict=True)]
+            completed = [future.result() for future in futures]
+        sources = state["sources"]
+        messages = list(state["messages"])
+        identities = list(state["seen_calls"])
+        result_token_budget = self.limits["contextTokens"] // (len(calls) + 1)
+        for item, (result, event) in zip(prepared, completed, strict=True):
+            sources = collect_sources(result, sources)
+            if item["name"] == "inspect_available_tools" and result.get("outcome") == "answered":
+                packed = {"catalogScope": "all currently agent-callable retrieval tools", "retrievalToolCount": result["retrievalToolCount"], "retrievalToolNames": result["retrievalToolNames"]}
+                content = json.dumps(packed, ensure_ascii=False, separators=(",", ":"))
+            else:
+                packed, content = pack_result(result, self.request["query"], self.encoding, result_token_budget)
+            if event:
+                self.emit("tool_end", {**event, "result": visible_tool_result(result), "truncations": packed.get("truncations", []), "modelContext": {**packed.get("contextCoverage", {}), "tokens": len(self.encoding.encode(content))}})
+            identities.append(item["identity"])
+            messages.append({"role": "tool", "tool_call_id": item["call_id"], "content": content})
+        return {**state, "pending": [], "sources": sources, "tool_count": state["tool_count"] + len(calls), "seen_calls": identities, "messages": messages}
 
     def graph(self, saver):
         builder = StateGraph(State)

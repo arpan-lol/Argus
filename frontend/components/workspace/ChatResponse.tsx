@@ -5,12 +5,23 @@ import { CitationButton } from '@/components/CitationButton';
 import type { ChatSource, ChatTurn } from '@/lib/chat';
 import { ChatGraphPreview } from './ChatGraphPreview';
 
-const toolLabels: Record<string, string> = {
-  inspect_available_tools: 'List available retrieval tools',
-  source_authors: 'Read source authors', recent_source_updates: 'Check source updates', rank_entities: 'Rank graph connections',
-  search_sources: 'Search source passages', find_entities: 'Find graph nodes', read_chunks: 'Read source passages',
-  inspect_assertions: 'Inspect node relationships', expand_connections: 'Traverse graph relationships', find_paths: 'Trace a graph path', review_path: 'Check path sources',
-  resolve_entities: 'Match names to graph nodes', blast_radius: 'Traverse nearby graph nodes', path_between: 'Find a relationship path', load_bearing: 'Rank graph connectivity', recent_changes: 'Recent source indexing',
+const toolTitles: Record<string, [string, string, string]> = {
+  inspect_available_tools: ['Checking available investigation tools', 'Reading the investigation tool catalog', 'Reviewing available graph tools'],
+  search_sources: ['Searching sources for {value}', 'Finding passages about {value}', 'Exploring source matches for {value}'],
+  find_entities: ['Finding graph entities named {value}', 'Looking up entities named {value}', 'Searching entity names for {value}'],
+  resolve_entities: ['Matching {value} to graph entities', 'Resolving graph identities for {value}', 'Checking entity matches for {value}'],
+  read_chunks: ['Opening {value} source passages', 'Reading {value} source passages', 'Checking context in {value} source passages'],
+  inspect_assertions: ['Checking relationships around {value}', 'Inspecting graph links for {value}', 'Reading recorded relationships for {value}'],
+  expand_connections: ['Exploring connections from {value}', 'Following relationships from {value}', 'Mapping nearby entities from {value}'],
+  blast_radius: ['Exploring connections from {value}', 'Following relationships from {value}', 'Mapping nearby entities from {value}'],
+  find_paths: ['Searching for a chain between {value} and {value2}', 'Tracing a graph route from {value} to {value2}', 'Looking for connecting relationships between {value} and {value2}'],
+  path_between: ['Searching for a chain between {value} and {value2}', 'Tracing a graph route from {value} to {value2}', 'Looking for connecting relationships between {value} and {value2}'],
+  review_path: ['Checking sources for {value} relationship hops', 'Verifying source support for {value} hops', 'Reviewing {value} graph hops against sources'],
+  source_authors: ['Reading authors of {value}', 'Checking credited authors for {value}', 'Opening author metadata for {value}'],
+  rank_entities: ['Ranking connected entities near {value}', 'Measuring graph connectivity around {value}', 'Checking connected entities near {value}'],
+  load_bearing: ['Ranking connected entities near {value}', 'Measuring graph connectivity around {value}', 'Checking connected entities near {value}'],
+  recent_source_updates: ['Checking sources indexed in the last {value} hours', 'Reviewing sources indexed over {value} hours', 'Finding indexing activity from the last {value} hours'],
+  recent_changes: ['Checking sources indexed in the last {value} hours', 'Reviewing sources indexed over {value} hours', 'Finding indexing activity from the last {value} hours'],
 };
 
 const toolDescriptions: Record<string, string> = {
@@ -24,15 +35,69 @@ const toolDescriptions: Record<string, string> = {
   review_path: 'Checks each proposed relationship against its published source passage.',
 };
 
-function toolTitle(tool?: string) {
-  return tool ? toolLabels[tool] || tool : 'Retrieval step';
+function toolTitle(event: ChatTurn['events'][number], events: ChatTurn['events'], sources: ChatSource[]) {
+  if (!event.tool) return 'Reviewing the investigation';
+  const arguments_ = event.arguments || {};
+  const names = new Map<string, string>();
+  const documents = new Map(sources.map(source => [source.documentId, source.documentTitle]));
+  for (const prior of events) {
+    if (prior.type !== 'tool_end') continue;
+    for (const item of prior.result?.items || []) {
+      if (item.id && item.name) names.set(item.id, item.name);
+      if (item.subject?.id && item.subject.name) names.set(item.subject.id, item.subject.name);
+      if (item.object?.id && item.object.name) names.set(item.object.id, item.object.name);
+      if (item.documentId && item.documentTitle) documents.set(item.documentId, item.documentTitle);
+    }
+    for (const node of prior.result?.graphNodes || []) if (node.id && node.name) names.set(node.id, node.name);
+    for (const hop of prior.result?.tree || []) {
+      if (hop.subject?.id && hop.subject.name) names.set(hop.subject.id, hop.subject.name);
+      if (hop.object?.id && hop.object.name) names.set(hop.object.id, hop.object.name);
+      if (hop.documentId && hop.documentTitle) documents.set(hop.documentId, hop.documentTitle);
+    }
+  }
+  const named = (value: unknown) => typeof value === 'string' ? names.get(value) : undefined;
+  const short = (value: string) => value.length > 60 ? `${value.slice(0, 57)}…` : value;
+  const list = (value: unknown) => Array.isArray(value) ? value : [];
+  const first = list(arguments_.entity_ids).map(named).filter((name): name is string => Boolean(name));
+  const requested = list(arguments_.names).filter((name): name is string => typeof name === 'string');
+  const count = (value: unknown) => Array.isArray(value) ? value.length : 0;
+  let value: string | undefined;
+  let value2: string | undefined;
+  switch (event.tool) {
+    case 'search_sources': case 'find_entities': value = typeof arguments_.query === 'string' ? arguments_.query : undefined; break;
+    case 'resolve_entities': value = requested.length > 2 ? `${requested.slice(0, 2).join(', ')} and ${requested.length - 2} others` : requested.join(' and '); break;
+    case 'read_chunks': value = String(count(arguments_.chunk_ids)); break;
+    case 'inspect_assertions': value = named(arguments_.entity_id); break;
+    case 'expand_connections': case 'blast_radius': value = first.length > 1 ? `${first[0]} and ${first.length - 1} others` : first[0]; break;
+    case 'find_paths': case 'path_between': value = named(arguments_.source_entity_id); value2 = named(arguments_.target_entity_id); break;
+    case 'review_path': value = String(count(arguments_.assertion_ids)); break;
+    case 'source_authors': value = typeof arguments_.document_id === 'string' ? documents.get(arguments_.document_id) : undefined; break;
+    case 'rank_entities': case 'load_bearing': value = named(arguments_.entity_id) || 'this workspace'; break;
+    case 'recent_source_updates': case 'recent_changes': value = String(typeof arguments_.hours === 'number' ? arguments_.hours : 24); break;
+  }
+  const fallbacks: Record<string, [string, string, string]> = {
+    inspect_assertions: ['Checking relationships around an entity', 'Inspecting relationships for a graph entity', 'Reading an entity’s recorded relationships'],
+    expand_connections: ['Exploring connections from graph entities', 'Following relationships between graph entities', 'Mapping nearby graph entities'],
+    blast_radius: ['Exploring connections from graph entities', 'Following relationships between graph entities', 'Mapping nearby graph entities'],
+    find_paths: ['Searching for a chain between graph entities', 'Tracing a route between graph entities', 'Looking for connecting relationships'],
+    path_between: ['Searching for a chain between graph entities', 'Tracing a route between graph entities', 'Looking for connecting relationships'],
+    source_authors: ['Reading source authors', 'Checking credited authors', 'Opening author metadata'],
+  };
+  const seed = [...(event.callId || event.tool)].reduce((sum, character) => sum + character.charCodeAt(0), 0);
+  if ((!value || ((event.tool === 'find_paths' || event.tool === 'path_between') && !value2)) && fallbacks[event.tool]) return fallbacks[event.tool][seed % 3];
+  const variants = toolTitles[event.tool];
+  if (!variants) return 'Using an investigation tool';
+  const template = variants[seed % variants.length];
+  return template.split(/(\{value2?\})/g).map((part, index) => part === '{value}' || part === '{value2}'
+    ? <span className="ce-tool-value" key={index}>{short((part === '{value2}' ? value2 : value) || '')}</span>
+    : part);
 }
 
 function toolDescription(event: ChatTurn['events'][number]) {
   const query = typeof event.arguments?.query === 'string' ? event.arguments.query.trim() : '';
   const excerpt = query.length > 96 ? `${query.slice(0, 93)}…` : query;
-  if (event.tool === 'search_sources' && excerpt) return `Searching for “${excerpt}” · keyword + vector ranking, followed by graph exploration.`;
-  if (event.tool === 'find_entities' && excerpt) return `Looking for graph nodes named “${excerpt}”.`;
+  if (event.tool === 'search_sources' && excerpt) return 'Ranks source passages, then explores graph links between their entities.';
+  if (event.tool === 'find_entities' && excerpt) return 'Looks up matching entity nodes already published in this workspace graph.';
   return toolDescriptions[event.tool || ''] || 'Reads published workspace records for this answer.';
 }
 
@@ -77,7 +142,7 @@ export function ChatResponse({ turn, pending, onCitation, onToolSource, onTrace,
         const preview = end?.result;
         const tree = preview?.tree || [];
         return <details className="ce-tool-block" key={`${event.callId}-${index}`}>
-          <summary className="ce-tool-summary"><span className="ce-tool-icon">{end ? <Check size={14} /> : <Loader2 size={14} className="spinning" />}</span><span className="ce-tool-title"><strong>{toolTitle(event.tool)}</strong><small>{toolDescription(event)}</small></span><span className="ce-tool-meta">{toolSummary(event, end)}<small>{end ? `${((end.durationMs || 0) / 1000).toFixed(1)}s` : 'Running'}</small></span><ChevronDown size={15} className="ce-tool-chevron" /></summary>
+          <summary className="ce-tool-summary"><span className="ce-tool-icon">{end ? <Check size={14} /> : <Loader2 size={14} className="spinning" />}</span><span className="ce-tool-title"><strong>{toolTitle(event, turn.events, sources)}</strong><small>{toolDescription(event)}</small></span><span className="ce-tool-meta">{toolSummary(event, end)}<small>{end ? `${((end.durationMs || 0) / 1000).toFixed(1)}s` : 'Running'}</small></span><ChevronDown size={15} className="ce-tool-chevron" /></summary>
           <div className="ce-tool-content">
           {end?.outcome && !['answered', 'not_found'].includes(end.outcome) && <p className="ce-tool-outcome">{end.outcome.replaceAll('_', ' ')}</p>}
           {[...(end?.warnings || []), ...(end?.truncations || [])].slice(0, 2).map((warning, warningIndex) => <p className="ce-tool-outcome" key={warningIndex}>{warning}</p>)}
@@ -88,7 +153,7 @@ export function ChatResponse({ turn, pending, onCitation, onToolSource, onTrace,
         </details>;
       })}
       {excludedHops.size > 0 && <p className="ce-tool-outcome" role="status">Path review excluded {excludedHops.size} {excludedHops.size === 1 ? 'hop' : 'hops'}. The displayed route is a candidate, not a verified connection.</p>}
-      {pending && <div className="ce-chat-live ce-live-processing is-working" role="status" aria-live="polite">{latest?.type === 'tool_end' ? 'Reviewing retrieved results' : latest?.label || (latest?.tool ? toolTitle(latest.tool) : 'Starting investigation')}</div>}
+      {pending && <div className="ce-chat-live ce-live-processing is-working" role="status" aria-live="polite">{latest?.type === 'tool_end' ? 'Reviewing retrieved results' : latest?.label || (latest?.tool ? toolTitle(latest, turn.events, sources) : 'Starting investigation')}</div>}
     </div>}
     {result && <div className="ce-answer-body" aria-live="polite">
       {finalTrail.length > 0 && <button type="button" className="ce-answer-trail" onClick={() => onTrace(finalTrail.map(hop => hop.assertionId))}><GitBranch size={17} /><span><strong>{candidateTrail ? 'Explored graph trail' : 'Cited graph trail'} · {finalTrail.length} {finalTrail.length === 1 ? 'hop' : 'hops'}</strong><small>{excludedHops.size ? 'Path review excluded a hop; inspect the graph before relying on this route' : !citedTrail ? 'This route was explored but not fully cited in the answer' : 'Inspect the visited relationships and their sources'}</small></span><ArrowUpRight size={15} /></button>}

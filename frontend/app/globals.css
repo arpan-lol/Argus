@@ -333,6 +333,7 @@ button:disabled { cursor:not-allowed; }
 .ce-tool-summary:focus-visible { outline:2px solid var(--ce-accent); outline-offset:-2px; }
 .ce-tool-title { display:grid; gap:3px; min-width:100px; flex:1; }
 .ce-tool-title strong { font-size:12px; font-weight:600; }
+.ce-tool-title .ce-tool-value { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; color:var(--ce-text); font-size:0.96em; font-weight:650; overflow-wrap:anywhere; }
 .ce-tool-title small { color:var(--ce-muted); font-size:10px; line-height:1.4; }
 .ce-tool-meta { display:grid; gap:2px; max-width:52%; color:var(--ce-muted); font-size:10px; line-height:1.4; text-align:right; font-variant-numeric:tabular-nums; }
 .ce-tool-meta small { color:var(--ce-muted); font-size:9px; }
