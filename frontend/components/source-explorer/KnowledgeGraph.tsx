@@ -7,10 +7,10 @@ import styles from './KnowledgeGraph.module.css';
 
 type Entity = { id: string; type: 'entity'; label: string; entityType: string; x: number; y: number; mentionCount?: number; documentCount?: number; aliases?: string[]; resolutionStatus?: string };
 type Relationship = { id: string; source: string; target: string; label: string; confidence?: number | null; traversalStatus?: string; extractionMethod?: string; quote?: string; chunkId?: string; documentId?: string };
-type KnowledgeView = { nodes: Entity[]; entityPage?: Entity[]; edges: Relationship[]; status?: string; layoutTruncated?: boolean; pagination: { entityTotal: number; connectedEntityTotal?: number | null; entityOffset: number; entityLimit: number; hasMoreEntities: boolean; relationshipTotal: number; relationshipOffset: number; relationshipLimit: number; hasMoreRelationships: boolean } };
+type KnowledgeView = { nodes: Entity[]; entityPage?: Entity[]; edges: Relationship[]; status?: string; focusId?: string | null; layoutTruncated?: boolean; pagination: { entityTotal: number; connectedEntityTotal?: number | null; entityOffset: number; entityLimit: number; hasMoreEntities: boolean; relationshipTotal: number; relationshipOffset: number; relationshipLimit: number; hasMoreRelationships: boolean } };
 type Mention = { id: string; text: string; chunkId: string; chunkText?: string; documentId: string; documentTitle: string; sourceSpans?: unknown[]; extractionMethod?: string; confidence?: number | null };
 type Mentions = { entity: Entity; mentions: Mention[]; counts: { documents: number; chunks: number; occurrences: number; occurrenceCountTruncated?: boolean; status?: string }; pagination: { total: number; offset: number; limit: number; hasMore: boolean } };
-type Props = { apiRoot: string; refreshToken?: number; expanded?: boolean; onExpand?: () => void; viewSwitcher?: ReactNode; focus?: { nodeId: string; nonce: number } | null; trace?: { assertionIds: string[]; nonce: number } | null; onSelect?: (node: Entity) => void; onSource?: (source: { nodeId: string; label?: string }) => void };
+type Props = { apiRoot: string; refreshToken?: number; expanded?: boolean; onExpand?: () => void; viewSwitcher?: ReactNode; focus?: { nodeId: string; nonce: number; kind?: 'entity' | 'source' } | null; trace?: { assertionIds: string[]; nonce: number } | null; onSelect?: (node: Entity) => void; onSource?: (source: { nodeId: string; label?: string }) => void };
 type Camera = { x: number; y: number; zoom: number };
 const ENTITY_PAGE = 40;
 const RELATION_LIMIT = 20000;
@@ -115,21 +115,23 @@ export function KnowledgeGraph({ apiRoot, refreshToken = 0, expanded = false, on
     const controller = new AbortController();
     setLoading(true); setError(null);
     const params = new URLSearchParams({ offset: String(offset), limit: String(ENTITY_PAGE), relationOffset: '0', relationLimit: String(RELATION_LIMIT) });
-    if (focusId) params.set('focus', focusId);
+    const sourceFocused = focus?.kind === 'source';
+    if (focusId && sourceFocused) params.set('source', focusId);
+    else if (focusId) params.set('focus', focusId);
     if (query) params.set('q', query);
     trace?.assertionIds.forEach(identifier => params.append('path', identifier));
     api<KnowledgeView>(`${apiRoot}/map/knowledge?${params}`, { signal: controller.signal }).then(result => {
       if (controller.signal.aborted) return;
       setView(result); setLoading(false);
       if (externalSelection.current) {
-        const target = result.nodes.find(node => node.id === externalSelection.current) || result.entityPage?.find(node => node.id === externalSelection.current);
+        const target = result.nodes.find(node => node.id === externalSelection.current) || result.entityPage?.find(node => node.id === externalSelection.current) || (sourceFocused && result.focusId ? result.nodes.find(node => node.id === result.focusId) : undefined);
         if (target) { setSelected(target); setSelectedEdge(null); setMentionOffset(0); setMentions(null); setDetailTab('mentions'); externalSelection.current = null; }
       }
     }).catch(reason => {
       if (!controller.signal.aborted) { setError(reason instanceof Error ? reason.message : 'The knowledge graph could not load'); setLoading(false); }
     });
     return () => controller.abort();
-  }, [apiRoot, offset, focusId, refreshToken, reload, query, trace]);
+  }, [apiRoot, offset, focusId, focus?.kind, refreshToken, reload, query, trace]);
 
   useEffect(() => {
     if (previousExpanded.current !== expanded) {

@@ -136,24 +136,30 @@ def _entities(graph, jobs, identifiers, layout):
 
 
 @router.get('/knowledge')
-def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(80, ge=1, le=160), focus: str | None = None, relationOffset: int = Query(0, ge=0), relationLimit: int = Query(20000, ge=1, le=20000), q: str = Query('', max_length=200), path: list[str] = Query(default=[])):
+def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(80, ge=1, le=160), focus: str | None = None, source: str | None = Query(None, max_length=256), relationOffset: int = Query(0, ge=0), relationLimit: int = Query(20000, ge=1, le=20000), q: str = Query('', max_length=200), path: list[str] = Query(default=[])):
     graph, jobs, namespace = _snapshot(project_id)
+    if focus and focus.startswith('chunk:') and not source:
+        source, focus = focus, None
+    if focus and source:
+        raise HTTPException(400, 'Choose either an entity focus or a source focus')
     if len(path) > 8 or any(len(identifier) > 256 for identifier in path):
         raise HTTPException(400, 'Graph path exceeds the display limit')
+    source_entities = _query(graph, "MATCH (c:Chunk) WHERE c.active=true AND c.jobId IN $jobs AND (c.id=$source OR c.documentId=$source) MATCH (c)-[:HAS_MENTION]->(m:Mention)-[:RESOLVED_TO]->(e:Entity) WHERE m.active=true AND m.jobId=c.jobId AND e.active=true RETURN DISTINCT e.id ORDER BY e.id LIMIT 80", jobs, source=source) if source else []
+    source_entity_ids = [row[0] for row in source_entities]
     search = " AND (toLower(e.label) CONTAINS toLower($q) OR toLower(e.type) CONTAINS toLower($q))" if q.strip() else ''
     entity_total = _query(graph, _entity_pattern + search + " RETURN count(DISTINCT e)", jobs, q=q)[0][0]
-    relation_filter = " AND (s.id=$focus OR o.id=$focus)" if focus else ''
+    relation_filter = " AND (s.id=$focus OR o.id=$focus)" if focus else " AND (s.id IN $focusEntities OR o.id IN $focusEntities)" if source_entity_ids else ''
     if q.strip():
         relation_filter += " AND (toLower(s.label) CONTAINS toLower($q) OR toLower(o.label) CONTAINS toLower($q) OR toLower(s.type) CONTAINS toLower($q) OR toLower(o.type) CONTAINS toLower($q))"
-    relationship_total = _query(graph, _relationship_pattern + relation_filter + " RETURN count(r)", jobs, focus=focus, q=q)[0][0]
+    relationship_total = _query(graph, _relationship_pattern + relation_filter + " RETURN count(r)", jobs, focus=focus, focusEntities=source_entity_ids, q=q)[0][0]
     layout = _coordinates(graph, jobs, namespace)
-    if not focus and not q.strip() and not layout['truncated']:
+    if not focus and not source and not q.strip() and not layout['truncated']:
         page_ids = layout['orderedAssertions'][:relationLimit]
         rows = _query(graph, _relationship_pattern + " AND a.id IN $page RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset", jobs, page=page_ids) if page_ids else []
         rank = {identifier: index for index, identifier in enumerate(page_ids)}
         rows.sort(key=lambda row: rank[row[2]])
     else:
-        rows = _query(graph, _relationship_pattern + relation_filter + " RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset ORDER BY s.id,a.id LIMIT $limit", jobs, focus=focus, q=q, limit=relationLimit)
+        rows = _query(graph, _relationship_pattern + relation_filter + " RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset ORDER BY s.id,a.id LIMIT $limit", jobs, focus=focus, focusEntities=source_entity_ids, q=q, limit=relationLimit)
     if path:
         path_rows = _query(graph, _relationship_pattern + " AND a.id IN $path RETURN s.id,o.id,a.id,r.predicate,a.confidence,a.traversalStatus,a.extractionMethod,a.quote,a.documentId,a.polarity,a.context,a.startOffset,a.endOffset LIMIT 8", jobs, path=list(dict.fromkeys(path)))
         rows = list({row[2]: row for row in [*rows, *path_rows]}.values())
@@ -161,6 +167,7 @@ def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(
     identifiers = {identifier for row in rows for identifier in row[:2]}
     if focus:
         identifiers.add(focus)
+    identifiers.update(source_entity_ids)
     catalog_rows = _query(graph, _entity_pattern + search + " WITH e,count(DISTINCT m) AS mentions RETURN e.id ORDER BY mentions DESC,e.id SKIP $offset LIMIT $limit", jobs, q=q, offset=offset, limit=limit)
     catalog_ids = [row[0] for row in catalog_rows]
     entity_records = _entities(graph, jobs, sorted(identifiers | set(catalog_ids)), layout)
@@ -184,7 +191,7 @@ def knowledge(project_id: str, offset: int = Query(0, ge=0), limit: int = Query(
     xs = [node['x'] for node in nodes] or [0]
     ys = [node['y'] for node in nodes] or [0]
     _verify_snapshot(project_id, jobs, namespace)
-    return {'nodes': nodes, 'entityPage': entity_page, 'edges': edges, 'bounds': {'minX': min(xs) - 120, 'maxX': max(xs) + 120, 'minY': min(ys) - 100, 'maxY': max(ys) + 100}, 'pagination': {'entityTotal': entity_total, 'connectedEntityTotal': None if layout['truncated'] else len(layout['positions']), 'entityOffset': offset, 'entityLimit': limit, 'hasMoreEntities': offset + limit < entity_total, 'relationshipTotal': relationship_total, 'relationshipOffset': 0, 'relationshipLimit': relationLimit, 'hasMoreRelationships': len(edges) < relationship_total}, 'focusId': focus, 'source': 'falkordb', 'status': 'ready', 'layout': 'Stable workspace-wide entity positions; the full relationship overview loads together up to the bounded graph limit', 'layoutTruncated': layout['truncated'], 'note': 'Edges are stored semantic relationships. Local model scores are uncalibrated; source-structured records and review statuses remain distinct. Source containment is available in the source graph view.'}
+    return {'nodes': nodes, 'entityPage': entity_page, 'edges': edges, 'bounds': {'minX': min(xs) - 120, 'maxX': max(xs) + 120, 'minY': min(ys) - 100, 'maxY': max(ys) + 100}, 'pagination': {'entityTotal': entity_total, 'connectedEntityTotal': None if layout['truncated'] else len(layout['positions']), 'entityOffset': offset, 'entityLimit': limit, 'hasMoreEntities': offset + limit < entity_total, 'relationshipTotal': relationship_total, 'relationshipOffset': 0, 'relationshipLimit': relationLimit, 'hasMoreRelationships': len(edges) < relationship_total}, 'focusId': focus or (source_entity_ids[0] if source_entity_ids else None), 'source': 'falkordb', 'status': 'ready', 'layout': 'Stable workspace-wide entity positions; the full relationship overview loads together up to the bounded graph limit', 'layoutTruncated': layout['truncated'], 'note': 'Edges are stored semantic relationships. Local model scores are uncalibrated; source-structured records and review statuses remain distinct. Source containment is available in the source graph view.'}
 
 
 @router.get('/entity/{identifier}/mentions')
