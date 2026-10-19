@@ -8,7 +8,7 @@ from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 
-from .contracts import catalog
+from .contracts import AGENT_TOOLS, catalog
 from .routes import execute
 
 
@@ -19,12 +19,14 @@ slots = asyncio.Semaphore(2)
 
 @server.list_tools()
 async def list_tools():
-    return [Tool(name=item["name"], description=item["description"], inputSchema=item["parameters"], annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)) for item in catalog()]
+    return [Tool(name=item["name"], description=item["description"], inputSchema=item["parameters"], annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)) for item in catalog() if item["agentAvailable"]]
 
 
 @server.call_tool()
 async def call_tool(name, arguments):
     try:
+        if name not in AGENT_TOOLS:
+            return CallToolResult(content=[TextContent(type="text", text="This tool is not available to the agent.")], isError=True)
         async with slots:
             result = await asyncio.to_thread(execute, name, arguments)
         return CallToolResult(content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False))], structuredContent=result)

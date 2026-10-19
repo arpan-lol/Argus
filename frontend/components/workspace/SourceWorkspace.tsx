@@ -308,9 +308,9 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
     const value = (suggestion || query).trim();
     if (!value || busy) return;
     const id = crypto.randomUUID();
-    const history = turns.filter(turn => turn.result).slice(-2).flatMap(turn => [
-      {role: 'user', content: turn.query.slice(0, 2000)},
-      {role: 'assistant', content: turn.result!.report.paragraphs.map(paragraph => paragraph.text).join('\n').slice(0, 2000)},
+    const history = turns.filter(turn => turn.result).flatMap(turn => [
+      {role: 'user', content: turn.query},
+      {role: 'assistant', content: turn.result!.report.paragraphs.map(paragraph => paragraph.text).join('\n')},
     ]);
     setTurns(previous => [...previous, {id, query: value, model: chatConfig?.model, events: []}]);
     setQuery(''); setBusy(true); setActiveTurnId(id);
@@ -341,9 +341,8 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
           {configurationOpen && <section id="engine-configuration" className="ce-configuration" aria-label="Engine configuration">
             <div><strong>Engine configuration</strong><button className="ce-icon" onClick={() => setConfigurationOpen(false)} aria-label="Close engine configuration"><X size={16} /></button></div>
             <div className="ce-engine-setting"><div className="ce-engine-setting-heading"><label htmlFor="graph-hops">Graph hops</label><output htmlFor="graph-hops">{engineSettings.graphHops}</output></div><input id="graph-hops" type="range" min="2" max="10" step="1" value={engineSettings.graphHops} onChange={event => updateEngineSettings({...engineSettings, graphHops: Number(event.target.value)})} /><div className="ce-engine-range-labels"><span>2</span><span>10</span></div><small>Maximum relationship hops explored per source search and path.</small></div>
-            <label className="ce-engine-toggle"><span><strong>Hybrid search</strong><small>Search passages with vectors and BM25. Off uses vectors only.</small></span><input type="checkbox" checked={engineSettings.hybridSearch} onChange={event => updateEngineSettings({...engineSettings, hybridSearch: event.target.checked})} /></label>
-            <label className="ce-engine-toggle"><span><strong>RRF ranking</strong><small>Combine vector and BM25 ranks. Off puts vector hits first.</small></span><input type="checkbox" checked={engineSettings.rrfSearch} disabled={!engineSettings.hybridSearch} onChange={event => updateEngineSettings({...engineSettings, rrfSearch: event.target.checked})} /></label>
-            <p>Settings apply to new investigations. {chatConfig?.model.toUpperCase() || 'GPT-5'} · {chatConfig?.coverage.publishedDocuments ?? '…'} searchable sources.</p>
+            <label className="ce-engine-toggle"><span><strong>Hybrid search</strong><small>Search passages with vectors and BM25.</small></span><input type="checkbox" checked={engineSettings.hybridSearch} onChange={event => updateEngineSettings({...engineSettings, hybridSearch: event.target.checked})} /></label>
+            <label className="ce-engine-toggle"><span><strong>RRF ranking</strong><small>Combine vector and BM25 ranks.</small></span><input type="checkbox" checked={engineSettings.rrfSearch} disabled={!engineSettings.hybridSearch} onChange={event => updateEngineSettings({...engineSettings, rrfSearch: event.target.checked})} /></label>
           </section>}
         </div>
         <div className="ce-user"><span className="ce-avatar"><img src="/argus-logo.svg" alt="" width={24} height={24} /></span><strong>Test User</strong></div>

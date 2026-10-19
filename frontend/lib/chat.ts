@@ -52,6 +52,7 @@ export interface ChatEvent {
     tree: { assertionId: string; from: string; to: string; predicate: string; subject: { id: string; name: string }; object: { id: string; name: string }; quote: string; documentTitle?: string; chunkId?: string; documentId?: string; jobId?: string; sourceReference?: string; polarity?: string; extractionMethod?: string; traversalStatus?: string }[];
     graphNodes?: { id: string; name: string; type?: string; sourceChunkId?: string; documentId?: string; documentTitle?: string; jobId?: string }[];
     graphStatus?: string;
+    graphHopLimit?: number;
     graphReachedCount?: number;
     graphRelationshipCount?: number;
     graphPathCount?: number;

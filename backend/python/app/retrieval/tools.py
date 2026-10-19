@@ -49,7 +49,7 @@ def search_sources(session, args):
     ranking_algorithm = "RRF" if args.rrf_search and len(ranked) > 1 else "vector_then_bm25" if len(ranked) > 1 else next(iter(ranked))
     items = [{**session.excerpt(supported[item["id"]]), "score": item["score"], "scoreType": "reciprocal_rank_fusion" if ranking_algorithm == "RRF" else "channel_score", "rank": rank, "signals": item["signals"]} for rank, item in enumerate(ordered, 1) if item["id"] in supported]
     session.warnings.extend(failures)
-    graph_traversal = {"status": "no_passages", "seedNodes": [], "items": [], "discoveryTree": [], "reachedEntityCount": 0, "depth": 1}
+    graph_traversal = {"status": "no_passages", "seedNodes": [], "items": [], "discoveryTree": [], "reachedEntityCount": 0, "depth": 0, "depthLimit": args.graph_hops}
     if items:
         seed_rows = session.cypher(
             "UNWIND $chunks AS hit MATCH (c:Chunk {id:hit.id})-[:MENTIONS]->(e:Entity) WHERE c.active=true AND c.jobId IN $jobs RETURN DISTINCT e.id,e.label,e.type,c.id,hit.rank ORDER BY hit.rank,e.label,e.id LIMIT 100",
@@ -65,7 +65,7 @@ def search_sources(session, args):
                 source = next((item for item in items if item["chunkId"] == chunk_id), None)
                 seed_nodes.append({"id": entity_id, "name": label, "type": entity_type, "sourceChunkId": chunk_id, "documentId": source["documentId"] if source else None, "documentTitle": source["documentTitle"] if source else None, "jobId": source["jobId"] if source else None})
                 per_chunk[chunk_id] = per_chunk.get(chunk_id, 0) + 1
-        graph_traversal = {"status": "no_graph_entities", "seedNodes": seed_nodes, "items": [], "discoveryTree": [], "reachedEntityCount": 0, "depth": 1}
+        graph_traversal = {"status": "no_graph_entities", "seedNodes": seed_nodes, "items": [], "discoveryTree": [], "reachedEntityCount": 0, "depth": 0, "depthLimit": args.graph_hops}
         if seed_ids:
             expansion = traverse(session, seed_ids, args.graph_hops, "both", [], 100)
             reached = set(expansion.get("depthByEntity", {})) - set(seed_ids)
@@ -94,6 +94,7 @@ def search_sources(session, args):
                 "pathCoverage": path_result.get("coverage"),
                 "reachedEntityCount": len(reached),
                 "depth": args.graph_hops,
+                "depthLimit": args.graph_hops,
                 "coverage": expansion.get("coverage"),
             }
     return {"items": items, "graphTraversal": graph_traversal, "ranking": {"algorithm": ranking_algorithm, "constant": 60 if ranking_algorithm == "RRF" else None, "candidateLimitPerChannel": candidates, "scoreMeaning": "Ranking relevance, not confidence or scientific support strength"}, "requestedMode": args.mode, "availableChannels": list(ranked), "partial": bool(failures)}

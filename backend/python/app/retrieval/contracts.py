@@ -16,7 +16,7 @@ class SearchSources(Arguments):
     mode: Literal["lexical", "vector", "hybrid"] = "hybrid"
     graph_hops: int = Field(default=5, ge=2, le=10)
     rrf_search: bool = True
-    limit: int = Field(default=10, ge=1, le=30)
+    limit: int = Field(default=10, ge=3, le=10)
     document_id: str | None = Field(default=None, max_length=256)
 
     @field_validator("query")
@@ -101,7 +101,7 @@ TOOLS = {
 
 
 def catalog():
-    return [{"name": name, "description": description, "parameters": model.model_json_schema()} for name, (model, description) in TOOLS.items()]
+    return [{"name": name, "description": description, "parameters": model.model_json_schema(), "agentAvailable": name in AGENT_TOOLS} for name, (model, description) in TOOLS.items()]
 
 
 class SourceAuthors(Arguments):
@@ -130,6 +130,9 @@ TOOLS.update({
     "load_bearing": (RankEntities, "Article-style PageRank on a bounded active assertion projection. Connectivity is not proof of architectural criticality or runtime use."),
     "recent_changes": (RecentSourceUpdates, "Article-style recency tool adapted to Argus: shows recent source indexing only, not Git commits or code changes."),
 })
+
+
+AGENT_TOOLS = tuple(name for name in TOOLS if name not in ("find_entities", "expand_connections", "find_paths", "rank_entities", "recent_source_updates"))
 
 
 ARTICLE_TOOLS = [

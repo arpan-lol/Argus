@@ -30,7 +30,7 @@ def execute(name, arguments, project_id=None):
         unknown = next((kind for field, kind in (("unknownChunkIds", "chunk"), ("unknownEntityIds", "entity"), ("unknownDocumentIds", "document")) if payload.get(field)), None)
         outcome = ("partial" if payload.get("items") else "unknown_" + unknown) if unknown else "partial" if payload.get("partial") else None
         if unknown:
-            payload.update(inputError=True, recovery="Unknown lookup IDs do not establish missing source facts. Use search_sources or find_entities to discover the correct IDs before retrying.")
+            payload.update(inputError=True, recovery="Unknown lookup IDs do not establish missing source facts. Use search_sources or resolve_entities to discover the correct IDs before retrying.")
     except BudgetReached:
         payload, outcome = {"items": []}, "budget_exceeded"
     except Exception:

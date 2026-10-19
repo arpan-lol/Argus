@@ -33,13 +33,14 @@ def configuration():
     with connection() as conn:
         count = conn.execute("SELECT count(*) AS n FROM ingestion_publications p JOIN ingestion_jobs j ON j.id=p.job_id JOIN published_documents d ON d.id=p.source_id WHERE p.active AND p.counts->>'graph'=%s AND j.project_id=%s AND d.metadata->>'revisionId'=j.revision AND d.metadata->>'processingVersion'=j.processing_version", (semantic_graph_name(config), config.get("projectId"))).fetchone()["n"]
         legacy = conn.execute("SELECT count(*) AS n FROM legacy_documents").fetchone()["n"]
-    scale = math.ceil(math.log2(count + 1))
-    config["chatLimits"] = {"modelCalls": min(32, 8 + 2 * scale), "toolCalls": min(48, 10 + 4 * scale), "totalTokens": 1000000, "contextTokens": 16000, "outputTokens": 4096, "elapsedMs": 300000, "costUsd": 5.0}
-    for field, environment in (("modelCalls", "ARGUS_CHAT_MODEL_CALLS"), ("toolCalls", "ARGUS_CHAT_TOOL_CALLS"), ("totalTokens", "ARGUS_CHAT_TOTAL_TOKENS"), ("contextTokens", "ARGUS_CHAT_CONTEXT_TOKENS"), ("outputTokens", "ARGUS_CHAT_OUTPUT_TOKENS"), ("elapsedMs", "ARGUS_CHAT_ELAPSED_MS")):
+    config["chatLimits"] = {"totalTokens": 1000000, "contextTokens": 272000, "outputTokens": 4096, "elapsedMs": 300000, "costUsd": 5.0}
+    for field, environment in (("totalTokens", "ARGUS_CHAT_TOTAL_TOKENS"), ("contextTokens", "ARGUS_CHAT_CONTEXT_TOKENS"), ("outputTokens", "ARGUS_CHAT_OUTPUT_TOKENS"), ("elapsedMs", "ARGUS_CHAT_ELAPSED_MS")):
         value = int(os.getenv(environment, config["chatLimits"][field]))
         if not 1 <= value <= config["chatLimits"][field]:
             raise HTTPException(400, f"{environment} must be between 1 and {config['chatLimits'][field]}")
         config["chatLimits"][field] = value
+    effective_call_ceiling = config["chatLimits"]["totalTokens"] // config["chatLimits"]["outputTokens"] + 1
+    config["chatLimits"].update(modelCalls=effective_call_ceiling, toolCalls=effective_call_ceiling)
     input_price, output_price = os.getenv("ARGUS_CHAT_INPUT_USD_PER_MILLION"), os.getenv("ARGUS_CHAT_OUTPUT_USD_PER_MILLION")
     config["chatPrices"] = None
     if input_price is not None or output_price is not None:
@@ -108,7 +109,7 @@ def run_worker(run_id, updates):
             sources = validate_sources(state["sources"], report_references(report), row["configuration"])
             with connection() as conn:
                 budget = conn.execute("SELECT budget FROM chat_runs WHERE id=%s", (run_id,)).fetchone()["budget"]
-            result = {"runId": run_id, "model": row["configuration"]["chatModel"], "report": report.model_dump(), "sources": sources, "coverage": row["configuration"]["coverage"], "usage": {**budget, "modelCalls": budget.get("modelCalls", 0), "reportedTokens": budget.get("reportedTokens", 0), "reservedTokens": budget.get("reservedTokens", 0), "toolCalls": state["tool_count"], "runtimeMs": investigation.elapsed(), "costKnown": row["configuration"]["chatPrices"] is not None, "tokensMeaning": "Conservative reservations include maximum output, tool schemas and context; actual usage is recorded in events."}}
+            result = {"runId": run_id, "model": row["configuration"]["chatModel"], "report": report.model_dump(), "sources": sources, "coverage": row["configuration"]["coverage"], "usage": {**budget, "modelCalls": budget.get("modelCalls", 0), "reportedTokens": budget.get("reportedTokens", 0), "reservedTokens": budget.get("reservedTokens", 0), "toolCalls": state["tool_count"], "runtimeMs": investigation.elapsed(), "costKnown": row["configuration"]["chatPrices"] is not None, "tokensMeaning": "Completed calls with provider usage are charged at actual token counts; requests without usage retain their conservative reservation."}}
             with connection() as conn:
                 conn.execute("UPDATE chat_runs SET status='complete',result=%s,runtime_ms=%s,updated_at=now() WHERE id=%s", (Jsonb(result), investigation.elapsed(), run_id))
             emit("done", result)
