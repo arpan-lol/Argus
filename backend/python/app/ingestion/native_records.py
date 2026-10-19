@@ -168,7 +168,14 @@ def parse_native_stix(raw, max_text_chars, max_records=10000):
     total = sum(len(block["text"]) for block in blocks)
     if total > max_text_chars:
         raise ValueError("STIX source records exceed configured extracted-text character limit")
-    return {"blocks": blocks, "metadata": {"format": ".json", "parser": "stix_native_json", "nativeFormat": "STIX 2.x JSON", "nativeRecordCount": len(blocks), "warnings": warnings, "danglingReferenceCount": sum(warning["kind"] == "dangling_bundle_reference" for warning in warnings)}}
+    metadata = {"format": ".json", "parser": "stix_native_json", "nativeFormat": "STIX 2.x JSON", "nativeRecordCount": len(blocks), "warnings": warnings, "danglingReferenceCount": sum(warning["kind"] == "dangling_bundle_reference" for warning in warnings)}
+    projection = value.get("x_argus_projection") if isinstance(value, dict) else None
+    if isinstance(projection, dict):
+        metadata["projection"] = projection
+        metadata["sourceUrl"] = projection.get("sourceUrl")
+        metadata["sourceCoverage"] = {"scope": "selected_source_records", "coverageLabel": "field_projected_subset", "limitedSource": True, "requiresAttention": False, "recordCount": len(blocks), "selection": projection.get("selection"), "sourceSha256": projection.get("sourceSha256")}
+        metadata["warnings"].append("This STIX upload is a field-projected subset. Consult the linked original bundle for omitted source records and fields.")
+    return {"blocks": blocks, "metadata": metadata}
 
 
 def string_fields(text):

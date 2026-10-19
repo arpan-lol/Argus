@@ -12,7 +12,9 @@ def chunk_document(document, scope, config):
     encoding = tiktoken.get_encoding(config["tokenEncoding"])
     text = document["text"]
     bounds = []
-    code = document.get("metadata", {}).get("parser") in {"python_ast", "source_text"}
+    parser = document.get("metadata", {}).get("parser")
+    code = parser in {"python_ast", "source_text"}
+    native_records = parser == "stix_native_json"
     for block in document.get("blocks", []):
         block_start, block_end = block["startOffset"], block["endOffset"]
         content = text[block_start:block_end]
@@ -74,5 +76,5 @@ def chunk_document(document, scope, config):
         })
         if end >= len(bounds):
             break
-        start = end if bounds[end][0] in heading_offsets else max(end - config["overlapSentences"], start + 1)
+        start = end if native_records or bounds[end][0] in heading_offsets else max(end - config["overlapSentences"], start + 1)
     return {"chunks": chunks, "strategy": "code_line_token_cap" if code else "structure_sentence_clause_token_cap", "upstream": UPSTREAM, "upstreamVersion": "v1.4.0", "adaptation": "Code uses source lines; prose is segmented within parser blocks at sentence and semicolon-clause boundaries. Headings, tables, records, citations, preformatted blocks and list items remain intact unless they exceed the token cap. Oversized units split at source character boundaries. Normalized whitespace retained for exact citation offsets."}
