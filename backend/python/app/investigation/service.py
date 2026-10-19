@@ -34,7 +34,7 @@ def configuration():
         count = conn.execute("SELECT count(*) AS n FROM ingestion_publications p JOIN ingestion_jobs j ON j.id=p.job_id JOIN published_documents d ON d.id=p.source_id WHERE p.active AND p.counts->>'graph'=%s AND j.project_id=%s AND d.metadata->>'revisionId'=j.revision AND d.metadata->>'processingVersion'=j.processing_version", (semantic_graph_name(config), config.get("projectId"))).fetchone()["n"]
         legacy = conn.execute("SELECT count(*) AS n FROM legacy_documents").fetchone()["n"]
     scale = math.ceil(math.log2(count + 1))
-    config["chatLimits"] = {"modelCalls": min(32, 8 + 2 * scale), "toolCalls": min(48, 10 + 4 * scale), "totalTokens": 180000, "contextTokens": 16000, "outputTokens": 4096, "elapsedMs": 300000, "costUsd": 2.0}
+    config["chatLimits"] = {"modelCalls": min(32, 8 + 2 * scale), "toolCalls": min(48, 10 + 4 * scale), "totalTokens": 1000000, "contextTokens": 16000, "outputTokens": 4096, "elapsedMs": 300000, "costUsd": 5.0}
     for field, environment in (("modelCalls", "ARGUS_CHAT_MODEL_CALLS"), ("toolCalls", "ARGUS_CHAT_TOOL_CALLS"), ("totalTokens", "ARGUS_CHAT_TOTAL_TOKENS"), ("contextTokens", "ARGUS_CHAT_CONTEXT_TOKENS"), ("outputTokens", "ARGUS_CHAT_OUTPUT_TOKENS"), ("elapsedMs", "ARGUS_CHAT_ELAPSED_MS")):
         value = int(os.getenv(environment, config["chatLimits"][field]))
         if not 1 <= value <= config["chatLimits"][field]:
