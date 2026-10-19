@@ -51,6 +51,8 @@ def profile_compatible(profile, config):
     if actual == expected:
         return True
     ignored = {"profileTokenBudget", "profileBatchTokens"} if profile["settings"] is not None else set()
+    if profile["settings"] is not None and actual.get("promptVersion") == "batched-category-label-discovery-1" and expected.get("promptVersion") == "batched-category-label-discovery-code-routing-2" and "code_repository" not in expected.get("categories", []):
+        ignored.add("promptVersion")
     return {key: value for key, value in actual.items() if key not in ignored} == {key: value for key, value in expected.items() if key not in ignored}
 
 
