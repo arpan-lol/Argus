@@ -14,7 +14,7 @@ from app.ingestion.publication import graph_connection, semantic_graph_name
 router = APIRouter()
 _layouts = {}
 _entity_pattern = "MATCH (e:Entity)<-[:RESOLVED_TO]-(m:Mention)<-[:HAS_MENTION]-(c:Chunk) WHERE e.active=true AND m.active=true AND c.active=true AND m.jobId=c.jobId AND c.jobId IN $jobs"
-_relationship_pattern = "MATCH (s:Entity)-[r:RELATES]->(o:Entity),(a:Assertion) WHERE s.active=true AND o.active=true AND r.active=true AND a.active=true AND a.id=r.assertionId AND a.jobId=r.jobId AND a.jobId IN $jobs"
+_relationship_pattern = "MATCH (a:Assertion)-[:SUBJECT]->(s:Entity)-[r:RELATES]->(o:Entity)<-[:OBJECT]-(a) WHERE a.active=true AND a.jobId IN $jobs AND s.active=true AND o.active=true AND r.active=true AND r.assertionId=a.id AND r.jobId=a.jobId"
 
 
 def _snapshot(project_id):
