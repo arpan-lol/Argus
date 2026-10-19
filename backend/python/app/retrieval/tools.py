@@ -35,13 +35,68 @@ def search_sources(session, args):
     for channel, rows in ranked.items():
         for rank, (chunk_id, score) in enumerate(rows, 1):
             item = fused.setdefault(chunk_id, {"id": chunk_id, "score": 0, "signals": []})
-            item["score"] += 1 / (60 + rank)
+            if args.rrf_search and len(ranked) > 1:
+                item["score"] += 1 / (60 + rank)
+            elif not args.rrf_search or len(ranked) == 1:
+                item["score"] = score
             item["signals"].append({"channel": channel, "rank": rank, "score": score, "interpretation": "higher cosine similarity is nearer" if channel == "cosine_similarity" else "higher BM25 is more relevant"})
-    ordered = sorted(fused.values(), key=lambda row: (-row["score"], row["id"]))[:limit]
+    if args.rrf_search and len(ranked) > 1:
+        ordered = sorted(fused.values(), key=lambda row: (-row["score"], row["id"]))[:limit]
+    else:
+        ordered_ids = list(dict.fromkeys(chunk_id for channel in ("cosine_similarity", "bm25") for chunk_id, _ in ranked.get(channel, [])))[:limit]
+        ordered = [fused[chunk_id] for chunk_id in ordered_ids]
     supported = session.chunks([item["id"] for item in ordered])
-    items = [{**session.excerpt(supported[item["id"]]), "score": item["score"], "scoreType": "reciprocal_rank_fusion", "rank": rank, "signals": item["signals"]} for rank, item in enumerate(ordered, 1) if item["id"] in supported]
+    ranking_algorithm = "RRF" if args.rrf_search and len(ranked) > 1 else "vector_then_bm25" if len(ranked) > 1 else next(iter(ranked))
+    items = [{**session.excerpt(supported[item["id"]]), "score": item["score"], "scoreType": "reciprocal_rank_fusion" if ranking_algorithm == "RRF" else "channel_score", "rank": rank, "signals": item["signals"]} for rank, item in enumerate(ordered, 1) if item["id"] in supported]
     session.warnings.extend(failures)
-    return {"items": items, "ranking": {"algorithm": "RRF", "constant": 60, "candidateLimitPerChannel": candidates, "scoreMeaning": "Rank-fusion relevance, not confidence or scientific support strength"}, "requestedMode": args.mode, "availableChannels": list(ranked), "partial": bool(failures)}
+    graph_traversal = {"status": "no_passages", "seedNodes": [], "items": [], "discoveryTree": [], "reachedEntityCount": 0, "depth": 1}
+    if items:
+        seed_rows = session.cypher(
+            "UNWIND $chunks AS hit MATCH (c:Chunk {id:hit.id})-[:MENTIONS]->(e:Entity) WHERE c.active=true AND c.jobId IN $jobs RETURN DISTINCT e.id,e.label,e.type,c.id,hit.rank ORDER BY hit.rank,e.label,e.id LIMIT 100",
+            {"chunks": [{"id": item["chunkId"], "rank": rank} for rank, item in enumerate(items, 1)]},
+            "entities mentioned in retrieved passages",
+        )
+        seed_nodes = []
+        seed_ids = []
+        per_chunk = {}
+        for entity_id, label, entity_type, chunk_id, _ in seed_rows:
+            if entity_id not in seed_ids and len(seed_ids) < 8 and per_chunk.get(chunk_id, 0) < 2:
+                seed_ids.append(entity_id)
+                source = next((item for item in items if item["chunkId"] == chunk_id), None)
+                seed_nodes.append({"id": entity_id, "name": label, "type": entity_type, "sourceChunkId": chunk_id, "documentId": source["documentId"] if source else None, "documentTitle": source["documentTitle"] if source else None, "jobId": source["jobId"] if source else None})
+                per_chunk[chunk_id] = per_chunk.get(chunk_id, 0) + 1
+        graph_traversal = {"status": "no_graph_entities", "seedNodes": seed_nodes, "items": [], "discoveryTree": [], "reachedEntityCount": 0, "depth": 1}
+        if seed_ids:
+            expansion = traverse(session, seed_ids, args.graph_hops, "both", [], 100)
+            reached = set(expansion.get("depthByEntity", {})) - set(seed_ids)
+            path_result = {"items": [], "paths": [], "discoveryTree": []}
+            path_seeds = next(((left, right) for index, left in enumerate(seed_nodes) for right in seed_nodes[index + 1:] if left["sourceChunkId"] != right["sourceChunkId"]), None)
+            if path_seeds:
+                from .contracts import FindPaths
+                try:
+                    path_result = find_paths(session, FindPaths(source_entity_id=path_seeds[0]["id"], target_entity_id=path_seeds[1]["id"], max_depth=args.graph_hops, direction="both", limit=1))
+                except Exception:
+                    session.warnings.append("The automatic path search did not complete; the retrieved passages and neighborhood remain available.")
+            path_hops = path_result.get("paths", [{}])[0].get("hops", []) if path_result.get("paths") else []
+            path_entities = path_result.get("paths", [{}])[0].get("entities", []) if path_result.get("paths") else []
+            all_relationships = {item["id"]: item for item in [*expansion.get("items", []), *path_result.get("items", [])]}
+            tree = path_hops if len(path_hops) > 1 else list(expansion.get("discoveryTree", []))
+            tree_ids = {hop["assertionId"] for hop in tree}
+            tree.extend(hop for hop in path_hops if hop["assertionId"] not in tree_ids)
+            graph_traversal = {
+                "status": "traversed" if expansion.get("items") or path_result.get("items") else "no_relationships",
+                "seedNodes": seed_nodes,
+                "items": list(all_relationships.values()),
+                "discoveryTree": tree,
+                "pathCount": len(path_result.get("paths", [])),
+                "pathHopCount": len(path_hops),
+                "intermediateNodeCount": max(0, len(path_entities) - 2),
+                "pathCoverage": path_result.get("coverage"),
+                "reachedEntityCount": len(reached),
+                "depth": args.graph_hops,
+                "coverage": expansion.get("coverage"),
+            }
+    return {"items": items, "graphTraversal": graph_traversal, "ranking": {"algorithm": ranking_algorithm, "constant": 60 if ranking_algorithm == "RRF" else None, "candidateLimitPerChannel": candidates, "scoreMeaning": "Ranking relevance, not confidence or scientific support strength"}, "requestedMode": args.mode, "availableChannels": list(ranked), "partial": bool(failures)}
 
 
 def find_entities(session, args):
@@ -123,7 +178,7 @@ def inspect_assertions(session, args):
     return {"entity": entity, "items": assertion_rows(session, args.entity_id, predicates=[args.predicate] if args.predicate else [], polarity=args.polarity, limit=args.limit, include_context_review=True), "interpretation": "Reported assertions retain uncertainty/negation; source grounding is not independent scientific validation"}
 
 
-def traverse(session, roots, depth, direction, predicates, edge_limit, target=None, path_limit=3):
+def traverse(session, roots, depth, direction, predicates, edge_limit, target=None, path_limit=3, excluded_assertion_ids=None):
     known = {}
     unknown = []
     for entity_id in dict.fromkeys(roots + ([target] if target else [])):
@@ -150,6 +205,8 @@ def traverse(session, roots, depth, direction, predicates, edge_limit, target=No
             assertions = assertion_rows(session, current, direction, predicates, limit=session.limits["fanout"])
             adjacency[current] = []
             for assertion in assertions:
+                if assertion["id"] in (excluded_assertion_ids or []):
+                    continue
                 neighbor = assertion["object"]["id"] if assertion["subject"]["id"] == current else assertion["subject"]["id"]
                 if neighbor not in distance and len(distance) >= session.limits["frontier"]:
                     session.truncate("Traversal entity budget reached")
@@ -204,7 +261,7 @@ def find_paths(session, args):
     if args.source_entity_id == args.target_entity_id:
         return {"items": [], "paths": [{"entities": [args.source_entity_id], "hops": [], "hopCount": 0}], "searchDepth": 0}
     candidate_limit = min(128, max(16, args.limit * 8 + len(args.exclude_assertion_ids)))
-    for depth in range(1, args.max_depth + 1):
+    for depth in range(1, min(args.max_depth, 6) + 1):
         matches = ["MATCH (e0:Entity {id:$source})"]
         matches.extend(f"MATCH (e{index - 1})<-[:SUBJECT|OBJECT]-(a{index}:Assertion)-[:SUBJECT|OBJECT]->(e{index}:Entity)" for index in range(1, depth + 1))
         constraints = [f"e{depth}.id=$target"]
@@ -213,7 +270,11 @@ def find_paths(session, args):
         constraints.extend(f"e{left}.id<>e{right}.id" for left in range(depth + 1) for right in range(left + 1, depth + 1))
         matches.append("WHERE " + " AND ".join(constraints))
         matches.append("RETURN [" + ",".join(f"a{index}.id" for index in range(1, depth + 1)) + "] AS assertions,[" + ",".join(f"e{index}.id" for index in range(depth + 1)) + "] AS entities LIMIT $candidate_limit")
-        candidates = session.cypher(" ".join(matches), {"source": args.source_entity_id, "target": args.target_entity_id, "excluded": args.exclude_assertion_ids, "candidate_limit": candidate_limit + 1}, "targeted path candidates")
+        try:
+            candidates = session.cypher(" ".join(matches), {"source": args.source_entity_id, "target": args.target_entity_id, "excluded": args.exclude_assertion_ids, "candidate_limit": candidate_limit + 1}, "targeted path candidates")
+        except Exception:
+            session.warnings.append("Targeted path query stopped; continuing with bounded graph traversal.")
+            break
         if len(candidates) > candidate_limit:
             session.truncate("Path candidate cap reached; returned paths may be incomplete")
         identifiers = list(dict.fromkeys(identifier for candidate in candidates[:candidate_limit] for identifier in candidate[0]))
@@ -243,6 +304,12 @@ def find_paths(session, args):
             chosen = {hop["assertionId"] for path in paths for hop in path["hops"]}
             review_required = [identifier for identifier in chosen if assertions[identifier]["extraction"].get("traversalStatus") == "needs_context_review"]
             return {"items": [assertions[identifier] for identifier in chosen], "paths": paths, "reviewRequiredAssertionIds": sorted(review_required), "discoveryTree": paths[0]["hops"], "exploredAssertionCount": len(identifiers), "searchDepth": depth, "direction": args.direction, "pathMeaning": "Paths are candidates, not verified conclusions. Run review_path; reject flagged or irrelevant hops and search again with exclude_assertion_ids. Each hop preserves its recorded direction.", "coverage": "Bounded candidate search only; unreturned paths are not proof of absence"}
+    if args.max_depth > 6 or session.warnings and "Targeted path query stopped; continuing with bounded graph traversal." in session.warnings:
+        result = traverse(session, [args.source_entity_id], args.max_depth, args.direction, args.predicates, 100, target=args.target_entity_id, path_limit=args.limit, excluded_assertion_ids=args.exclude_assertion_ids)
+        selected = result.get("items", [])
+        result["reviewRequiredAssertionIds"] = sorted(item["id"] for item in selected if item["extraction"].get("traversalStatus") == "needs_context_review")
+        result["searchDepth"] = result["paths"][0]["hopCount"] if result.get("paths") else args.max_depth
+        return result
     return {"items": [], "paths": [], "searchDepth": args.max_depth, "direction": args.direction, "coverage": "Bounded path search only; no path does not prove no connection"}
 
 

@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { ArrowLeft, ArrowUp, ArrowUpRight, ChevronDown, FileText, Loader2, MessageSquare, Moon, Network, Pause, PanelLeftClose, PanelLeftOpen, Paperclip, Play, Plus, Settings2, Sun, Upload, X } from 'lucide-react';
 import type { ImperativePanelHandle } from 'react-resizable-panels';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
-import { Switch } from '@/components/ui/switch';
 import { ChatResponse } from './ChatResponse';
 import { streamChat, type ChatTurn, type ChatSource, type ChatResult, type ChatEvent, type SavedChat, type ChatCoverage, type ChatConversation } from '@/lib/chat';
 import { ProjectSources } from '@/components/source-explorer/ProjectSources';
@@ -13,10 +12,22 @@ import { projectApi, projectRoot, type Project, type ProcessingEvent } from '@/l
 import { normalizeSourceDocument } from '@/lib/ingestion-types';
 import { GraphMap, type MapNode } from '@/components/source-explorer/GraphMap';
 import { KnowledgeGraph } from '@/components/source-explorer/KnowledgeGraph';
-import { useSearchOptions } from '@/hooks/use-search-options';
 import { api, type DocumentSummary, type EvidenceDocument } from '@/lib/evidence-types';
 import { statusLabel, type IngestionJob } from '@/lib/ingestion-types';
 
+type EngineSettings = { graphHops: number; hybridSearch: boolean; rrfSearch: boolean };
+const DEFAULT_ENGINE_SETTINGS: EngineSettings = { graphHops: 5, hybridSearch: true, rrfSearch: true };
+
+function storedEngineSettings(projectId: string): EngineSettings {
+  try {
+    const saved = JSON.parse(localStorage.getItem(`argus-engine:${projectId}`) || '{}') as Partial<EngineSettings>;
+    return {
+      graphHops: Number.isInteger(saved.graphHops) && (saved.graphHops ?? 0) >= 2 && (saved.graphHops ?? 11) <= 10 ? saved.graphHops! : 5,
+      hybridSearch: typeof saved.hybridSearch === 'boolean' ? saved.hybridSearch : true,
+      rrfSearch: typeof saved.rrfSearch === 'boolean' ? saved.rrfSearch : true,
+    };
+  } catch { return DEFAULT_ENGINE_SETTINGS; }
+}
 
 
 function savedRuns(projectId: string): string[] {
@@ -49,6 +60,7 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const [graphFullscreen, setGraphFullscreen] = useState(false);
   const [graphCompact, setGraphCompact] = useState(false);
   const [configurationOpen, setConfigurationOpen] = useState(false);
+  const [engineSettings, setEngineSettings] = useState<EngineSettings>(DEFAULT_ENGINE_SETTINGS);
   const [uploadRequest, setUploadRequest] = useState(0);
   const [documentId, setDocumentId] = useState<string>();
   const [document, setDocument] = useState<EvidenceDocument | null>(null);
@@ -66,7 +78,6 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const [chatConfig, setChatConfig] = useState<{model: string; coverage: ChatCoverage} | null>(null);
   const [busy, setBusy] = useState(false);
   const [activeTurnId, setActiveTurnId] = useState<string>();
-  const { options, updateOptions } = useSearchOptions('source-workspace');
   const messages = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const nodeDialog = useRef<HTMLDialogElement>(null);
@@ -75,6 +86,7 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
   const graphPanel = useRef<ImperativePanelHandle>(null);
 
   useEffect(() => {
+    setEngineSettings(storedEngineSettings(projectId));
     void workspaceApi<{model: string; coverage: ChatCoverage}>('/chat-config').then(setChatConfig).catch(() => undefined);
     const active = localStorage.getItem(`argus-conversation:${projectId}`);
     void workspaceApi<{conversations: ChatConversation[]}>('/chat/history').then(async result => {
@@ -94,6 +106,11 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
     setDark(value);
     window.document.documentElement.classList.toggle('dark', value);
   }, []);
+
+  const updateEngineSettings = (next: EngineSettings) => {
+    setEngineSettings(next);
+    localStorage.setItem(`argus-engine:${projectId}`, JSON.stringify(next));
+  };
 
   const openConversation = async (item: ChatConversation) => {
     if (busy) return;
@@ -300,7 +317,7 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
     const activeConversation = conversationId || crypto.randomUUID();
     if (!conversationId) setConversationId(activeConversation);
     localStorage.setItem(`argus-conversation:${projectId}`, activeConversation);
-    try { await streamChat(`${root}/chat`, {query: value, history, graph_expansion: options.graphExpansion, conversation_id: activeConversation}, event => receive(id, event)); }
+    try { await streamChat(`${root}/chat`, {query: value, history, conversation_id: activeConversation, graph_hops: engineSettings.graphHops, hybrid_search: engineSettings.hybridSearch, rrf_search: engineSettings.rrfSearch}, event => receive(id, event)); }
     catch (failure) { setTurns(previous => previous.map(turn => turn.id === id ? {...turn, error: failure instanceof Error ? failure.message : 'The request failed. Please retry.'} : turn)); }
     finally { setBusy(false); }
   };
@@ -318,7 +335,20 @@ export function SourceWorkspace({ projectId }: { projectId: string }) {
       <button className="ce-session ce-new-chat" onClick={() => { const next = crypto.randomUUID(); setConversationId(next); localStorage.setItem(`argus-conversation:${projectId}`, next); setTurns([]); setQuery(''); composer.current?.focus(); }} disabled={busy}><Plus size={17} /><span>New chat</span></button>
       <button className="ce-session active" onClick={() => messages.current?.scrollTo({ top: 0, behavior: 'smooth' })}><MessageSquare size={16} /><span>Current conversation</span></button>
       {!!conversations.length && <div className="ce-chat-history" aria-label="Saved conversations">{conversations.slice(0, 20).map(item => <button key={item.id} type="button" className={`ce-session ${item.id === conversationId ? 'active' : ''}`} onClick={() => void openConversation(item)} disabled={busy} title={item.title}><MessageSquare size={14} /><span>{item.title}</span></button>)}</div>}
-      <div className="ce-sidebar-bottom"><div className="ce-engine"><button className={`ce-theme ${configurationOpen ? 'is-active' : ''}`} onClick={() => setConfigurationOpen(previous => !previous)} aria-label="Engine configuration" aria-controls="engine-configuration" aria-expanded={configurationOpen}><Settings2 size={16} /><span>Engine configuration</span></button>{configurationOpen && <section id="engine-configuration" className="ce-configuration" aria-label="Engine configuration"><div><strong>Engine configuration</strong><button className="ce-icon" onClick={() => setConfigurationOpen(false)} aria-label="Close engine configuration"><X size={16} /></button></div><label><span>Graph expansion<small>Follow shared connections after search</small></span><Switch checked={options.graphExpansion} onCheckedChange={checked => updateOptions({ graphExpansion: checked })} /></label><p>{chatConfig?.model.toUpperCase() || 'GPT-5'} · {chatConfig?.coverage.publishedDocuments ?? '…'} searchable sources in this project.</p><p>{project?.description || 'Add sources to describe this workspace.'}</p></section>}</div><div className="ce-user"><span className="ce-avatar"><img src="/argus-logo.svg" alt="" width={24} height={24} /></span><strong>Test User</strong></div><div className="ce-sidebar-utility-row"><ProcessingActivity projectId={projectId} events={processingEvents} connected={streamConnected} /><button className="ce-theme ce-theme-compact" onClick={toggleTheme} aria-label={`Switch to ${dark ? 'light' : 'dark'} mode`} title={`Switch to ${dark ? 'light' : 'dark'} mode`}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button></div></div>
+      <div className="ce-sidebar-bottom">
+        <div className="ce-engine">
+          <button className={`ce-theme ${configurationOpen ? 'is-active' : ''}`} onClick={() => setConfigurationOpen(previous => !previous)} aria-label="Engine configuration" aria-controls="engine-configuration" aria-expanded={configurationOpen}><Settings2 size={16} /><span>Engine configuration</span></button>
+          {configurationOpen && <section id="engine-configuration" className="ce-configuration" aria-label="Engine configuration">
+            <div><strong>Engine configuration</strong><button className="ce-icon" onClick={() => setConfigurationOpen(false)} aria-label="Close engine configuration"><X size={16} /></button></div>
+            <div className="ce-engine-setting"><div className="ce-engine-setting-heading"><label htmlFor="graph-hops">Graph hops</label><output htmlFor="graph-hops">{engineSettings.graphHops}</output></div><input id="graph-hops" type="range" min="2" max="10" step="1" value={engineSettings.graphHops} onChange={event => updateEngineSettings({...engineSettings, graphHops: Number(event.target.value)})} /><div className="ce-engine-range-labels"><span>2</span><span>10</span></div><small>Maximum relationship hops explored per source search and path.</small></div>
+            <label className="ce-engine-toggle"><span><strong>Hybrid search</strong><small>Search passages with vectors and BM25. Off uses vectors only.</small></span><input type="checkbox" checked={engineSettings.hybridSearch} onChange={event => updateEngineSettings({...engineSettings, hybridSearch: event.target.checked})} /></label>
+            <label className="ce-engine-toggle"><span><strong>RRF ranking</strong><small>Combine vector and BM25 ranks. Off puts vector hits first.</small></span><input type="checkbox" checked={engineSettings.rrfSearch} disabled={!engineSettings.hybridSearch} onChange={event => updateEngineSettings({...engineSettings, rrfSearch: event.target.checked})} /></label>
+            <p>Settings apply to new investigations. {chatConfig?.model.toUpperCase() || 'GPT-5'} · {chatConfig?.coverage.publishedDocuments ?? '…'} searchable sources.</p>
+          </section>}
+        </div>
+        <div className="ce-user"><span className="ce-avatar"><img src="/argus-logo.svg" alt="" width={24} height={24} /></span><strong>Test User</strong></div>
+        <div className="ce-sidebar-utility-row"><ProcessingActivity projectId={projectId} events={processingEvents} connected={streamConnected} /><button className="ce-theme ce-theme-compact" onClick={toggleTheme} aria-label={`Switch to ${dark ? 'light' : 'dark'} mode`} title={`Switch to ${dark ? 'light' : 'dark'} mode`}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button></div>
+      </div>
     </aside>
     <main className="ce-main">
       <ResizablePanelGroup direction="horizontal" className="ce-panels">

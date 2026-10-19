@@ -13,7 +13,10 @@ class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query: str = Field(min_length=1, max_length=4000)
     history: list[HistoryMessage] = Field(default_factory=list, max_length=8)
-    graph_expansion: bool = True
+    graph_expansion: bool = Field(default=True, description="Legacy request field retained for compatibility; graph traversal is always enabled for source questions.")
+    graph_hops: int = Field(default=5, ge=2, le=10)
+    hybrid_search: bool = True
+    rrf_search: bool = True
     conversation_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
     @field_validator("query")

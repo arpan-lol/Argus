@@ -14,6 +14,8 @@ class Arguments(BaseModel):
 class SearchSources(Arguments):
     query: str = Field(min_length=1, max_length=2000)
     mode: Literal["lexical", "vector", "hybrid"] = "hybrid"
+    graph_hops: int = Field(default=5, ge=2, le=10)
+    rrf_search: bool = True
     limit: int = Field(default=10, ge=1, le=30)
     document_id: str | None = Field(default=None, max_length=256)
 
@@ -62,7 +64,7 @@ class InspectAssertions(Arguments):
 
 class ExpandConnections(Arguments):
     entity_ids: list[Identifier] = Field(min_length=1, max_length=20)
-    depth: int = Field(default=1, ge=1, le=3)
+    depth: int = Field(default=1, ge=1, le=10)
     direction: Literal["outgoing", "incoming", "both"] = "both"
     predicates: list[Predicate] = Field(default_factory=list, max_length=10)
     limit: int = Field(default=40, ge=1, le=100)
@@ -71,7 +73,7 @@ class ExpandConnections(Arguments):
 class FindPaths(Arguments):
     source_entity_id: str = Field(min_length=1, max_length=256)
     target_entity_id: str = Field(min_length=1, max_length=256)
-    max_depth: int = Field(default=3, ge=1, le=6)
+    max_depth: int = Field(default=5, ge=1, le=10)
     direction: Literal["outgoing", "incoming", "both"] = "both"
     predicates: list[Predicate] = Field(default_factory=list, max_length=10)
     exclude_assertion_ids: list[Identifier] = Field(default_factory=list, max_length=24, description="Previously inspected assertions to avoid when backtracking to another path.")

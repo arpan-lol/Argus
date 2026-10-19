@@ -37,7 +37,7 @@ class Session:
         self.cache = {}
         self.manifest = {}
         self.jobs = []
-        self.limits = {"databaseCalls": 64, "elapsedMs": 30000, "elapsedPolicy": "soft admission budget; in-flight operations and final consistency/persistence may finish later", "graphQueryMs": 1500, "sqlQueryMs": 1500, "publicationSnapshot": 10000, "annCandidates": 240, "fanout": 20, "frontier": 40, "outputCharacters": 64000, "chunkCharacters": 12000}
+        self.limits = {"databaseCalls": 64, "elapsedMs": 30000, "elapsedPolicy": "soft admission budget; in-flight operations and final consistency/persistence may finish later", "graphQueryMs": 1500, "sqlQueryMs": 1500, "publicationSnapshot": 10000, "annCandidates": 240, "fanout": 20, "frontier": 100, "outputCharacters": 64000, "chunkCharacters": 12000}
         rows = self.sql("SELECT p.job_id,p.source_id,p.published_at,j.revision,j.processing_version FROM ingestion_publications p JOIN ingestion_jobs j ON j.id=p.job_id JOIN published_documents d ON d.id=p.source_id WHERE p.active AND p.counts->>'graph'=%s AND d.metadata->>'revisionId'=j.revision AND d.metadata->>'processingVersion'=j.processing_version ORDER BY p.source_id LIMIT 10001", (self.graph_name,), "publication snapshot")
         if len(rows) > self.limits["publicationSnapshot"]:
             self.truncate("Publication snapshot capped at 10000 sources; search covers that snapshot only")
