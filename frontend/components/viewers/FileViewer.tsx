@@ -1,8 +1,6 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { Button } from '@/components/ui/button';
-import { Download, FileX } from 'lucide-react';
 
 const PDFViewer = dynamic(() => import('./PDFViewer'), {
   ssr: false,
@@ -38,6 +36,7 @@ interface FileViewerProps {
   fileUrl: string;
   filename: string;
   fileType: string;
+  fallbackText?: string;
   currentPage?: number;
   onPageChange?: (page: number) => void;
 }
@@ -55,16 +54,9 @@ function getFileTypeFromFilename(filename: string): string {
   return 'unknown';
 }
 
-export default function FileViewer({ fileUrl, filename, fileType, currentPage = 1, onPageChange }: FileViewerProps) {
+export default function FileViewer({ fileUrl, filename, fileType, fallbackText, currentPage = 1, onPageChange }: FileViewerProps) {
   const detectedType = getFileTypeFromFilename(filename);
   const type = detectedType !== 'unknown' ? detectedType : fileType;
-
-  const handleDownload = () => {
-    const link = document.createElement('a');
-    link.href = fileUrl;
-    link.download = filename;
-    link.click();
-  };
 
   if (type === 'pdf') {
     return (
@@ -93,17 +85,8 @@ export default function FileViewer({ fileUrl, filename, fileType, currentPage = 
   }
 
   if (type === 'presentation') {
-    return <PresentationViewer fileUrl={fileUrl} filename={filename} />;
+    return fallbackText !== undefined ? <TextViewer fileUrl={fileUrl} filename={filename} textContent={fallbackText} /> : <PresentationViewer fileUrl={fileUrl} filename={filename} />;
   }
 
-  return (
-    <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
-      <FileX className="h-16 w-16 mb-4 opacity-50" />
-      <p className="text-sm mb-4">This file type cannot be previewed</p>
-      <Button onClick={handleDownload} variant="outline">
-        <Download className="h-4 w-4 mr-2" />
-        Download file
-      </Button>
-    </div>
-  );
+  return <TextViewer fileUrl={fileUrl} filename={filename} textContent={fallbackText} />;
 }

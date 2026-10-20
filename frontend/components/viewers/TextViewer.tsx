@@ -10,15 +10,22 @@ import { Copy, Download, Loader2 } from 'lucide-react';
 interface TextViewerProps {
   fileUrl: string;
   filename: string;
+  textContent?: string;
 }
 
-export default function TextViewer({ fileUrl, filename }: TextViewerProps) {
+export default function TextViewer({ fileUrl, filename, textContent }: TextViewerProps) {
   const [copyStatus, setCopyStatus] = useState('Copy');
   const [content, setContent] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (textContent !== undefined) {
+      setContent(textContent);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     const fetchContent = async () => {
       setLoading(true);
       setError(null);
@@ -35,7 +42,7 @@ export default function TextViewer({ fileUrl, filename }: TextViewerProps) {
     };
 
     fetchContent();
-  }, [fileUrl]);
+  }, [fileUrl, textContent]);
 
   const handleCopy = async () => {
     try {
@@ -79,6 +86,7 @@ export default function TextViewer({ fileUrl, filename }: TextViewerProps) {
       )}
       {!loading && !error && (
         <>
+          {textContent !== undefined && <p className="px-4 pt-2 text-xs text-muted-foreground">Text extracted from the original file</p>}
           <ScrollArea className="flex-1 bg-muted/30 rounded-lg p-4">
             <pre className="text-sm font-mono whitespace-pre-wrap break-words">
               {displayContent}
